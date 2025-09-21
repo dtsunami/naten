@@ -1,0 +1,10 @@
+{
+  "tools": {
+    "python": {
+      "launch_command": "python -i -u",
+      "prompt_string": ">>>",
+      "working_directory": ".",
+      "timeout": 120
+    }
+  }
+}

@@ -1,0 +1,269 @@
+# FileIO MCP Server - Git Ignore
+# Python, Docker, Testing, and Development artifacts
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Testing and Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+htmlcov/
+.tox/
+.nox/
+reports/
+benchmark-results.json
+junit-*.xml
+coverage-*.xml
+
+# MyPy type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Logs and Data
+*.log
+logs/
+*.log.*
+log/
+
+# MongoDB data
+mongo-data/
+mongodb/
+
+# Test data
+test-data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Security files
+*.key
+*.pem
+*.p12
+*.keystore
+secrets/
+.secrets/
+
+# Environment files (add to template)
+.env.local
+.env.*.local
+config-local.json
+*-local.json
+
+# Development tools
+.pre-commit-config.yaml.bak
+
+# CI/CD artifacts
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+
+# Package manager files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+node_modules/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Local configuration overrides
+config-dev.json
+config-test.json
+local-config.json
+
+# Performance profiling
+profile_*
+*.prof
+
+# Documentation builds
+docs/_build/
+site/
+
+# JetBrains IDEs
+.idea/
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Vim
+*.swp
+*.swo
+*.un~
+
+# Application specific
+mcp_executions.json
+fileio_mcp.egg-info/
+*.pid
+
+# Flask/FastAPI instance folder
+instance/
+
+# Scrapy stuff
+.scrapy
+
+# PyBuilder
+target/
+
+# IPython
+profile_default/
+ipython_config.py
+*.ipynb_checkpoints/
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# mypy
+.mypy_cache/
+.dmypi.json
+dmypi.json
+
+# Pyre
+.pyre/
+
+# pytype
+.pytype/
+
+# Cython
+cython_debug/
+
+# PyCharm
+.idea/
+
+# Local docker overrides
+docker-compose.override.yml
+docker-compose.local.yml
+
+# Kubernetes
+*.kubeconfig
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Ansible
+*.retry
+
+# Local development certificates
+*.crt
+*.csr
+
+# Binary files that shouldn't be tracked
+*.exe
+*.dll
+*.dylib
+*.so.*

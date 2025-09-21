@@ -1,0 +1,406 @@
+# n8n Docker Stack with MCP Servers
+# Complete containerized setup for n8n workflow automation with integrated databases and MCP servers
+
+# Common MongoDB configuration for all services
+x-mongo-common: &mongo-common
+  MONGO_URI: ${MONGO_URI}
+  MONGO_HOST: ${MONGO_HOST}
+  MONGO_PORT: ${MONGO_PORT}
+  MONGO_USER: ${MONGO_USER}
+  MONGO_PASSWORD: ${MONGO_PASSWORD}
+  MONGO_DATABASE: ${MONGO_DATABASE}
+
+# Common environment configurations
+x-n8n-common: &n8n-common
+  <<: *mongo-common
+  DB_TYPE: postgresdb
+  DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST}
+  DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT}
+  DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE}
+  DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER}
+  DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+  QUEUE_BULL_REDIS_HOST: ${REDIS_HOST}
+  QUEUE_BULL_REDIS_PORT: ${REDIS_PORT}
+  EXECUTIONS_MODE: queue
+  N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+  N8N_HOST: ${N8N_HOST}
+  N8N_PORT: ${N8N_PORT}
+  N8N_PROTOCOL: ${N8N_PROTOCOL}
+  WEBHOOK_URL: ${WEBHOOK_URL}
+  GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+  TZ: ${TZ}
+  N8N_METRICS: ${N8N_METRICS}
+  N8N_DIAGNOSTICS_ENABLED: ${N8N_DIAGNOSTICS_ENABLED}
+  N8N_VERSION_NOTIFICATIONS_ENABLED: ${N8N_VERSION_NOTIFICATIONS_ENABLED}
+  N8N_TEMPLATES_ENABLED: ${N8N_TEMPLATES_ENABLED}
+  EXTERNAL_FRONTEND_HOOKS_URLS: ${EXTERNAL_FRONTEND_HOOKS_URLS}
+  N8N_DIAGNOSTICS_CONFIG_FRONTEND: ${N8N_DIAGNOSTICS_CONFIG_FRONTEND}
+  N8N_DIAGNOSTICS_CONFIG_BACKEND: ${N8N_DIAGNOSTICS_CONFIG_BACKEND}
+  N8N_RUNNERS_ENABLED: ${N8N_RUNNERS_ENABLED}
+  OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: ${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS}
+  N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE}
+  N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
+  N8N_USER_MANAGEMENT_DISABLED: ${N8N_USER_MANAGEMENT_DISABLED}
+  N8N_PERSONALIZATION_ENABLED: ${N8N_PERSONALIZATION_ENABLED}
+  N8N_LICENSE_ACTIVATION_KEY: ${N8N_LICENSE_ACTIVATION_KEY}
+  N8N_LOG_OUTPUT: ${N8N_LOG_OUTPUT}
+  N8N_LOG_FILE: ${N8N_LOG_FILE}
+  N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE}
+  QUEUE_HEALTH_CHECK_ACTIVE: ${QUEUE_HEALTH_CHECK_ACTIVE}
+  N8N_LOG_LEVEL: ${N8N_LOG_LEVEL}
+
+# Common environment for MCP servers
+x-mcp-common: &mcp-common
+  restart: unless-stopped
+  networks:
+    - netn8n
+  volumes:
+    - "./mcp/logs:/app/logs"  # Shared logging directory
+  environment:
+    <<: *mongo-common
+
+services:
+  # n8n GUI Service
+  n8ngui:
+    image: n8nio/n8n:latest
+    container_name: n8ngui
+    user: "0:0"
+    ports:
+      - "${N8N_PORT}:5678"
+    environment:
+      <<: *n8n-common
+    volumes:
+      - "./naten/n8ngui:/home/node/.n8n"
+      - "./work/ingress:/data/ingress"
+      - "./work/wip:/data/wip"
+      - "./work/completed:/data/completed"
+    restart: unless-stopped
+    depends_on:
+      pgn8n:
+        condition: service_healthy
+      pgvect:
+        condition: service_healthy
+      pgchat:
+        condition: service_healthy
+      redisn8n:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - netn8n
+
+  # n8n Worker Service
+  n8nwork:
+    image: n8nio/n8n:latest
+    container_name: n8nwork
+    command: worker
+    user: "0:0"
+    environment:
+      <<: *n8n-common
+    volumes:
+      - "./naten/n8nwork:/home/node/.n8n"
+      - "./work/ingress:/data/ingress"
+      - "./work/wip:/data/wip"
+      - "./work/completed:/data/completed"
+    restart: unless-stopped
+    depends_on:
+      pgn8n:
+        condition: service_healthy
+      pgvect:
+        condition: service_healthy
+      pgchat:
+        condition: service_healthy
+      redisn8n:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - netn8n
+
+  # PostgreSQL Main Database (n8n workflows)
+  pgn8n:
+    image: postgres:15
+    container_name: pgn8n
+    environment:
+      - POSTGRES_DB=${DB_POSTGRESDB_DATABASE}
+      - POSTGRES_USER=${DB_POSTGRESDB_USER}
+      - POSTGRES_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+    volumes:
+      - "./naten/pgn8n:/var/lib/postgresql/data"
+    ports:
+      - "${DB_POSTGRESDB_EXTERNAL_PORT}:5432"
+    networks:
+      - netn8n
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER} -d ${DB_POSTGRESDB_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL Vector Database
+  pgvect:
+    image: pgvector/pgvector:pg15
+    container_name: pgvect
+    environment:
+      - POSTGRES_DB=${VECTOR_DB_DATABASE}
+      - POSTGRES_USER=${VECTOR_DB_USER}
+      - POSTGRES_PASSWORD=${VECTOR_DB_PASSWORD}
+    volumes:
+      - "./naten/pgvect:/var/lib/postgresql/data"
+    ports:
+      - "${VECTOR_DB_EXTERNAL_PORT}:5432"
+    networks:
+      - netn8n
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${VECTOR_DB_USER} -d ${VECTOR_DB_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL Chat Memory Database
+  pgchat:
+    image: postgres:15
+    container_name: pgchat
+    environment:
+      - POSTGRES_DB=${CHAT_DB_DATABASE}
+      - POSTGRES_USER=${CHAT_DB_USER}
+      - POSTGRES_PASSWORD=${CHAT_DB_PASSWORD}
+    volumes:
+      - "./naten/pgchat:/var/lib/postgresql/data"
+    ports:
+      - "${CHAT_DB_EXTERNAL_PORT}:5432"
+    networks:
+      - netn8n
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CHAT_DB_USER} -d ${CHAT_DB_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Queue and Cache
+  redisn8n:
+    image: redis:7-alpine
+    container_name: redisn8n
+    command: redis-server --appendonly yes
+    volumes:
+      - "./naten/redisn8n:/data"
+    ports:
+      - "${REDIS_EXTERNAL_PORT}:6379"
+    networks:
+      - netn8n
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB Document Storage (moved to parent directory)
+  mongo:
+    image: mongo:7
+    container_name: mongo
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+      - MONGO_INITDB_DATABASE=${MONGO_DATABASE}
+    volumes:
+      - "./mongo:/data/db"
+    ports:
+      - "${MONGO_EXTERNAL_PORT}:27017"
+    networks:
+      - netn8n
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FileIO MCP Server
+  fileio:
+    <<: *mcp-common
+    build:
+      context: ./mcp/fileio
+      dockerfile: Dockerfile
+    image: fileio:advanced0
+    container_name: fileio_mcp
+    environment:
+      <<: *mongo-common
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: 1
+      MCP_SERVER_NAME: fileio
+      CONFIG_PATH: /app/config.json
+      FILEIO_BASE_PATH: ${FILEIO_BASE_PATH}
+      FILEIO_ALLOWED_DIRS: ${FILEIO_ALLOWED_DIRS}
+      FILEIO_HOST: ${FILEIO_HOST}
+      FILEIO_PORT: ${FILEIO_PORT}
+      FILEIO_MAX_FILE_SIZE: ${FILEIO_MAX_FILE_SIZE}
+    volumes:
+      - "${FILEIO_VOLUME_SOURCE}:${FILEIO_BASE_PATH}:${FILEIO_VOLUME_MODE}"
+    ports:
+      - "${FILEIO_PORT}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "mcp.server=fileio"
+      - "mcp.type=file-operations"
+
+  # Python ToolSession MCP Server
+  python:
+    <<: *mcp-common
+    build:
+      context: ./mcp/toolsession
+      dockerfile: Dockerfile
+    image: toolsession:fixed
+    container_name: python_mcp
+    environment:
+      <<: *mongo-common
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: 1
+      MCP_SERVER_NAME: toolsession
+      TOOLSESSION_HOST: ${TOOLSESSION_HOST}
+      TOOLSESSION_PORT: ${TOOLSESSION_PORT}
+      TOOLSESSION_TOOL_NAME: ${TOOLSESSION_TOOL_NAME}
+      TOOLSESSION_LAUNCH_COMMAND: ${TOOLSESSION_LAUNCH_COMMAND}
+      TOOLSESSION_PROMPT_STRING: ${TOOLSESSION_PROMPT_STRING}
+      TOOLSESSION_WORKING_DIRECTORY: ${TOOLSESSION_WORKING_DIRECTORY}
+      TOOLSESSION_TIMEOUT: ${TOOLSESSION_TIMEOUT}
+    volumes:
+      - "./work:/work:rw"
+      - "./mcp/logs:/app/logs"
+    ports:
+      - "${TOOLSESSION_PORT}:8002"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "mcp.server=python"
+      - "mcp.type=interactive-sessions"
+
+  # Search MCP Server
+  search:
+    <<: *mcp-common
+    build:
+      context: ./mcp/search
+      dockerfile: Dockerfile
+    image: search:latest
+    container_name: search_mcp
+    environment:
+      SEARCH_PORT: ${SEARCH_PORT}
+    ports:
+      - "${SEARCH_PORT}:8003"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "mcp.server=search"
+      - "mcp.type=web-search"
+
+  # MongoDB MCP Server
+  mcpmongo:
+    <<: *mcp-common
+    build:
+      context: ./mcp/mongo
+      dockerfile: Dockerfile
+    image: mongo-mcp:fixed
+    container_name: mongo_mcp
+    environment:
+      <<: *mongo-common
+      MONGO_MCP_HOST: 0.0.0.0
+      MONGO_MCP_PORT: ${MONGO_MCP_PORT}
+    ports:
+      - "${MONGO_MCP_PORT}:8004"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "mcp.server=mcpmongo"
+      - "mcp.type=database-operations"
+
+  # MCP Gateway (nginx proxy for MCP services)
+  mcp-gateway:
+    image: nginx:alpine
+    container_name: mcp_gateway
+    ports:
+      - "${MCP_GATEWAY_PORT}:80"
+    volumes:
+      - "./mcp/gateway/nginx.conf:/etc/nginx/nginx.conf:ro"
+      - "./mcp/logs:/var/log/nginx"
+    depends_on:
+      - fileio
+      - python
+    networks:
+      - netn8n
+    restart: unless-stopped
+    labels:
+      - "mcp.component=gateway"
+
+  # Services Health Dashboard
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    image: dashboard:orenco
+    container_name: dashboard
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    environment:
+      <<: *n8n-common
+      VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD}
+      CHAT_DB_PASSWORD: ${CHAT_DB_PASSWORD}
+      N8N_PORT: ${N8N_PORT}
+      FILEIO_PORT: ${FILEIO_PORT}
+      TOOLSESSION_PORT: ${TOOLSESSION_PORT}
+      SEARCH_PORT: ${SEARCH_PORT}
+      MONGO_MCP_PORT: ${MONGO_MCP_PORT}
+      GATEWAY_PORT: ${MCP_GATEWAY_PORT}
+      DASHBOARD_PORT: ${DASHBOARD_PORT}
+
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    depends_on:
+      - n8ngui
+      - fileio
+      - python
+      - pgn8n
+      - pgvect
+      - pgchat
+      - redisn8n
+      - mongo
+      - mcp-gateway
+    networks:
+      - netn8n
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "dashboard.component=health-monitor"
+
+networks:
+  netn8n:
+    driver: bridge
+
+volumes:
+  mcp_logs:
+    driver: local

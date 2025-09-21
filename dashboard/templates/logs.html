@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ service_name }} - Logs</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/rancher_dark.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .logs-container {
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 2rem;
+        }
+        .logs-header {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px 8px 0 0;
+            padding: 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logs-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .logs-subtitle {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+        .logs-controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        .logs-controls select,
+        .logs-controls button {
+            background-color: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .logs-controls select:hover,
+        .logs-controls button:hover {
+            background-color: var(--bg-hover);
+            border-color: var(--border-hover);
+        }
+        .logs-viewer {
+            background-color: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-top: none;
+            border-radius: 0 0 8px 8px;
+            padding: 1.5rem;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+            font-size: 0.875rem;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: var(--text-secondary);
+            max-height: 70vh;
+            overflow-y: auto;
+            background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+        }
+        .logs-viewer::-webkit-scrollbar {
+            width: 8px;
+        }
+        .logs-viewer::-webkit-scrollbar-track {
+            background: var(--bg-tertiary);
+        }
+        .logs-viewer::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+        .logs-viewer::-webkit-scrollbar-thumb:hover {
+            background: var(--border-hover);
+        }
+        .log-line {
+            margin-bottom: 0.25rem;
+        }
+        .log-timestamp {
+            color: var(--text-muted);
+            margin-right: 1rem;
+        }
+        .nav-links {
+            margin-bottom: 2rem;
+        }
+        .nav-links a {
+            color: var(--info);
+            text-decoration: none;
+            font-size: 0.875rem;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+        .auto-refresh {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="logs-container">
+        <div class="nav-links">
+            <a href="/">← Back to Dashboard</a>
+        </div>
+
+        <div class="logs-header">
+            <div>
+                <div class="logs-title">{{ service_name }} Logs</div>
+                <div class="logs-subtitle">Container: {{ container_name }} | Lines: {{ lines }} | Last updated: {{ timestamp[:19] }}Z</div>
+            </div>
+            <div class="logs-controls">
+                <select id="logLines" onchange="updateLogs()">
+                    <option value="50" {% if lines == 50 %}selected{% endif %}>50 lines</option>
+                    <option value="100" {% if lines == 100 %}selected{% endif %}>100 lines</option>
+                    <option value="200" {% if lines == 200 %}selected{% endif %}>200 lines</option>
+                    <option value="500" {% if lines == 500 %}selected{% endif %}>500 lines</option>
+                    <option value="1000" {% if lines == 1000 %}selected{% endif %}>1000 lines</option>
+                </select>
+                <button onclick="refreshLogs()">🔄 Refresh</button>
+                <button onclick="scrollToBottom()">⬇️ Bottom</button>
+                <button onclick="toggleAutoRefresh()" id="autoRefreshBtn">▶️ Auto</button>
+            </div>
+        </div>
+
+        <div class="logs-viewer" id="logsContent">{{ logs }}</div>
+
+        <div class="auto-refresh">
+            <span id="autoRefreshStatus">Auto-refresh: Off</span>
+            <span id="autoRefreshCountdown"></span>
+        </div>
+    </div>
+
+    <script>
+        let autoRefreshInterval = null;
+        let autoRefreshCountdown = null;
+        let isAutoRefresh = false;
+
+        function formatLogs(logsText) {
+            if (!logsText) return 'No logs available';
+
+            return logsText.split('\n').map(line => {
+                if (!line.trim()) return '';
+
+                // Try to parse timestamp
+                const timestampMatch = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)\s+(.*)$/);
+                if (timestampMatch) {
+                    const [, timestamp, content] = timestampMatch;
+                    const date = new Date(timestamp);
+                    const formattedTime = date.toLocaleTimeString();
+                    return `<div class="log-line"><span class="log-timestamp">${formattedTime}</span>${content}</div>`;
+                }
+
+                return `<div class="log-line">${line}</div>`;
+            }).join('');
+        }
+
+        function refreshLogs() {
+            const lines = document.getElementById('logLines').value;
+            fetch(`/api/logs/{{ service_id }}?lines=${lines}`)
+                .then(response => response.json())
+                .then(data => {
+                    const logsContent = document.getElementById('logsContent');
+                    logsContent.innerHTML = formatLogs(data.logs);
+
+                    // Update timestamp
+                    const timestamp = new Date(data.timestamp).toISOString();
+                    document.querySelector('.logs-subtitle').innerHTML =
+                        `Container: ${data.container_name} | Lines: ${data.lines_requested} | Last updated: ${timestamp.slice(0, 19)}Z`;
+                })
+                .catch(error => {
+                    document.getElementById('logsContent').innerHTML = `Error loading logs: ${error}`;
+                });
+        }
+
+        function updateLogs() {
+            const lines = document.getElementById('logLines').value;
+            window.location.href = `/logs/{{ service_id }}?lines=${lines}`;
+        }
+
+        function scrollToBottom() {
+            const logsContent = document.getElementById('logsContent');
+            logsContent.scrollTop = logsContent.scrollHeight;
+        }
+
+        function toggleAutoRefresh() {
+            const btn = document.getElementById('autoRefreshBtn');
+            const status = document.getElementById('autoRefreshStatus');
+            const countdown = document.getElementById('autoRefreshCountdown');
+
+            if (isAutoRefresh) {
+                // Stop auto-refresh
+                clearInterval(autoRefreshInterval);
+                clearInterval(autoRefreshCountdown);
+                isAutoRefresh = false;
+                btn.textContent = '▶️ Auto';
+                status.textContent = 'Auto-refresh: Off';
+                countdown.textContent = '';
+            } else {
+                // Start auto-refresh
+                isAutoRefresh = true;
+                btn.textContent = '⏸️ Auto';
+                status.textContent = 'Auto-refresh: On (every 10s)';
+
+                let secondsLeft = 10;
+                countdown.textContent = ` - Next refresh in ${secondsLeft}s`;
+
+                autoRefreshCountdown = setInterval(() => {
+                    secondsLeft--;
+                    countdown.textContent = ` - Next refresh in ${secondsLeft}s`;
+
+                    if (secondsLeft <= 0) {
+                        secondsLeft = 10;
+                    }
+                }, 1000);
+
+                autoRefreshInterval = setInterval(() => {
+                    refreshLogs();
+                    secondsLeft = 10;
+                }, 10000);
+            }
+        }
+
+        // Format logs on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            const logsContent = document.getElementById('logsContent');
+            const rawLogs = logsContent.textContent;
+            logsContent.innerHTML = formatLogs(rawLogs);
+            scrollToBottom();
+        });
+    </script>
+</body>
+</html>

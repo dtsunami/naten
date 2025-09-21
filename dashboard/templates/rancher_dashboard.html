@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/rancher_dark.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="header-left">
+                    <h1 class="header-title">{{ page_title }}</h1>
+                    <div class="header-subtitle">Real-time container monitoring</div>
+                </div>
+                <div class="header-right">
+                    <div class="status-indicator {{ overall_status }}">
+                        <span class="status-dot"></span>
+                        <span class="status-text">{{ overall_status.upper() }}</span>
+                    </div>
+                    <div class="last-updated">
+                        Last updated: {{ last_updated[:19] }}Z
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Summary Stats -->
+        <div class="summary-stats">
+            <div class="stat-card">
+                <div class="stat-number">{{ total_services }}</div>
+                <div class="stat-label">Total Services</div>
+            </div>
+            <div class="stat-card healthy">
+                <div class="stat-number">{{ healthy_services }}</div>
+                <div class="stat-label">Healthy</div>
+            </div>
+            <div class="stat-card degraded">
+                <div class="stat-number">{{ degraded_services }}</div>
+                <div class="stat-label">Degraded</div>
+            </div>
+            <div class="stat-card unhealthy">
+                <div class="stat-number">{{ unhealthy_services }}</div>
+                <div class="stat-label">Unhealthy</div>
+            </div>
+        </div>
+
+        <!-- Services Table -->
+        <div class="services-container">
+            <div class="table-header">
+                <h2>Services</h2>
+                <div class="table-controls">
+                    <button class="refresh-btn" onclick="refreshServices()">
+                        <span class="refresh-icon">🔄</span>
+                        Refresh
+                    </button>
+                </div>
+            </div>
+
+            <div class="table-wrapper">
+                <table class="services-table">
+                    <thead>
+                        <tr>
+                            <th>Health</th>
+                            <th>Name</th>
+                            <th>Type</th>
+                            <th>Image</th>
+                            <th>Uptime</th>
+                            <th>URL/Port</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for service in services %}
+                        <tr class="service-row {{ service.status }}">
+                            <td>
+                                <div class="status-cell">
+                                    <span class="status-indicator {{ service.status }}"></span>
+                                    <span class="status-text">{{ service.status.title() }}</span>
+                                    {% if service.state and service.state != service.status %}
+                                        <span class="state-info">({{ service.state }})</span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td>
+                                <div class="service-name"
+                                     title="{{ service.description }}">
+                                    <div class="name hover-details">{{ service.name }}</div>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="type-badge {{ service.type }}">{{ service.type }}</span>
+                            </td>
+                            <td>
+                                <div class="image-cell">
+                                    {% if service.docker_hub_url and service.image %}
+                                        <a href="{{ service.docker_hub_url }}" target="_blank" class="docker-link" title="View on Docker Hub">
+                                            {{ service.image }}
+                                        </a>
+                                    {% else %}
+                                        {{ service.image if service.image else 'unknown' }}
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td>
+                                <div class="uptime-cell">
+                                    {{ service.uptime if service.uptime else 'N/A' }}
+                                </div>
+                            </td>
+                            <td>
+                                <div class="url-cell">
+                                    {% if service.external_url %}
+                                        <a href="{{ service.external_url }}" target="_blank" class="external-link">
+                                            {{ service.external_url.split('://')[1] }}
+                                        </a>
+                                    {% else %}
+                                        <span class="na">N/A</span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td>
+                                <div class="actions-cell">
+                                    <a href="/logs/{{ service.id }}" class="action-btn logs-btn" title="View Logs">
+                                        📋
+                                    </a>
+                                    <button class="action-btn restart-btn" onclick="restartService('{{ service.id }}', '{{ service.name }}')" title="Restart Container">
+                                        🔄
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% if service.error %}
+                        <tr class="error-row">
+                            <td colspan="7">
+                                <div class="error-message">
+                                    <strong>Error:</strong> {{ service.error }}
+                                </div>
+                            </td>
+                        </tr>
+                        {% endif %}
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Auto-refresh indicator -->
+        <div class="auto-refresh-indicator">
+            <span class="refresh-dot"></span>
+            Auto-refresh in <span id="countdown">30</span>s
+        </div>
+    </div>
+
+    <!-- Logs Modal -->
+    <div id="logsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="logsTitle">Service Logs</h3>
+                <div class="modal-controls">
+                    <select id="logLines">
+                        <option value="50">50 lines</option>
+                        <option value="100">100 lines</option>
+                        <option value="200">200 lines</option>
+                        <option value="500">500 lines</option>
+                    </select>
+                    <button class="modal-btn refresh" onclick="refreshLogs()">Refresh</button>
+                    <button class="modal-btn close" onclick="closeModal('logsModal')">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <pre id="logsContent" class="logs-content">Loading logs...</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Details Modal -->
+    <div id="detailsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="detailsTitle">Service Details</h3>
+                <button class="modal-btn close" onclick="closeModal('detailsModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="detailsContent" class="details-content">Loading details...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentServiceId = null;
+        let countdownTimer = 30;
+        let countdownInterval;
+
+        // Auto-refresh functionality
+        function startCountdown() {
+            countdownTimer = 30;
+            countdownInterval = setInterval(() => {
+                countdownTimer--;
+                document.getElementById('countdown').textContent = countdownTimer;
+                if (countdownTimer <= 0) {
+                    location.reload();
+                }
+            }, 1000);
+        }
+
+        function refreshServices() {
+            clearInterval(countdownInterval);
+            location.reload();
+        }
+
+        // Modal functions
+        function restartService(serviceId, serviceName) {
+            if (!confirm(`Are you sure you want to restart ${serviceName}?`)) {
+                return;
+            }
+
+            // Show loading state
+            const btn = event.target;
+            const originalText = btn.textContent;
+            btn.textContent = '⏳';
+            btn.disabled = true;
+
+            fetch(`/api/restart/${serviceId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert(`${serviceName} restarted successfully!`);
+                    // Refresh the page after a short delay
+                    setTimeout(() => {
+                        location.reload();
+                    }, 2000);
+                } else {
+                    alert(`Error restarting ${serviceName}: ${data.error}`);
+                }
+            })
+            .catch(error => {
+                alert(`Error restarting ${serviceName}: ${error}`);
+            })
+            .finally(() => {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            });
+        }
+
+        function showDetails(serviceId, serviceName) {
+            document.getElementById('detailsTitle').textContent = `${serviceName} - Details`;
+            document.getElementById('detailsModal').style.display = 'block';
+
+            fetch(`/api/services/${serviceId}`)
+                .then(response => response.json())
+                .then(data => {
+                    const content = document.getElementById('detailsContent');
+                    content.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                })
+                .catch(error => {
+                    document.getElementById('detailsContent').innerHTML = `<div class="error">Error loading details: ${error}</div>`;
+                });
+        }
+
+        function refreshLogs() {
+            if (!currentServiceId) return;
+
+            const lines = document.getElementById('logLines').value;
+            const logsContent = document.getElementById('logsContent');
+            logsContent.textContent = 'Loading logs...';
+
+            fetch(`/api/logs/${currentServiceId}?lines=${lines}`)
+                .then(response => response.json())
+                .then(data => {
+                    logsContent.textContent = data.logs || 'No logs available';
+                    logsContent.scrollTop = logsContent.scrollHeight;
+                })
+                .catch(error => {
+                    logsContent.textContent = `Error loading logs: ${error}`;
+                });
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            const modals = document.querySelectorAll('.modal');
+            modals.forEach(modal => {
+                if (event.target === modal) {
+                    modal.style.display = 'none';
+                }
+            });
+        }
+
+        // Initialize countdown on page load
+        startCountdown();
+    </script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+# Python
+.venv
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+**/build
+# Environment and secrets
+.env
+.env.local
+.env.production
+credentials/
+
+# Data directories (persistent volumes)
+naten/
+mongo/
+work/
+workflows/
+
+
+# Logs
+logs/
+*.log
+mcp/logs/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# n8n workflows
+*.json

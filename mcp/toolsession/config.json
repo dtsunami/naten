@@ -1,0 +1,54 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8002
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "/app/logs/toolsession.log"
+  },
+  "session": {
+    "output_file": "/app/logs/session_output.log"
+  },
+  "tools": {
+    "fusion_compiler": {
+      "environment_command": "source /tools/synopsys/setup.sh",
+      "launch_command": "fusion_compiler -shell -no_gui",
+      "prompt_string": "fusion> ",
+      "working_directory": "/project/work",
+      "timeout": 300
+    },
+    "ic_workbench": {
+      "launch_command": "ic_workbench -shell",
+      "prompt_string": "IC> ",
+      "working_directory": "/project/work",
+      "timeout": 300
+    },
+    "innovus": {
+      "environment_command": "source /tools/cadence/setup.sh",
+      "launch_command": "innovus -init /dev/null",
+      "prompt_string": "innovus> ",
+      "working_directory": "/project/work",
+      "timeout": 300
+    },
+    "genus": {
+      "environment_command": "source /tools/cadence/setup.sh",
+      "launch_command": "genus -legacy_ui",
+      "prompt_string": "genus> ",
+      "working_directory": "/project/work",
+      "timeout": 300
+    },
+    "bash": {
+      "launch_command": "bash",
+      "prompt_string": "$ ",
+      "working_directory": "/mnt/blk/lostboy",
+      "timeout": 60
+    },
+    "python": {
+      "launch_command": "python3 -i",
+      "prompt_string": ">>> ",
+      "working_directory": "/mnt/blk/lostboy",
+      "timeout": 60
+    }
+  }
+}
