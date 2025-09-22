@@ -3,19 +3,19 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "toolsession-mcp"
+name = "mongo-mcp"
 version = "1.0.0"
-description = "Interactive tool session management with DB persistence"
-authors = [{name = "ToolSession", email = "admin@toolsession.local"}]
+description = "MongoDB MCP Server - Database operations for MongoDB"
+authors = [{name = "MongoDB MCP", email = "admin@mongo-mcp.local"}]
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 dependencies = [
-    "fastapi",
-    "uvicorn",
-    "motor",
-    "pymongo",
-    "pydantic"
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "motor>=3.3.0",
+    "pymongo>=4.6.0",
+    "pydantic>=2.0.0"
 ]
 
 [project.optional-dependencies]
@@ -31,23 +31,15 @@ dev = [
 
 test = [
     "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
-    "aiohttp>=3.8.0"
+    "pytest-asyncio>=0.21.0"
 ]
 
 [project.scripts]
-toolsession-server = "server:main"
+mongo-mcp-server = "server:main"
 
 [tool.setuptools]
 packages = []
-py-modules = [
-    "toolsession_server",
-    "tools",
-    "mongo",
-    "test_python_session",
-    "launch_python_server",
-    "test_mcp_client"
-]
+py-modules = ["server"]
 
 [tool.black]
 line-length = 88

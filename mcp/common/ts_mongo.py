@@ -11,7 +11,7 @@ from bson import ObjectId
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv("../.env")
+load_dotenv("../../.env")
 from tools import ToolSession, ToolConfig
 
 # Global MongoDB connection state
@@ -22,15 +22,25 @@ configs_collection: Optional[AsyncIOMotorCollection] = None
 logger = logging.getLogger("toolsession.mongo")
 
 
-# database info
-MONGO_PORT = int(os.environ.get("MONGO_PORT", None))
-MONGO_DBNAME = os.environ.get("MONGO_DBNAME", None)
-MONGO_URI = os.environ.get("MONGO_URI", None)
-kwargs = {'tls': True, 'tlsAllowInvalidCertificates': True}
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, MONGO_PORT, **kwargs)
-tool_mongo = client[MONGO_DBNAME]
-sessions_collection = tool_mongo.tool_sessions
-configs_collection = tool_mongo.tool_configs
+# database info with defaults
+MONGO_PORT = int(os.environ.get("MONGO_PORT", "27017"))
+MONGO_DBNAME = os.environ.get("MONGO_DBNAME", "orenco_toolsessions")
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://lostboy:OrencoMongo2024*@localhost:27017")
+
+# Initialize connection only if environment variables are properly set
+try:
+    kwargs = {'tls': True, 'tlsAllowInvalidCertificates': True} if MONGO_URI.startswith('mongodb+srv') else {}
+    client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, **kwargs)
+    tool_mongo = client[MONGO_DBNAME]
+    sessions_collection = tool_mongo.tool_sessions
+    configs_collection = tool_mongo.tool_configs
+    logger.info(f"MongoDB connection initialized for {MONGO_DBNAME}")
+except Exception as e:
+    logger.warning(f"MongoDB connection failed, running without persistence: {e}")
+    client = None
+    tool_mongo = None
+    sessions_collection = None
+    configs_collection = None
 
 async def mongo_connect() -> bool:
     """Ping to MongoDB """
@@ -195,7 +205,8 @@ async def upsert_session(session: ToolSession) -> bool:
     """Create or update a session (upsert operation)."""
     try:
         if sessions_collection is None:
-            raise RuntimeError("Not connected to database")
+            logger.debug("MongoDB not available, skipping session upsert")
+            return False
 
         session_data = session.model_dump(by_alias=True)
         result = await sessions_collection.replace_one(

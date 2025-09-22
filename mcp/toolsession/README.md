@@ -1,21 +1,22 @@
 # ToolSession MCP Server
 
-Interactive tool session management for EDA tools and command-line interfaces.
+Persistent interactive tool session management using FastAPI and MCP protocol.
 
 ## Features
 
-- **Stateless Server Design**: No persistent sessions stored in server
-- **Interactive Shell Management**: Spawn tools, detect prompts, execute commands
-- **Multi-tool Support**: EDA tools (Fusion Compiler, Innovus, Genus) and general tools (bash, python)
-- **Real-time Output**: Monitor tool output with prompt detection
-- **Script Execution**: Execute scripts with temporary file handling
+- **Persistent Sessions**: Session starts automatically with server and runs until killed
+- **FastAPI-based**: HTTP MCP server using the proven FileIO MCP pattern
+- **Real-time I/O**: Captures command output with proper prompt detection
+- **Universal Tool Support**: Works with any command-line tool (Python, bash, etc.)
+- **Configuration Driven**: JSON config with environment variable overrides
+- **Thread-safe Output**: Concurrent output monitoring and command execution
 
 ## Architecture
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   MCP Client    │◄──►│  ToolSession    │◄──►│   EDA Tool      │
-│   (Claude)      │    │   MCP Server    │    │  (Interactive)  │
+│   MCP Client    │◄──►│  ToolSession    │◄──►│ Persistent Tool │
+│   (Claude)      │    │   FastAPI       │    │   Session       │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                               │
                               ▼
@@ -29,47 +30,86 @@ Interactive tool session management for EDA tools and command-line interfaces.
 
 | Tool | Description | Arguments |
 |------|-------------|-----------|
-| `start_session` | Start interactive tool session | `tool` (string) |
-| `input` | Send command to active session | `command` (string) |
-| `output` | Get session output | `lines` (int, optional) |
-| `script` | Execute script in session | `text` (string), `command` (string) |
-| `session_status` | Get current session info | none |
-| `stop_session` | Stop active session | none |
+| `execute_command` | Execute command in persistent session | `command` (string) |
+| `get_output` | Get session output | `lines` (int, optional) |
+| `execute_script` | Execute script in session | `script_content` (string), `language` (string, optional) |
+| `get_status` | Get current session status | none |
+| `clear_output` | Clear output buffer | none |
+
+## Configuration
+
+### Command Line Usage
+
+```bash
+# Use default config.json
+python server.py
+
+# Specify custom config
+python server.py --config my_config.json
+```
+
+### Configuration File (config.json)
+
+```json
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8034
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "toolsession_mcp.log"
+  },
+  "session": {
+    "command": "python -i -u",
+    "working_directory": "/tmp",
+    "prompt_string": ">>> ",
+    "timeout": 30
+  }
+}
+```
+
+### Environment Variables
+
+```bash
+# Server config
+TOOLSESSION_HOST=0.0.0.0
+TOOLSESSION_PORT=8034
+
+# Logging config
+TOOLSESSION_LOG_LEVEL=DEBUG
+TOOLSESSION_LOG_FILE=/var/log/toolsession.log
+
+# Session config
+TOOLSESSION_COMMAND="python -i -u"
+TOOLSESSION_WORKING_DIR=/tmp
+TOOLSESSION_PROMPT=">>> "
+TOOLSESSION_TIMEOUT=60
+```
 
 ## Usage Examples
 
-### 1. Start EDA Tool Session
+### 1. Execute Python Commands
 
 ```python
-# Start Fusion Compiler
-result = await mcp_call("start_session", {"tool": "fusion_compiler"})
+# Execute Python code
+await mcp_call("execute_command", {"command": "print('Hello World!')"})
 
-# Start Innovus
-result = await mcp_call("start_session", {"tool": "innovus"})
-```
-
-### 2. Execute Commands
-
-```python
-# Load design library
-await mcp_call("input", {"command": "read_lib /path/to/library.lib"})
-
-# Check status
-await mcp_call("input", {"command": "current_design"})
+# Import libraries
+await mcp_call("execute_command", {"command": "import numpy as np"})
 
 # Get output
-output = await mcp_call("output", {"lines": 10})
+output = await mcp_call("get_output", {"lines": 10})
 ```
 
-### 3. Execute Scripts
+### 2. Execute Scripts
 
 ```python
-# TCL script for synthesis
+# Python script
 script_content = '''
-read_verilog /path/to/design.v
-elaborate my_design
-compile
-write_verilog /path/to/output.v
+import math
+result = math.sqrt(16)
+print(f"Square root of 16 is {result}")
 '''
 
 await mcp_call("script", {

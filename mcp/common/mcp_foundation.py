@@ -1,10 +1,10 @@
-"""MCP JSON-RPC Server implementation for FileIO operations."""
+"""Common MCP server foundation for building FastAPI-based MCP servers."""
 
 import asyncio
 import json
 import logging
 import os
-import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,14 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv("../../.env")
-
-from config import FileIOConfig
-from directory_ops import DirectoryOperations
-from file_ops import FileOperations
 
 
 # MCP Protocol Models
@@ -56,7 +48,6 @@ class PyObjectId(ObjectId):
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type, handler):
         from pydantic_core import core_schema
-
         return core_schema.no_info_plain_validator_function(cls.validate)
 
     @classmethod
@@ -88,16 +79,15 @@ class MCPExecution(BaseModel):
         return str(value)
 
 
-class MCPFileIOServer:
-    """MCP JSON-RPC Server for FileIO operations."""
+class BaseMCPServer:
+    """Base class for FastAPI-based MCP servers."""
 
-    def __init__(self, config_path: str = "config.json"):
-        self.config = FileIOConfig.load(config_path)
+    def __init__(self, server_name: str, server_version: str = "1.0.0"):
+        self.server_name = server_name
+        self.server_version = server_version
         self.logger = None
         self.mongodb_client = None
         self.database = None
-        self.file_ops = None
-        self.dir_ops = None
         self.initialized = False
         self.client_capabilities = {}
 
@@ -106,9 +96,9 @@ class MCPFileIOServer:
 
         # Setup FastAPI app
         self.app = FastAPI(
-            title="FileIO MCP Server",
-            description="MCP JSON-RPC server for file operations",
-            version="1.0.0",
+            title=f"{server_name} MCP Server",
+            description=f"MCP JSON-RPC server for {server_name.lower()} operations",
+            version=server_version,
         )
 
         # Add CORS middleware
@@ -123,43 +113,39 @@ class MCPFileIOServer:
         # Setup routes
         self.setup_routes()
 
-        # Setup components
+        # Setup logging
         self.setup_logging()
-        self.setup_operations()
 
     def setup_logging(self):
         """Setup logging configuration."""
-        log_path = Path(self.config.logging.file)
+        log_file = os.getenv("LOG_FILE", f"/tmp/{self.server_name.lower()}_mcp.log")
+        log_level = os.getenv("LOG_LEVEL", "INFO")
+
+        log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         logging.basicConfig(
-            level=getattr(logging, self.config.logging.level),
+            level=getattr(logging, log_level),
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[
-                logging.FileHandler(self.config.logging.file),
+                logging.FileHandler(log_file),
                 logging.StreamHandler(),
             ],
         )
-        self.logger = logging.getLogger("fileio-mcp")
-
-    def setup_operations(self):
-        """Setup file and directory operations."""
-        self.file_ops = FileOperations(self.config)
-        self.dir_ops = DirectoryOperations(self.config)
+        self.logger = logging.getLogger(f"{self.server_name.lower()}-mcp")
 
     def setup_routes(self):
         """Setup FastAPI routes."""
 
         @self.app.on_event("startup")
         async def startup_event():
-            """Initialize MongoDB connection on startup."""
-            await self.connect_mongodb()
+            """Initialize connections and services on startup."""
+            await self.on_startup()
 
         @self.app.on_event("shutdown")
         async def shutdown_event():
-            """Close MongoDB connection on shutdown."""
-            if self.mongodb_client:
-                self.mongodb_client.close()
+            """Clean up connections and services on shutdown."""
+            await self.on_shutdown()
 
         @self.app.post("/mcp")
         async def mcp_endpoint(request: Request):
@@ -169,32 +155,42 @@ class MCPFileIOServer:
                 response = await self.handle_mcp_request(body)
                 return JSONResponse(content=response)
             except json.JSONDecodeError:
-                return self.create_error_response(None, -32700, "Parse error")
+                return JSONResponse(content=self.create_error_response(None, -32700, "Parse error"))
             except Exception as e:
                 self.logger.error(f"Unexpected error: {e}", exc_info=True)
-                return self.create_error_response(None, -32603, "Internal error")
+                return JSONResponse(content=self.create_error_response(None, -32603, "Internal error"))
 
         @self.app.get("/health")
         async def health_check():
             """Health check endpoint."""
-            return {
-                "status": "healthy",
-                "protocol_version": self.protocol_version,
-                "initialized": self.initialized,
-                "mongodb_connected": self.database is not None,
-                "base_path_exists": self.config.base_path.exists(),
-                "allowed_directories": [
-                    {"name": d, "exists": (self.config.base_path / d).exists()}
-                    for d in self.config.allowed_directories
-                ],
-            }
+            return await self.get_health_status()
+
+    async def on_startup(self):
+        """Override this method for custom startup logic."""
+        await self.connect_mongodb()
+
+    async def on_shutdown(self):
+        """Override this method for custom shutdown logic."""
+        if self.mongodb_client:
+            self.mongodb_client.close()
+
+    async def get_health_status(self) -> Dict[str, Any]:
+        """Override this method for custom health status."""
+        return {
+            "status": "healthy",
+            "server_name": self.server_name,
+            "protocol_version": self.protocol_version,
+            "initialized": self.initialized,
+            "mongodb_connected": self.database is not None,
+        }
 
     async def connect_mongodb(self):
         """Connect to MongoDB."""
         try:
             mongo_url = os.getenv("MONGO_URI")
             if mongo_url is None:
-                raise ValueError("MONGO_URI environment variable not set")
+                self.logger.warning("MONGO_URI environment variable not set - running without MongoDB")
+                return False
 
             self.mongodb_client = AsyncIOMotorClient(mongo_url)
             self.database = self.mongodb_client.orenco_pydantic
@@ -256,8 +252,6 @@ class MCPFileIOServer:
 
     async def handle_mcp_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle incoming MCP JSON-RPC request."""
-        import time
-
         start_time = time.time()
 
         # Validate JSON-RPC structure
@@ -325,83 +319,31 @@ class MCPFileIOServer:
         return {
             "protocolVersion": self.protocol_version,
             "capabilities": {"tools": {"listChanged": True}, "logging": {}},
-            "serverInfo": {"name": "fileio-mcp", "version": "1.0.0"},
+            "serverInfo": {"name": f"{self.server_name.lower()}-mcp", "version": self.server_version},
         }
 
     async def handle_tools_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle tools/list request."""
-        tools = []
-
-        # Get tools from file operations
-        for tool in self.file_ops.get_tools():
-            tools.append(
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "inputSchema": tool.inputSchema,
-                }
-            )
-
-        # Get tools from directory operations
-        for tool in self.dir_ops.get_tools():
-            tools.append(
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "inputSchema": tool.inputSchema,
-                }
-            )
-
-        return {"tools": tools}
+        """Handle tools/list request. Override this method."""
+        raise NotImplementedError("Subclasses must implement handle_tools_list")
 
     async def handle_tools_call(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle tools/call request."""
-        tool_name = params.get("name")
-        arguments = params.get("arguments", {})
+        """Handle tools/call request. Override this method."""
+        raise NotImplementedError("Subclasses must implement handle_tools_call")
 
-        if not tool_name:
-            raise ValueError("Tool name is required")
-
-        self.logger.info(f"Executing tool: {tool_name} with args: {arguments}")
-
-        # Route to appropriate handler
-        file_tool_names = [tool.name for tool in self.file_ops.get_tools()]
-        dir_tool_names = [tool.name for tool in self.dir_ops.get_tools()]
-
-        if tool_name in file_tool_names:
-            result = await self.file_ops.execute(tool_name, arguments)
-        elif tool_name in dir_tool_names:
-            result = await self.dir_ops.execute(tool_name, arguments)
-        else:
-            raise ValueError(f"Unknown tool: {tool_name}")
-
-        # Convert MCP TextContent to proper format
-        content = []
-        for item in result:
-            content.append({"type": item.type, "text": item.text})
-
-        return {"content": content, "isError": False}
-
-    def run(self):
+    def run(self, host: str = "0.0.0.0", port: int = 8002):
         """Run the MCP server."""
-        self.logger.info(f"Starting FileIO MCP Server v1.0.0")
+        self.logger.info(f"Starting {self.server_name} MCP Server v{self.server_version}")
         self.logger.info(f"Protocol version: {self.protocol_version}")
-        self.logger.info(f"Monitoring directories: {self.config.allowed_directories}")
-        self.logger.info(f"Base path: {self.config.base_path}")
 
         try:
-            self.logger.info(
-                f"MCP Server running on http://{self.config.server.host}:{self.config.server.port}"
-            )
-            self.logger.info(
-                f"MCP endpoint: http://{self.config.server.host}:{self.config.server.port}/mcp"
-            )
+            self.logger.info(f"MCP Server running on http://{host}:{port}")
+            self.logger.info(f"MCP endpoint: http://{host}:{port}/mcp")
 
             # Run the FastAPI server
             uvicorn.run(
                 self.app,
-                host=self.config.server.host,
-                port=self.config.server.port,
+                host=host,
+                port=port,
                 log_level="info",
             )
         except KeyboardInterrupt:
@@ -410,24 +352,4 @@ class MCPFileIOServer:
             self.logger.error(f"Server error: {e}", exc_info=True)
             raise
         finally:
-            self.logger.info("FileIO MCP Server shutdown")
-
-
-def main():
-    """Main entry point for the MCP server."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="FileIO MCP JSON-RPC Server")
-    parser.add_argument(
-        "--config", default="config.json", help="Path to configuration file"
-    )
-
-    args = parser.parse_args()
-
-    # Run the server
-    server = MCPFileIOServer(args.config)
-    server.run()
-
-
-if __name__ == "__main__":
-    main()
+            self.logger.info(f"{self.server_name} MCP Server shutdown")

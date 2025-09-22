@@ -253,7 +253,7 @@ services:
     build:
       context: ./mcp/toolsession
       dockerfile: Dockerfile
-    image: toolsession:fixed
+    image: toolsession:updated-script
     container_name: python_mcp
     environment:
       <<: *mongo-common
@@ -291,7 +291,7 @@ services:
     build:
       context: ./mcp/search
       dockerfile: Dockerfile
-    image: search:latest
+    image: search:pyproject
     container_name: search_mcp
     environment:
       SEARCH_PORT: ${SEARCH_PORT}
@@ -311,7 +311,7 @@ services:
   mcpmongo:
     <<: *mcp-common
     build:
-      context: ./mcp/mongo
+      context: ./mcp/mongodb
       dockerfile: Dockerfile
     image: mongo-mcp:fixed
     container_name: mongo_mcp
@@ -320,7 +320,7 @@ services:
       MONGO_MCP_HOST: 0.0.0.0
       MONGO_MCP_PORT: ${MONGO_MCP_PORT}
     ports:
-      - "${MONGO_MCP_PORT}:8004"
+      - ${MONGO_MCP_PORT}
     depends_on:
       mongo:
         condition: service_healthy
@@ -339,7 +339,7 @@ services:
     image: nginx:alpine
     container_name: mcp_gateway
     ports:
-      - "${MCP_GATEWAY_PORT}:80"
+      - ${MCP_GATEWAY_PORT}
     volumes:
       - "./mcp/gateway/nginx.conf:/etc/nginx/nginx.conf:ro"
       - "./mcp/logs:/var/log/nginx"

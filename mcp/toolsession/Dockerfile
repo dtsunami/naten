@@ -27,12 +27,9 @@ RUN useradd -m -u 1000 toolsession && \
 
 USER toolsession
 
-# Health check
+# Health check (check HTTP health endpoint)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8002/health || exit 1
 
-# Expose port
-EXPOSE 8002
-
-# Default command - launch Python ToolSession server
-CMD ["python", "launch_python_server.py", "--port", "8002"]
+# Default command - launch ToolSession MCP server
+CMD ["python", "server.py"]
