@@ -271,7 +271,7 @@ class ToolSessionOperations:
                 # Execute script based on language
                 if language.lower() == "python":
                     #command = f"exec(open('{script_path}').read())"
-                    command = f"import {script_path}"
+                    command = f"import {script_path.replace('.py', '').replace('/tmp/', '')}"
                 elif language.lower() == "bash":
                     command = f"import subprocess; subprocess.run(['bash', '{script_path}'])"
                 else:

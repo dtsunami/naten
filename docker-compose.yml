@@ -253,7 +253,7 @@ services:
     build:
       context: ./mcp/toolsession
       dockerfile: Dockerfile
-    image: toolsession:latest
+    image: toolsession:latest3
     container_name: python_mcp
     environment:
       <<: *mongo-common
