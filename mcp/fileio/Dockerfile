@@ -25,6 +25,9 @@ COPY pyproject.toml .
 # Install dependencies only (without source code)
 RUN pip install --no-cache-dir .
 
+# Copy common foundation files
+COPY --from=common . /app
+
 # Copy source code (all in root directory)
 COPY *.py .
 COPY *.json .
@@ -44,7 +47,7 @@ ENV PYTHONUNBUFFERED=1
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "from config import FileIOConfig; FileIOConfig.load()" || exit 1
+    CMD python -c "from models import FileIOConfig; FileIOConfig.load()" || exit 1
 
 # Default command
-CMD ["python", "mcp_server.py"]
+CMD ["python", "server.py"]

@@ -2,6 +2,7 @@
 # Python, Docker, Testing, and Development artifacts
 
 # Python
+.benchmarks
 __pycache__/
 *.py[cod]
 *$py.class
@@ -14,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+tests/
 lib64/
 parts/
 sdist/

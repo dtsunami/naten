@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mcp_foundation import BaseMCPServer
-from config import ToolSessionConfig
+from models import ToolSessionConfig
 
 
 class ToolSessionOperations:

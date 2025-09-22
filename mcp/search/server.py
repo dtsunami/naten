@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-"""Search MCP Server - Web search, news, and content extraction."""
+"""Search MCP Server - Web search, news, and content extraction using BaseMCPServer foundation."""
 
 import asyncio
 import json
 import logging
 import os
-import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse, quote
@@ -13,68 +11,15 @@ from urllib.parse import urlparse, quote
 import httpx
 import feedparser
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv("../../.env")
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/app/logs/search_mcp.log"),
-        logging.StreamHandler()
-    ]
-)
-
-logger = logging.getLogger("search_mcp")
-
-app = FastAPI(
-    title="Search MCP Server",
-    description="Web search, news, and content extraction MCP server",
-    version="1.0.0"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Pydantic models for MCP requests
-class MCPRequest(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Optional[Any] = None
-    method: str
-    params: Optional[Dict[str, Any]] = None
-
-class MCPResponse(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Optional[Any] = None
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[Dict[str, Any]] = None
-
-# Search result models
-class SearchResult(BaseModel):
-    title: str
-    url: str
-    snippet: str
-    source: str
-    published_date: Optional[str] = None
-
-class ContentExtraction(BaseModel):
-    title: str
-    content: str
-    url: str
-    word_count: int
-    extracted_at: str
+from mcp import types
+from mcp_foundation import BaseMCPServer
+from models import SearchResult, ContentExtraction
 
 class SearchEngine:
     """Handle different search engines and APIs."""
@@ -265,175 +210,128 @@ class SearchEngine:
 
         except Exception as e:
             logger.error(f"Content extraction error for {url}: {e}")
-            raise HTTPException(status_code=400, detail=f"Failed to extract content: {str(e)}")
+            raise Exception(f"Failed to extract content: {str(e)}")
 
-# Initialize search engine
-search_engine = SearchEngine()
+class SearchMCPServer(BaseMCPServer):
+    """MCP JSON-RPC Server for Search operations using BaseMCPServer foundation."""
 
-# MCP Server endpoints
-@app.post("/mcp")
-async def mcp_handler(request: MCPRequest):
-    """Main MCP endpoint handler."""
-    try:
-        method = request.method
-        params = request.params or {}
+    def __init__(self):
+        # Initialize the base MCP server
+        super().__init__("Search", "1.0.0")
 
-        if method == "tools/list":
-            return MCPResponse(
-                id=request.id,
-                result={
-                    "tools": [
-                        {
-                            "name": "web_search",
-                            "description": "Search the web for current information",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {"type": "string", "description": "Search query"},
-                                    "num_results": {"type": "integer", "default": 10, "description": "Number of results"},
-                                    "time_filter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Time filter"}
-                                },
-                                "required": ["query"]
-                            }
-                        },
-                        {
-                            "name": "news_search",
-                            "description": "Search recent news articles",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {"type": "string", "description": "News search query"},
-                                    "hours_back": {"type": "integer", "default": 24, "description": "Hours back to search"},
-                                    "language": {"type": "string", "default": "en", "description": "Language code"}
-                                },
-                                "required": ["query"]
-                            }
-                        },
-                        {
-                            "name": "url_content",
-                            "description": "Extract text content from a URL",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "url": {"type": "string", "description": "URL to extract content from"},
-                                    "extract_type": {"type": "string", "enum": ["text", "title", "summary"], "default": "text", "description": "Type of extraction"}
-                                },
-                                "required": ["url"]
-                            }
-                        }
-                    ]
+        # Initialize search engine
+        self.search_engine = SearchEngine()
+
+    def get_tools(self) -> List[types.Tool]:
+        """Get available tools."""
+        return [
+            types.Tool(
+                name="web_search",
+                description="Search the web for current information",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "num_results": {"type": "integer", "default": 10, "description": "Number of results"},
+                        "time_filter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Time filter"}
+                    },
+                    "required": ["query"]
+                }
+            ),
+            types.Tool(
+                name="news_search",
+                description="Search recent news articles",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "News search query"},
+                        "hours_back": {"type": "integer", "default": 24, "description": "Hours back to search"},
+                        "language": {"type": "string", "default": "en", "description": "Language code"}
+                    },
+                    "required": ["query"]
+                }
+            ),
+            types.Tool(
+                name="url_content",
+                description="Extract text content from a URL",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to extract content from"},
+                        "extract_type": {"type": "string", "enum": ["text", "title", "summary"], "default": "text", "description": "Type of extraction"}
+                    },
+                    "required": ["url"]
                 }
             )
+        ]
 
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            arguments = params.get("arguments", {})
+    async def handle_tools_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle tools/list request."""
+        tools = self.get_tools()
 
-            if tool_name == "web_search":
-                results = await search_engine.duckduckgo_search(
-                    query=arguments["query"],
-                    num_results=arguments.get("num_results", 10),
-                    time_filter=arguments.get("time_filter")
-                )
-                return MCPResponse(
-                    id=request.id,
-                    result={
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": json.dumps([result.dict() for result in results], indent=2)
-                            }
-                        ],
-                        "isError": False
-                    }
-                )
+        return {
+            "tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.inputSchema,
+                }
+                for tool in tools
+            ]
+        }
 
-            elif tool_name == "news_search":
-                results = await search_engine.google_news_search(
-                    query=arguments["query"],
-                    hours_back=arguments.get("hours_back", 24),
-                    language=arguments.get("language", "en")
-                )
-                return MCPResponse(
-                    id=request.id,
-                    result={
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": json.dumps([result.dict() for result in results], indent=2)
-                            }
-                        ],
-                        "isError": False
-                    }
-                )
+    async def handle_tools_call(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle tools/call request."""
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
 
-            elif tool_name == "url_content":
-                content = await search_engine.extract_url_content(
-                    url=arguments["url"],
-                    extract_type=arguments.get("extract_type", "text")
-                )
-                return MCPResponse(
-                    id=request.id,
-                    result={
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": json.dumps(content.dict(), indent=2)
-                            }
-                        ],
-                        "isError": False
-                    }
-                )
+        if not tool_name:
+            raise ValueError("Tool name is required")
 
-            else:
-                return MCPResponse(
-                    id=request.id,
-                    error={"code": -32601, "message": f"Unknown tool: {tool_name}"}
-                )
+        self.logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+
+        if tool_name == "web_search":
+            results = await self.search_engine.duckduckgo_search(
+                query=arguments["query"],
+                num_results=arguments.get("num_results", 10),
+                time_filter=arguments.get("time_filter")
+            )
+            content_text = json.dumps([result.dict() for result in results], indent=2)
+
+        elif tool_name == "news_search":
+            results = await self.search_engine.google_news_search(
+                query=arguments["query"],
+                hours_back=arguments.get("hours_back", 24),
+                language=arguments.get("language", "en")
+            )
+            content_text = json.dumps([result.dict() for result in results], indent=2)
+
+        elif tool_name == "url_content":
+            content = await self.search_engine.extract_url_content(
+                url=arguments["url"],
+                extract_type=arguments.get("extract_type", "text")
+            )
+            content_text = json.dumps(content.dict(), indent=2)
 
         else:
-            return MCPResponse(
-                id=request.id,
-                error={"code": -32601, "message": f"Unknown method: {method}"}
-            )
+            raise ValueError(f"Unknown tool: {tool_name}")
 
-    except Exception as e:
-        logger.error(f"MCP handler error: {e}")
-        return MCPResponse(
-            id=request.id,
-            error={"code": -32603, "message": f"Internal error: {str(e)}"}
-        )
+        return {"content": [types.TextContent(type="text", text=content_text)], "isError": False}
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "server": "search_mcp",
-        "version": "1.0.0",
-        "timestamp": datetime.now().isoformat()
-    }
+    def run(self):
+        """Run the MCP server."""
+        port = int(os.getenv("SEARCH_PORT", "8003"))
+        self.logger.info(f"Starting Search MCP server on port {port}")
 
-@app.get("/")
-async def root():
-    """Root endpoint with API documentation."""
-    return {
-        "message": "Search MCP Server",
-        "version": "1.0.0",
-        "endpoints": {
-            "mcp": "/mcp",
-            "health": "/health",
-            "docs": "/docs"
-        },
-        "tools": ["web_search", "news_search", "url_content"]
-    }
+        # Use the base server's run method
+        super().run(host="0.0.0.0", port=port)
+
+
+def main():
+    """Main entry point for the MCP server."""
+    server = SearchMCPServer()
+    server.run()
+
 
 if __name__ == "__main__":
-    port = int(os.getenv("SEARCH_PORT", "8003"))
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-        access_log=True
-    )
+    main()

@@ -220,7 +220,7 @@ services:
     build:
       context: ./mcp/fileio
       dockerfile: Dockerfile
-    image: fileio:advanced0
+    image: fileio:latest
     container_name: fileio_mcp
     environment:
       <<: *mongo-common
@@ -253,7 +253,7 @@ services:
     build:
       context: ./mcp/toolsession
       dockerfile: Dockerfile
-    image: toolsession:updated-script
+    image: toolsession:latest
     container_name: python_mcp
     environment:
       <<: *mongo-common
@@ -291,7 +291,7 @@ services:
     build:
       context: ./mcp/search
       dockerfile: Dockerfile
-    image: search:pyproject
+    image: search:latest
     container_name: search_mcp
     environment:
       SEARCH_PORT: ${SEARCH_PORT}
@@ -313,7 +313,7 @@ services:
     build:
       context: ./mcp/mongodb
       dockerfile: Dockerfile
-    image: mongo-mcp:fixed
+    image: mongodb:latest
     container_name: mongo_mcp
     environment:
       <<: *mongo-common

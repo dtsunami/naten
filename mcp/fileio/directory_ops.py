@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from mcp import types
 
-from config import FileIOConfig
+from models import FileIOConfig
 from utils import create_file_info, human_size, safe_json_dumps
 
 

@@ -17,8 +17,11 @@ COPY pyproject.toml .
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
 
+# Copy common foundation files
+COPY --from=common . /app
+
 # Copy application code
-COPY server.py .
+COPY . .
 
 # Create logs directory
 RUN mkdir -p /app/logs && chown -R search:search /app

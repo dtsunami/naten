@@ -17,7 +17,8 @@ dependencies = [
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
     "motor>=3.3.0",
-    "pymongo>=4.6.0"
+    "pymongo>=4.6.0",
+    "python-dotenv>=1.0.0"
 ]
 
 
@@ -87,7 +88,7 @@ fileio-mcp = "server:main"
 
 [tool.setuptools]
 packages = []
-py-modules = ["server", "config", "utils", "file_ops", "directory_ops"]
+py-modules = ["server", "models", "utils", "file_ops", "directory_ops"]
 
 # Tool configurations
 [tool.black]

@@ -208,6 +208,29 @@ curl -X POST http://localhost:8080/fileio/execute \
 
 ## Development
 
+### Building MCP Servers
+
+All MCP servers use a shared foundation located in `mcp/common/`. When building Docker images, you must use the build context flag to access these shared files:
+
+```bash
+# Build with common foundation files
+cd mcp/[server-name]
+docker build --build-context common=../common -t [server-name]:latest .
+
+# Examples for each server:
+cd mcp/fileio && docker build --build-context common=../common -t fileio:found34 .
+cd mcp/search && docker build --build-context common=../common -t search:found34 .
+cd mcp/toolsession && docker build --build-context common=../common -t toolsession:found34 .
+cd mcp/mongodb && docker build --build-context common=../common -t mongodb:found34 .
+```
+
+### Common Foundation Files
+
+The `mcp/common/` directory contains shared resources:
+- `mcp_foundation.py`: Base MCP server class with FastAPI integration
+- `tools.py`: Common utility functions
+- `ts_mongo.py`: MongoDB helper functions
+
 ### Adding New MCP Servers
 
 1. **Create Server Directory**:
@@ -216,20 +239,40 @@ curl -X POST http://localhost:8080/fileio/execute \
    cd mcp/new-server
    ```
 
-2. **Follow FileIO Structure**:
+2. **Follow Standard Structure**:
    ```
    new-server/
-   ├── src/new_server_mcp/
-   ├── config/
-   ├── Dockerfile
-   ├── requirements.txt
-   └── pyproject.toml
+   ├── server.py           # Main server file
+   ├── models.py           # Pydantic models
+   ├── Dockerfile          # Docker build file
+   └── pyproject.toml      # Python package config
    ```
 
-3. **Update Docker Compose**:
+3. **Dockerfile Template**:
+   ```dockerfile
+   FROM python:3.11-slim
+   WORKDIR /app
+   COPY pyproject.toml .
+   RUN pip install --no-cache-dir -e .
+
+   # Copy common foundation files
+   COPY --from=common . /app
+
+   # Copy application code
+   COPY . .
+
+   CMD ["python", "server.py"]
+   ```
+
+4. **Build with Common Context**:
+   ```bash
+   docker build --build-context common=../common -t new-server:latest .
+   ```
+
+5. **Update Docker Compose**:
    Add service definition to `docker-compose.yml`
 
-4. **Update Gateway**:
+6. **Update Gateway**:
    Add routing rules to `gateway/nginx.conf`
 
 ### Testing

@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from mcp import types
 
-from config import FileIOConfig
+from models import FileIOConfig
 from utils import create_file_info, safe_json_dumps, validate_file_extension
 
 

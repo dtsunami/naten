@@ -15,7 +15,7 @@ import pytest
 from config import FileIOConfig
 from directory_ops import DirectoryOperations
 from file_ops import FileOperations
-from mcp_server import MCPFileIOServer
+from mcp.fileio.server import MCPFileIOServer
 
 # Removed event_loop fixture as it conflicts with pytest-asyncio auto mode
 

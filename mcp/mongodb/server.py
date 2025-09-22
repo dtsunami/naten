@@ -1,4 +1,4 @@
-"""MongoDB MCP Server - Database operations for MongoDB."""
+"""MongoDB MCP Server - Database operations for MongoDB using common foundation."""
 
 import asyncio
 import json
@@ -7,670 +7,354 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
-import uvicorn
-from fastapi import FastAPI, HTTPException
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from pydantic import BaseModel, Field
-from pymongo.errors import PyMongoError, DuplicateKeyError, OperationFailure
 from bson import ObjectId, json_util
 from bson.errors import InvalidId
-
 from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo.errors import PyMongoError, DuplicateKeyError, OperationFailure
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv("../../.env")
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mongo_mcp")
 
-# Global MongoDB connection
-client: Optional[AsyncIOMotorClient] = None
-database: Optional[AsyncIOMotorDatabase] = None
-
-# Pydantic models for MCP
-class MCPRequest(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Union[int, str]
-    method: str
-    params: Optional[Dict[str, Any]] = None
-
-class MCPResponse(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Union[int, str]
-    result: Optional[Any] = None
-    error: Optional[Dict[str, Any]] = None
-
-class MCPError(BaseModel):
-    code: int
-    message: str
-    data: Optional[Any] = None
-
-# Tool parameter models
-class FindParams(BaseModel):
-    collection: str
-    filter: Dict[str, Any] = Field(default_factory=dict)
-    projection: Optional[Dict[str, Any]] = None
-    sort: Optional[List[List[Union[str, int]]]] = None
-    limit: Optional[int] = None
-    skip: Optional[int] = None
-
-class InsertOneParams(BaseModel):
-    collection: str
-    document: Dict[str, Any]
-
-class InsertManyParams(BaseModel):
-    collection: str
-    documents: List[Dict[str, Any]]
-    ordered: bool = True
-
-class UpdateParams(BaseModel):
-    collection: str
-    filter: Dict[str, Any]
-    update: Dict[str, Any]
-    upsert: bool = False
-
-class DeleteParams(BaseModel):
-    collection: str
-    filter: Dict[str, Any]
-
-class AggregateParams(BaseModel):
-    collection: str
-    pipeline: List[Dict[str, Any]]
-    allow_disk_use: bool = False
-
-class CountParams(BaseModel):
-    collection: str
-    filter: Dict[str, Any] = Field(default_factory=dict)
-
-class IndexParams(BaseModel):
-    collection: str
-    keys: Dict[str, int]
-    unique: bool = False
-    name: Optional[str] = None
-
-# FastAPI app
-app = FastAPI(
-    title="MongoDB MCP Server",
-    description="Model Context Protocol server for MongoDB operations",
-    version="1.0.0"
+from mcp_foundation import BaseMCPServer
+from models import (
+    MongoConfig, FindParams, InsertParams, UpdateParams,
+    DeleteParams, AggregateParams, IndexParams,
+    DatabaseStats, CollectionStats
 )
 
-def serialize_mongo_doc(doc: Any) -> Any:
-    """Convert MongoDB document to JSON serializable format."""
-    return json.loads(json_util.dumps(doc))
 
-def parse_object_id(value: Any) -> Any:
-    """Parse ObjectId strings in filters and documents."""
-    if isinstance(value, str):
-        # Try to parse as ObjectId if it looks like one
-        if len(value) == 24:
-            try:
-                return ObjectId(value)
-            except InvalidId:
-                pass
-    elif isinstance(value, dict):
-        return {k: parse_object_id(v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [parse_object_id(item) for item in value]
-    return value
+class MongoOperations:
+    """Handle MongoDB operations."""
 
-async def connect_to_mongo():
-    """Connect to MongoDB using environment variables."""
-    global client, database
+    def __init__(self, config: MongoConfig):
+        self.config = config
+        self.client: Optional[AsyncIOMotorClient] = None
+        self.database: Optional[AsyncIOMotorDatabase] = None
 
-    try:
-        # Use MONGO_URI if available
-        mongo_uri = os.getenv("MONGO_URI")
-
-        if mongo_uri:
-            # Extract database name from URI
-            mongo_database = mongo_uri.split('/')[-1].split('?')[0]
-        else:
-            # Fallback to individual environment variables
-            mongo_host = os.getenv("MONGO_HOST", "localhost")
-            mongo_port = int(os.getenv("MONGO_PORT", "27017"))
-            mongo_user = os.getenv("MONGO_USER")
-            mongo_password = os.getenv("MONGO_PASSWORD")
-            mongo_database = os.getenv("MONGO_DATABASE", "mongo_mcp")
-
-            # Build connection URI
-            if mongo_user and mongo_password:
-                mongo_uri = f"mongodb://{mongo_user}:{mongo_password}@{mongo_host}:{mongo_port}/{mongo_database}?authSource=admin"
+    async def connect(self):
+        """Connect to MongoDB."""
+        try:
+            if self.config.mongo_uri:
+                self.client = AsyncIOMotorClient(self.config.mongo_uri)
             else:
-                mongo_uri = f"mongodb://{mongo_host}:{mongo_port}/{mongo_database}"
-
-        client = AsyncIOMotorClient(mongo_uri)
-        database = client[mongo_database]
-
-        # Test the connection
-        await database.command("ping")
-        logger.info(f"Successfully connected to MongoDB: {mongo_database}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to connect to MongoDB: {e}")
-        return False
-
-# MCP Tool implementations
-async def mongo_find(params: FindParams) -> Dict[str, Any]:
-    """Find documents in a collection."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds in filter
-        filter_doc = parse_object_id(params.filter)
-
-        # Build query
-        cursor = collection.find(filter_doc, params.projection)
-
-        if params.sort:
-            cursor = cursor.sort(params.sort)
-        if params.skip:
-            cursor = cursor.skip(params.skip)
-        if params.limit:
-            cursor = cursor.limit(params.limit)
-
-        # Execute query
-        documents = []
-        async for doc in cursor:
-            documents.append(serialize_mongo_doc(doc))
-
-        return {
-            "collection": params.collection,
-            "count": len(documents),
-            "documents": documents
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Find operation failed: {str(e)}")
-
-async def mongo_insert_one(params: InsertOneParams) -> Dict[str, Any]:
-    """Insert a single document."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds in document
-        document = parse_object_id(params.document)
-
-        result = await collection.insert_one(document)
-
-        return {
-            "collection": params.collection,
-            "inserted_id": str(result.inserted_id),
-            "acknowledged": result.acknowledged
-        }
-
-    except DuplicateKeyError as e:
-        raise HTTPException(status_code=409, detail=f"Duplicate key error: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Insert operation failed: {str(e)}")
-
-async def mongo_insert_many(params: InsertManyParams) -> Dict[str, Any]:
-    """Insert multiple documents."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds in documents
-        documents = [parse_object_id(doc) for doc in params.documents]
-
-        result = await collection.insert_many(documents, ordered=params.ordered)
-
-        return {
-            "collection": params.collection,
-            "inserted_count": len(result.inserted_ids),
-            "inserted_ids": [str(id) for id in result.inserted_ids],
-            "acknowledged": result.acknowledged
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Insert many operation failed: {str(e)}")
-
-async def mongo_update_one(params: UpdateParams) -> Dict[str, Any]:
-    """Update a single document."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds
-        filter_doc = parse_object_id(params.filter)
-        update_doc = parse_object_id(params.update)
-
-        result = await collection.update_one(filter_doc, update_doc, upsert=params.upsert)
-
-        return {
-            "collection": params.collection,
-            "matched_count": result.matched_count,
-            "modified_count": result.modified_count,
-            "upserted_id": str(result.upserted_id) if result.upserted_id else None,
-            "acknowledged": result.acknowledged
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Update operation failed: {str(e)}")
-
-async def mongo_update_many(params: UpdateParams) -> Dict[str, Any]:
-    """Update multiple documents."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds
-        filter_doc = parse_object_id(params.filter)
-        update_doc = parse_object_id(params.update)
-
-        result = await collection.update_many(filter_doc, update_doc, upsert=params.upsert)
-
-        return {
-            "collection": params.collection,
-            "matched_count": result.matched_count,
-            "modified_count": result.modified_count,
-            "upserted_id": str(result.upserted_id) if result.upserted_id else None,
-            "acknowledged": result.acknowledged
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Update many operation failed: {str(e)}")
-
-async def mongo_delete_one(params: DeleteParams) -> Dict[str, Any]:
-    """Delete a single document."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds in filter
-        filter_doc = parse_object_id(params.filter)
-
-        result = await collection.delete_one(filter_doc)
-
-        return {
-            "collection": params.collection,
-            "deleted_count": result.deleted_count,
-            "acknowledged": result.acknowledged
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delete operation failed: {str(e)}")
-
-async def mongo_delete_many(params: DeleteParams) -> Dict[str, Any]:
-    """Delete multiple documents."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds in filter
-        filter_doc = parse_object_id(params.filter)
-
-        result = await collection.delete_many(filter_doc)
-
-        return {
-            "collection": params.collection,
-            "deleted_count": result.deleted_count,
-            "acknowledged": result.acknowledged
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delete many operation failed: {str(e)}")
-
-async def mongo_aggregate(params: AggregateParams) -> Dict[str, Any]:
-    """Run aggregation pipeline."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds in pipeline
-        pipeline = [parse_object_id(stage) for stage in params.pipeline]
-
-        cursor = collection.aggregate(pipeline, allowDiskUse=params.allow_disk_use)
-
-        results = []
-        async for doc in cursor:
-            results.append(serialize_mongo_doc(doc))
-
-        return {
-            "collection": params.collection,
-            "count": len(results),
-            "results": results
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Aggregation failed: {str(e)}")
-
-async def mongo_count(params: CountParams) -> Dict[str, Any]:
-    """Count documents in a collection."""
-    try:
-        collection = database[params.collection]
-
-        # Parse ObjectIds in filter
-        filter_doc = parse_object_id(params.filter)
-
-        count = await collection.count_documents(filter_doc)
-
-        return {
-            "collection": params.collection,
-            "count": count
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Count operation failed: {str(e)}")
-
-async def mongo_list_collections() -> Dict[str, Any]:
-    """List all collections in the database."""
-    try:
-        collections = await database.list_collection_names()
-
-        return {
-            "database": database.name,
-            "collections": collections
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"List collections failed: {str(e)}")
-
-async def mongo_create_index(params: IndexParams) -> Dict[str, Any]:
-    """Create an index on a collection."""
-    try:
-        collection = database[params.collection]
-
-        index_name = await collection.create_index(
-            list(params.keys.items()),
-            unique=params.unique,
-            name=params.name
-        )
-
-        return {
-            "collection": params.collection,
-            "index_name": index_name,
-            "created": True
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Create index failed: {str(e)}")
-
-# MCP Tools registry
-MCP_TOOLS = {
-    "mongo_find": {
-        "description": "Find documents in a MongoDB collection with optional filtering, sorting, and pagination",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "filter": {"type": "object", "description": "Query filter (default: {})"},
-                "projection": {"type": "object", "description": "Field projection"},
-                "sort": {"type": "array", "description": "Sort specification"},
-                "limit": {"type": "integer", "description": "Maximum number of documents"},
-                "skip": {"type": "integer", "description": "Number of documents to skip"}
-            },
-            "required": ["collection"]
-        },
-        "handler": mongo_find,
-        "params_class": FindParams
-    },
-    "mongo_insert_one": {
-        "description": "Insert a single document into a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "document": {"type": "object", "description": "Document to insert"}
-            },
-            "required": ["collection", "document"]
-        },
-        "handler": mongo_insert_one,
-        "params_class": InsertOneParams
-    },
-    "mongo_insert_many": {
-        "description": "Insert multiple documents into a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "documents": {"type": "array", "description": "Array of documents to insert"},
-                "ordered": {"type": "boolean", "description": "Ordered insertion (default: true)"}
-            },
-            "required": ["collection", "documents"]
-        },
-        "handler": mongo_insert_many,
-        "params_class": InsertManyParams
-    },
-    "mongo_update_one": {
-        "description": "Update a single document in a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "filter": {"type": "object", "description": "Query filter"},
-                "update": {"type": "object", "description": "Update operations"},
-                "upsert": {"type": "boolean", "description": "Create if not exists (default: false)"}
-            },
-            "required": ["collection", "filter", "update"]
-        },
-        "handler": mongo_update_one,
-        "params_class": UpdateParams
-    },
-    "mongo_update_many": {
-        "description": "Update multiple documents in a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "filter": {"type": "object", "description": "Query filter"},
-                "update": {"type": "object", "description": "Update operations"},
-                "upsert": {"type": "boolean", "description": "Create if not exists (default: false)"}
-            },
-            "required": ["collection", "filter", "update"]
-        },
-        "handler": mongo_update_many,
-        "params_class": UpdateParams
-    },
-    "mongo_delete_one": {
-        "description": "Delete a single document from a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "filter": {"type": "object", "description": "Query filter"}
-            },
-            "required": ["collection", "filter"]
-        },
-        "handler": mongo_delete_one,
-        "params_class": DeleteParams
-    },
-    "mongo_delete_many": {
-        "description": "Delete multiple documents from a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "filter": {"type": "object", "description": "Query filter"}
-            },
-            "required": ["collection", "filter"]
-        },
-        "handler": mongo_delete_many,
-        "params_class": DeleteParams
-    },
-    "mongo_aggregate": {
-        "description": "Run aggregation pipeline on a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "pipeline": {"type": "array", "description": "Aggregation pipeline stages"},
-                "allow_disk_use": {"type": "boolean", "description": "Allow disk usage for large datasets"}
-            },
-            "required": ["collection", "pipeline"]
-        },
-        "handler": mongo_aggregate,
-        "params_class": AggregateParams
-    },
-    "mongo_count": {
-        "description": "Count documents in a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "filter": {"type": "object", "description": "Query filter (default: {})"}
-            },
-            "required": ["collection"]
-        },
-        "handler": mongo_count,
-        "params_class": CountParams
-    },
-    "mongo_list_collections": {
-        "description": "List all collections in the MongoDB database",
-        "parameters": {
-            "type": "object",
-            "properties": {}
-        },
-        "handler": mongo_list_collections,
-        "params_class": None
-    },
-    "mongo_create_index": {
-        "description": "Create an index on a MongoDB collection",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "collection": {"type": "string", "description": "Collection name"},
-                "keys": {"type": "object", "description": "Index keys specification"},
-                "unique": {"type": "boolean", "description": "Unique index (default: false)"},
-                "name": {"type": "string", "description": "Index name"}
-            },
-            "required": ["collection", "keys"]
-        },
-        "handler": mongo_create_index,
-        "params_class": IndexParams
-    }
-}
-
-# MCP Protocol endpoints
-@app.post("/mcp")
-async def handle_mcp_request(request: MCPRequest) -> MCPResponse:
-    """Handle MCP protocol requests."""
-    try:
-        if request.method == "tools/list":
-            # Return available tools
-            tools = []
-            for name, tool_info in MCP_TOOLS.items():
-                tools.append({
-                    "name": name,
-                    "description": tool_info["description"],
-                    "inputSchema": tool_info["parameters"]
-                })
-
-            return MCPResponse(
-                id=request.id,
-                result={"tools": tools}
-            )
-
-        elif request.method == "tools/call":
-            # Call a specific tool
-            if not request.params:
-                raise HTTPException(status_code=400, detail="Missing parameters")
-
-            tool_name = request.params.get("name")
-            arguments = request.params.get("arguments", {})
-
-            if tool_name not in MCP_TOOLS:
-                raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
-
-            tool_info = MCP_TOOLS[tool_name]
-            handler = tool_info["handler"]
-            params_class = tool_info["params_class"]
-
-            # Parse and validate parameters
-            if params_class:
-                try:
-                    params = params_class(**arguments)
-                    result = await handler(params)
-                except Exception as e:
-                    return MCPResponse(
-                        id=request.id,
-                        error=MCPError(
-                            code=-32603,
-                            message=f"Tool execution failed: {str(e)}"
-                        ).dict()
-                    )
-            else:
-                result = await handler()
-
-            return MCPResponse(
-                id=request.id,
-                result={
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(result, indent=2)
-                        }
-                    ]
+                auth_source = ""
+                if self.config.mongo_user and self.config.mongo_password:
+                    auth_source = f"{self.config.mongo_user}:{self.config.mongo_password}@"
+
+                mongo_url = f"mongodb://{auth_source}{self.config.mongo_host}:{self.config.mongo_port}/{self.config.mongo_database}"
+                self.client = AsyncIOMotorClient(mongo_url)
+
+            self.database = self.client[self.config.mongo_database]
+
+            # Test connection
+            await self.database.command("ping")
+            logging.info("Successfully connected to MongoDB")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to connect to MongoDB: {e}")
+            return False
+
+    async def disconnect(self):
+        """Disconnect from MongoDB."""
+        if self.client:
+            self.client.close()
+
+    def serialize_mongo_doc(self, doc: Any) -> Any:
+        """Convert MongoDB document to JSON serializable format."""
+        return json.loads(json_util.dumps(doc))
+
+    def get_tools(self):
+        """Get available MongoDB tools."""
+        return [
+            {
+                "name": "mongo_find",
+                "description": "Find documents in a MongoDB collection",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string", "description": "Collection name"},
+                        "filter": {"type": "object", "description": "Query filter", "default": {}},
+                        "projection": {"type": "object", "description": "Fields to include/exclude"},
+                        "limit": {"type": "integer", "description": "Maximum number of documents"},
+                        "skip": {"type": "integer", "description": "Number of documents to skip"},
+                        "sort": {"type": "object", "description": "Sort specification"}
+                    },
+                    "required": ["collection"]
                 }
-            )
+            },
+            {
+                "name": "mongo_insert",
+                "description": "Insert document(s) into a MongoDB collection",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string", "description": "Collection name"},
+                        "document": {"type": "object", "description": "Single document to insert"},
+                        "documents": {"type": "array", "description": "Multiple documents to insert"}
+                    },
+                    "required": ["collection"]
+                }
+            },
+            {
+                "name": "mongo_update",
+                "description": "Update document(s) in a MongoDB collection",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string", "description": "Collection name"},
+                        "filter": {"type": "object", "description": "Filter for documents to update"},
+                        "update": {"type": "object", "description": "Update operations"},
+                        "upsert": {"type": "boolean", "description": "Create document if not found", "default": False},
+                        "multi": {"type": "boolean", "description": "Update multiple documents", "default": False}
+                    },
+                    "required": ["collection", "filter", "update"]
+                }
+            },
+            {
+                "name": "mongo_delete",
+                "description": "Delete document(s) from a MongoDB collection",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string", "description": "Collection name"},
+                        "filter": {"type": "object", "description": "Filter for documents to delete"},
+                        "multi": {"type": "boolean", "description": "Delete multiple documents", "default": False}
+                    },
+                    "required": ["collection", "filter"]
+                }
+            },
+            {
+                "name": "mongo_aggregate",
+                "description": "Run aggregation pipeline on a MongoDB collection",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string", "description": "Collection name"},
+                        "pipeline": {"type": "array", "description": "Aggregation pipeline"},
+                        "options": {"type": "object", "description": "Aggregation options"}
+                    },
+                    "required": ["collection", "pipeline"]
+                }
+            },
+            {
+                "name": "mongo_stats",
+                "description": "Get database or collection statistics",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string", "description": "Collection name (optional for db stats)"},
+                        "type": {"type": "string", "enum": ["database", "collection"], "default": "database"}
+                    }
+                }
+            }
+        ]
 
-        else:
-            return MCPResponse(
-                id=request.id,
-                error=MCPError(
-                    code=-32601,
-                    message=f"Method '{request.method}' not found"
-                ).dict()
-            )
+    async def execute(self, tool_name: str, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Execute a MongoDB tool and return MCP-compatible content."""
+        if not self.database:
+            raise ValueError("MongoDB connection not established")
 
-    except Exception as e:
-        logger.error(f"MCP request failed: {e}")
-        return MCPResponse(
-            id=request.id,
-            error=MCPError(
-                code=-32603,
-                message=f"Internal error: {str(e)}"
-            ).dict()
+        try:
+            if tool_name == "mongo_find":
+                collection_name = arguments.get("collection")
+                filter_doc = arguments.get("filter", {})
+                projection = arguments.get("projection")
+                limit = arguments.get("limit")
+                skip = arguments.get("skip")
+                sort = arguments.get("sort")
+
+                collection = self.database[collection_name]
+                cursor = collection.find(filter_doc, projection)
+
+                if sort:
+                    cursor = cursor.sort(list(sort.items()))
+                if skip:
+                    cursor = cursor.skip(skip)
+                if limit:
+                    cursor = cursor.limit(limit)
+
+                documents = await cursor.to_list(length=limit or 1000)
+                serialized_docs = [self.serialize_mongo_doc(doc) for doc in documents]
+
+                content = f"Found {len(documents)} documents in collection '{collection_name}'"
+                if documents:
+                    content += f":\n\n{json.dumps(serialized_docs, indent=2)}"
+
+                return [{"type": "text", "text": content}]
+
+            elif tool_name == "mongo_insert":
+                collection_name = arguments.get("collection")
+                document = arguments.get("document")
+                documents = arguments.get("documents")
+
+                collection = self.database[collection_name]
+
+                if documents:
+                    result = await collection.insert_many(documents)
+                    content = f"Inserted {len(result.inserted_ids)} documents into '{collection_name}'"
+                    content += f"\nInserted IDs: {[str(id) for id in result.inserted_ids]}"
+                elif document:
+                    result = await collection.insert_one(document)
+                    content = f"Inserted document into '{collection_name}'"
+                    content += f"\nInserted ID: {str(result.inserted_id)}"
+                else:
+                    raise ValueError("Either 'document' or 'documents' must be provided")
+
+                return [{"type": "text", "text": content}]
+
+            elif tool_name == "mongo_update":
+                collection_name = arguments.get("collection")
+                filter_doc = arguments.get("filter")
+                update_doc = arguments.get("update")
+                upsert = arguments.get("upsert", False)
+                multi = arguments.get("multi", False)
+
+                collection = self.database[collection_name]
+
+                if multi:
+                    result = await collection.update_many(filter_doc, update_doc, upsert=upsert)
+                    content = f"Updated {result.modified_count} documents in '{collection_name}'"
+                    if result.upserted_id:
+                        content += f"\nUpserted ID: {str(result.upserted_id)}"
+                else:
+                    result = await collection.update_one(filter_doc, update_doc, upsert=upsert)
+                    content = f"Updated {result.modified_count} document in '{collection_name}'"
+                    if result.upserted_id:
+                        content += f"\nUpserted ID: {str(result.upserted_id)}"
+
+                return [{"type": "text", "text": content}]
+
+            elif tool_name == "mongo_delete":
+                collection_name = arguments.get("collection")
+                filter_doc = arguments.get("filter")
+                multi = arguments.get("multi", False)
+
+                collection = self.database[collection_name]
+
+                if multi:
+                    result = await collection.delete_many(filter_doc)
+                    content = f"Deleted {result.deleted_count} documents from '{collection_name}'"
+                else:
+                    result = await collection.delete_one(filter_doc)
+                    content = f"Deleted {result.deleted_count} document from '{collection_name}'"
+
+                return [{"type": "text", "text": content}]
+
+            elif tool_name == "mongo_aggregate":
+                collection_name = arguments.get("collection")
+                pipeline = arguments.get("pipeline")
+                options = arguments.get("options", {})
+
+                collection = self.database[collection_name]
+                cursor = collection.aggregate(pipeline, **options)
+                results = await cursor.to_list(length=None)
+                serialized_results = [self.serialize_mongo_doc(doc) for doc in results]
+
+                content = f"Aggregation completed on '{collection_name}'"
+                content += f"\nResults ({len(results)} documents):\n\n{json.dumps(serialized_results, indent=2)}"
+
+                return [{"type": "text", "text": content}]
+
+            elif tool_name == "mongo_stats":
+                stats_type = arguments.get("type", "database")
+                collection_name = arguments.get("collection")
+
+                if stats_type == "collection" and collection_name:
+                    stats = await self.database.command("collStats", collection_name)
+                    content = f"Collection '{collection_name}' statistics:\n\n{json.dumps(self.serialize_mongo_doc(stats), indent=2)}"
+                else:
+                    stats = await self.database.command("dbStats")
+                    content = f"Database '{self.database.name}' statistics:\n\n{json.dumps(self.serialize_mongo_doc(stats), indent=2)}"
+
+                return [{"type": "text", "text": content}]
+
+            else:
+                raise ValueError(f"Unknown tool: {tool_name}")
+
+        except Exception as e:
+            logging.error(f"MongoDB operation error: {e}")
+            raise ValueError(f"MongoDB operation failed: {str(e)}")
+
+
+class MongoMCPServer(BaseMCPServer):
+    """MCP Server for MongoDB operations."""
+
+    def __init__(self):
+        super().__init__("MongoDB", "1.0.0")
+
+        # Load configuration
+        self.config = MongoConfig(
+            host=os.getenv("MONGO_MCP_HOST", "0.0.0.0"),
+            port=int(os.getenv("MONGO_MCP_PORT", "8004")),
+            log_level=os.getenv("MONGO_LOG_LEVEL", "INFO"),
+            log_file=os.getenv("MONGO_LOG_FILE", "mongo_mcp.log"),
+            mongo_uri=os.getenv("MONGO_URI"),
+            mongo_host=os.getenv("MONGO_HOST", "localhost"),
+            mongo_port=int(os.getenv("MONGO_PORT", "27017")),
+            mongo_user=os.getenv("MONGO_USER"),
+            mongo_password=os.getenv("MONGO_PASSWORD"),
+            mongo_database=os.getenv("MONGO_DATABASE", "test")
         )
 
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    try:
-        if database is not None:
-            await database.command("ping")
-            return {
-                "status": "healthy",
-                "server": "mongo_mcp",
-                "version": "1.0.0",
-                "database": database.name,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+        self.mongo_ops = MongoOperations(self.config)
+
+    async def on_startup(self):
+        """Initialize MongoDB connection on startup."""
+        await super().on_startup()
+
+        # Connect to MongoDB
+        if await self.mongo_ops.connect():
+            self.logger.info("MongoDB MCP server started successfully")
         else:
-            return {
-                "status": "unhealthy",
-                "server": "mongo_mcp",
-                "error": "Not connected to MongoDB",
-                "timestamp": datetime.utcnow().isoformat()
-            }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "server": "mongo_mcp",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+            self.logger.error("Failed to connect to MongoDB")
 
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    """Initialize MongoDB connection on startup."""
-    await connect_to_mongo()
+    async def on_shutdown(self):
+        """Clean up MongoDB connection on shutdown."""
+        await self.mongo_ops.disconnect()
+        await super().on_shutdown()
 
-# Shutdown event
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Close MongoDB connection on shutdown."""
-    if client:
-        client.close()
-        logger.info("MongoDB connection closed")
+    async def get_health_status(self) -> Dict[str, Any]:
+        """Get health status including MongoDB connection info."""
+        base_status = await super().get_health_status()
+        base_status.update({
+            "mongodb_connected": self.mongo_ops.database is not None,
+            "mongodb_database": self.config.mongo_database
+        })
+        return base_status
+
+    async def handle_tools_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle tools/list request."""
+        tools = []
+        for tool in self.mongo_ops.get_tools():
+            tools.append({
+                "name": tool["name"],
+                "description": tool["description"],
+                "inputSchema": tool["inputSchema"],
+            })
+        return {"tools": tools}
+
+    async def handle_tools_call(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle tools/call request."""
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+
+        if not tool_name:
+            raise ValueError("Tool name is required")
+
+        self.logger.info(f"Executing MongoDB tool: {tool_name} with args: {arguments}")
+
+        # Execute the tool
+        result = await self.mongo_ops.execute(tool_name, arguments)
+
+        return {"content": result, "isError": False}
+
+
+def main():
+    """Main entry point for the MongoDB MCP server."""
+    server = MongoMCPServer()
+    server.run(host=server.config.host, port=server.config.port)
+
 
 if __name__ == "__main__":
-    # Get configuration from environment
-    host = os.getenv("MONGO_MCP_HOST", "0.0.0.0")
-    port = int(os.getenv("MONGO_MCP_PORT", "8004"))
-
-    logger.info(f"Starting MongoDB MCP server on {host}:{port}")
-
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info"
-    )
+    main()

@@ -40,14 +40,7 @@ toolsession-server = "server:main"
 
 [tool.setuptools]
 packages = []
-py-modules = [
-    "toolsession_server",
-    "tools",
-    "mongo",
-    "test_python_session",
-    "launch_python_server",
-    "test_mcp_client"
-]
+py-modules = ["server", "models", "mcp_foundation"]
 
 [tool.black]
 line-length = 88
