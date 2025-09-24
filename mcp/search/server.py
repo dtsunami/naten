@@ -320,11 +320,12 @@ class SearchMCPServer(BaseMCPServer):
 
     def run(self):
         """Run the MCP server."""
-        port = int(os.getenv("SEARCH_PORT", "8003"))
+        port = int(os.getenv("SEARCH_MCP_PORT", "3402"))
+        host = os.getenv("SEARCH_MCP_HOST", "0.0.0.0")
         self.logger.info(f"Starting Search MCP server on port {port}")
 
         # Use the base server's run method
-        super().run(host="0.0.0.0", port=port)
+        super().run(host=host, port=port)
 
 
 def main():
