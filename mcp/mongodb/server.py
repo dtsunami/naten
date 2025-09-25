@@ -16,7 +16,7 @@ from pymongo.errors import PyMongoError, DuplicateKeyError, OperationFailure
 # Load environment variables
 load_dotenv("../../.env")
 
-from mcp_foundation import BaseMCPServer
+from basemcp.server import BaseMCPServer
 from models import (
     MongoConfig, FindParams, InsertParams, UpdateParams,
     DeleteParams, AggregateParams, IndexParams,

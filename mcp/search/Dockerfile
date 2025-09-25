@@ -11,20 +11,25 @@ RUN apt-get update && apt-get install -y \
 # Create non-root user
 RUN groupadd -r search && useradd -r -g search search
 
-# Copy pyproject.toml first for better Docker layer caching
-COPY pyproject.toml .
+# Copy base MCP foundation files first
+COPY basemcp/ ./basemcp/
+
+
+# Copy pyproject.toml for package installation
+COPY search/pyproject.toml .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
 
-# Copy common foundation files
-COPY --from=common . /app
 
 # Copy application code
-COPY . .
-
+COPY search/ .
 # Create logs directory
 RUN mkdir -p /app/logs && chown -R search:search /app
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 # Switch to non-root user
 USER search

@@ -9,17 +9,18 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy pyproject.toml first for better caching
-COPY pyproject.toml .
+# Copy base MCP foundation files first
+COPY basemcp/ ./basemcp/
+
+# Copy pyproject.toml for package installation
+COPY toolsession/pyproject.toml .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
 
-# Copy common foundation files
-COPY --from=common . /app
-
 # Copy application code
-COPY . .
+COPY toolsession/ .
+
 
 # Create directories for logs and sessions
 RUN mkdir -p /app/logs
@@ -27,6 +28,10 @@ RUN mkdir -p /app/logs
 # Create non-root user for security
 RUN useradd -m -u 1000 toolsession && \
     chown -R toolsession:toolsession /app
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 USER toolsession
 

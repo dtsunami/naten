@@ -40,7 +40,7 @@ toolsession-server = "server:main"
 
 [tool.setuptools]
 packages = []
-py-modules = ["server", "models", "mcp_foundation"]
+py-modules = ["server", "models"]
 
 [tool.black]
 line-length = 88

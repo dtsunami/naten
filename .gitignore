@@ -9,6 +9,7 @@ __pycache__/
 **/build
 **/*.egg-info/
 
+**/*.egg-info
 # Environment and secrets
 .env
 .env.local

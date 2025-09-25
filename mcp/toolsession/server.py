@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from mcp_foundation import BaseMCPServer
+from basemcp.server import BaseMCPServer
 from models import ToolSessionConfig
 
 

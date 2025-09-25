@@ -8,24 +8,28 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Copy base MCP foundation files first
+COPY basemcp/ ./basemcp/
+
+
 # Copy project configuration
-COPY pyproject.toml .
+COPY mongodb/pyproject.toml .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
 
-# Copy common foundation files
-COPY --from=common . /app
-
 # Copy application code
-COPY . .
-
+COPY mongodb/ .
 # Create logs directory
 RUN mkdir -p /app/logs
 
 # Create non-root user
 RUN useradd -m -u 1000 mongomcp && \
     chown -R mongomcp:mongomcp /app
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 USER mongomcp
 

@@ -19,18 +19,15 @@ RUN groupadd -r mcpuser && useradd -r -g mcpuser mcpuser
 RUN mkdir -p /app/logs /app/config && \
     chown -R mcpuser:mcpuser /app
 
-# Copy package definition first for better layer caching
-COPY pyproject.toml .
+# Copy base MCP foundation files first
+COPY basemcp/ ./basemcp/
 
-# Install dependencies only (without source code)
-RUN pip install --no-cache-dir .
+# Copy source code
+COPY fileio/*.py .
+COPY fileio/*.json .
 
-# Copy common foundation files
-COPY --from=common . /app
-
-# Copy source code (all in root directory)
-COPY *.py .
-COPY *.json .
+# Copy package definition for installation
+COPY fileio/pyproject.toml .
 
 # Install the package in development mode (editable)
 RUN pip install -e .

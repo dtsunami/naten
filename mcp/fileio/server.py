@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv("../../.env")
 
-from mcp_foundation import BaseMCPServer
+from basemcp.server import BaseMCPServer
 from models import FileIOConfig
 from directory_ops import DirectoryOperations
 from file_ops import FileOperations

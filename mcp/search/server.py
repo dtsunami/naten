@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv("../../.env")
 
 from mcp import types
-from mcp_foundation import BaseMCPServer
+from basemcp.server import BaseMCPServer
 from models import SearchResult, ContentExtraction
 
 class SearchEngine:
