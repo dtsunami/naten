@@ -27,7 +27,8 @@ dependencies = [
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
     "motor>=3.1.0",
-    "keyboard>=0.13.5",
+    "rich>=13.7.0",
+    "questionary>=2.0.0",
 ]
 
 [project.optional-dependencies]

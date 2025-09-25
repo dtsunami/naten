@@ -262,9 +262,9 @@ Examples:
                     print("🧹 Memory cleared!")
                     continue
 
-                # Chat with agent using simple async UI
-                from .async_ui_simple import simple_async_ui
-                response = await simple_async_ui.chat_with_agent(
+                # Chat with agent using modern UI
+                from .ui_modern import modern_ui
+                response = await modern_ui.chat_with_agent(
                     self.agent.chat,
                     user_input
                 )

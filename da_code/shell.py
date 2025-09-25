@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .models import CommandExecution, CommandStatus, UserResponse
-from .ui import confirm_command, get_command_modification
+from .ui_modern import modern_ui
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,8 @@ class ShellExecutor:
 
     async def execute_with_confirmation(self, execution: CommandExecution) -> CommandExecution:
         """Execute command after getting user confirmation."""
-        # Use improved UI for confirmation
-        response = confirm_command(
+        # Use modern UI for confirmation (respects DA_CODE_AUTO_ACCEPT)
+        response = await modern_ui.confirm_command(
             command=execution.command,
             explanation=execution.explanation or "",
             working_directory=execution.working_directory,
@@ -39,14 +39,14 @@ class ShellExecutor:
 
         elif response == "modify":
             # Allow user to modify command
-            modified_command = get_command_modification(execution.command)
+            modified_command = await modern_ui.get_command_modification(execution.command)
             if modified_command:
                 execution.user_modifications = modified_command
                 execution.command = modified_command
-                print(f"✏️  Command modified to: {modified_command}")
+                modern_ui.show_success(f"Command modified to: {modified_command}")
             else:
                 execution.update_status(CommandStatus.DENIED)
-                print("❌ Command execution cancelled.")
+                modern_ui.show_warning("Command execution cancelled.")
                 return execution
 
         elif response == "explain":
