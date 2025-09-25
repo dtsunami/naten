@@ -210,26 +210,33 @@ curl -X POST http://localhost:8080/fileio/execute \
 
 ### Building MCP Servers
 
-All MCP servers use a shared foundation located in `mcp/common/`. When building Docker images, you must use the build context flag to access these shared files:
+All MCP servers use a shared foundation located in `mcp/basemcp/`. The build system uses a shared context from the MCP root directory to access these foundation files:
 
 ```bash
-# Build with common foundation files
-cd mcp/[server-name]
-docker build --build-context common=../common -t [server-name]:latest .
+# Build from project root using docker-compose (recommended)
+docker-compose build --no-cache fileio python search mcpmongo
 
-# Examples for each server:
-cd mcp/fileio && docker build --build-context common=../common -t fileio:found34 .
-cd mcp/search && docker build --build-context common=../common -t search:found34 .
-cd mcp/toolsession && docker build --build-context common=../common -t toolsession:found34 .
-cd mcp/mongodb && docker build --build-context common=../common -t mongodb:found34 .
+# Or build individual services with proper context
+cd /path/to/project
+docker-compose build fileio  # Builds fileio:v2
+docker-compose build python  # Builds toolsession:v2
+docker-compose build search  # Builds search:v2
+docker-compose build mcpmongo # Builds mongodb:v2
 ```
 
-### Common Foundation Files
+**Current Image Tags**: All MCP services use `v2` tags for the latest stable build.
 
-The `mcp/common/` directory contains shared resources:
-- `mcp_foundation.py`: Base MCP server class with FastAPI integration
-- `tools.py`: Common utility functions
-- `ts_mongo.py`: MongoDB helper functions
+### Foundation Module Structure
+
+The `mcp/basemcp/` directory contains shared resources:
+- `server.py`: Base MCP server class with FastAPI integration (formerly `mcp_foundation.py`)
+- `__init__.py`: Python package initialization
+- Additional utility modules as needed
+
+**Import Pattern**: All MCP servers import the base class using:
+```python
+from basemcp.server import BaseMCPServer
+```
 
 ### Adding New MCP Servers
 
@@ -250,27 +257,68 @@ The `mcp/common/` directory contains shared resources:
 
 3. **Dockerfile Template**:
    ```dockerfile
-   FROM python:3.11-slim
-   WORKDIR /app
-   COPY pyproject.toml .
-   RUN pip install --no-cache-dir -e .
+   FROM python:3.12-slim
 
-   # Copy common foundation files
-   COPY --from=common . /app
+   # Install system dependencies
+   RUN apt-get update && apt-get install -y gcc curl && rm -rf /var/lib/apt/lists/*
+
+   WORKDIR /app
+
+   # Copy base MCP foundation files first
+   COPY basemcp/ ./basemcp/
 
    # Copy application code
-   COPY . .
+   COPY new-server/ .
+
+   # Copy pyproject.toml for package installation
+   COPY new-server/pyproject.toml .
+
+   # Install Python dependencies
+   RUN pip install --no-cache-dir -e .
+
+   # Create non-root user
+   RUN useradd -m -u 1000 newserver && chown -R newserver:newserver /app
+
+   # Set environment variables
+   ENV PYTHONPATH=/app
+   ENV PYTHONUNBUFFERED=1
+
+   USER newserver
+
+   # Health check
+   HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+       CMD curl -f http://localhost:PORT/health || exit 1
 
    CMD ["python", "server.py"]
    ```
 
-4. **Build with Common Context**:
-   ```bash
-   docker build --build-context common=../common -t new-server:latest .
+4. **Add to docker-compose.yml**:
+   ```yaml
+   new-server:
+     build:
+       context: ./mcp
+       dockerfile: new-server/Dockerfile
+     image: new-server:v2
+     container_name: new_server_mcp
+     ports:
+       - "PORT:PORT"
    ```
 
-5. **Update Docker Compose**:
-   Add service definition to `docker-compose.yml`
+5. **Build the Service**:
+   ```bash
+   docker-compose build new-server
+   ```
+
+6. **Import the Base Server**:
+   ```python
+   # In your new-server/server.py file
+   from basemcp.server import BaseMCPServer
+
+   class NewMCPServer(BaseMCPServer):
+       def __init__(self):
+           super().__init__(name="new-server")
+           # Your server initialization
+   ```
 
 6. **Update Gateway**:
    Add routing rules to `gateway/nginx.conf`
