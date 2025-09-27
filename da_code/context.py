@@ -57,12 +57,6 @@ class ContextLoader:
         """Load MCP server information from DA.json file and add built-in servers."""
         servers = []
 
-        # Always add the built-in todo MCP server
-        from .todo_mcp import TodoMCPServer
-        todo_server = TodoMCPServer(str(self.project_root))
-        servers.append(todo_server.get_server_info())
-        logger.info("Added built-in todo MCP server")
-
         # Load external MCP servers from DA.json
         try:
             if not self.da_json_path.exists():
@@ -164,37 +158,16 @@ class ContextLoader:
         sample_data = {
             "mcp_servers": [
                 {
-                    "name": "fileio",
-                    "url": "http://localhost:8080/fileio",
-                    "port": 8000,
-                    "description": "File operations MCP server",
-                    "tools": ["read_file", "write_file", "list_files", "search_files"]
-                },
-                {
-                    "name": "python",
-                    "url": "http://localhost:8080/python",
-                    "port": 8002,
-                    "description": "Python tool session MCP server",
-                    "tools": ["create_session", "execute_code", "list_sessions"]
-                },
-                {
                     "name": "search",
                     "url": "http://localhost:8080/search",
                     "port": 8003,
                     "description": "Web search MCP server",
                     "tools": ["web_search", "extract_content"]
-                },
-                {
-                    "name": "mongodb",
-                    "url": "http://localhost:8080/mongo",
-                    "port": 8004,
-                    "description": "MongoDB operations MCP server",
-                    "tools": ["query", "insert", "update", "delete"]
                 }
             ],
-            "default_working_directory": "/mnt/blk/lostboy/work/wip",
+            "default_working_directory": ".",
             "agent_settings": {
-                "model": "gpt-4",
+                "model": "gpt-40",
                 "temperature": 0.7,
                 "max_tokens": None,
                 "require_confirmation": True

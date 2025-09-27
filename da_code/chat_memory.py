@@ -6,23 +6,15 @@ from typing import Optional
 
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_postgres import PostgresChatMessageHistory
+from langchain_community.chat_message_histories import FileChatMessageHistory
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # Try to import PostgreSQL chat history (graceful fallback if not available)
-try:
-    from langchain_community.chat_message_histories import PostgresChatMessageHistory
-    POSTGRES_AVAILABLE = True
-except ImportError:
-    POSTGRES_AVAILABLE = False
-    logger.warning("PostgreSQL chat message history not available - install with: pip install psycopg2-binary")
-
-# Try to import Redis chat history (optional)
-try:
-    from langchain_community.chat_message_histories import RedisChatMessageHistory
-    REDIS_AVAILABLE = True
-except ImportError:
-    REDIS_AVAILABLE = False
+POSTGRES_AVAILABLE = False
 
 
 class ChatMemoryManager:
@@ -49,40 +41,21 @@ class ChatMemoryManager:
         if postgres_history:
             return postgres_history
 
-        # Strategy 2: Redis (good for distributed systems)
-        redis_history = self._try_redis()
-        if redis_history:
-            return redis_history
-
-        # Strategy 3: File-based (persistence without database)
+        # Strategy 2: File-based (persistence without database)
         file_history = self._try_file()
         if file_history:
             return file_history
 
-        # Strategy 4: In-memory (fallback)
+        # Strategy 3: In-memory (fallback)
         logger.info("Using in-memory chat history (no persistence)")
         self.memory_type = "memory"
         return ChatMessageHistory()
 
     def _try_postgres(self) -> Optional[BaseChatMessageHistory]:
         """Try to create PostgreSQL chat history."""
-        if not POSTGRES_AVAILABLE:
-            logger.debug("PostgreSQL chat history not available")
-            return None
 
         # Check for PostgreSQL environment variables
-        postgres_url = os.getenv("CHAT_POSTGRES_URL") or os.getenv("POSTGRES_CHAT_URL")
-
-        # Alternative: construct from individual components
-        if not postgres_url:
-            host = os.getenv("CHAT_POSTGRES_HOST", "localhost")
-            port = os.getenv("CHAT_POSTGRES_PORT", "5434")  # Your chat DB port
-            user = os.getenv("CHAT_POSTGRES_USER", "lostboy")
-            password = os.getenv("CHAT_POSTGRES_PASSWORD")
-            database = os.getenv("CHAT_POSTGRES_DB", "orenco_chatmemory")
-
-            if password:
-                postgres_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+        postgres_url = os.getenv("POSTGRES_CHAT_URL", None)
 
         if not postgres_url:
             logger.debug("PostgreSQL configuration not found")
@@ -99,51 +72,13 @@ class ChatMemoryManager:
             # Try to access the chat history to test connection
             chat_history.messages  # This will trigger connection test
 
-            logger.info(f"Connected to PostgreSQL chat memory: {database}")
+            logger.info(f"Connected to PostgreSQL chat memory: !")
+            print(f"Connected to PostgreSQL chat memory: !")
             self.memory_type = "postgres"
             return chat_history
 
         except Exception as e:
             logger.warning(f"PostgreSQL chat history connection failed: {e}")
-            return None
-
-    def _try_redis(self) -> Optional[BaseChatMessageHistory]:
-        """Try to create Redis chat history."""
-        if not REDIS_AVAILABLE:
-            logger.debug("Redis chat history not available")
-            return None
-
-        redis_url = os.getenv("REDIS_CHAT_URL") or os.getenv("REDIS_URL")
-        if not redis_url:
-            # Try to construct from components
-            host = os.getenv("REDIS_HOST", "localhost")
-            port = os.getenv("REDIS_PORT", "6379")
-            password = os.getenv("REDIS_PASSWORD")
-
-            if password:
-                redis_url = f"redis://:{password}@{host}:{port}"
-            else:
-                redis_url = f"redis://{host}:{port}"
-
-        if not redis_url:
-            logger.debug("Redis configuration not found")
-            return None
-
-        try:
-            chat_history = RedisChatMessageHistory(
-                session_id=self.session_id,
-                url=redis_url
-            )
-
-            # Test connection
-            chat_history.messages
-
-            logger.info("Connected to Redis chat memory")
-            self.memory_type = "redis"
-            return chat_history
-
-        except Exception as e:
-            logger.warning(f"Redis chat history connection failed: {e}")
             return None
 
     def _try_file(self) -> Optional[BaseChatMessageHistory]:
@@ -155,9 +90,7 @@ class ChatMemoryManager:
                 logger.debug("File-based chat history disabled")
                 return None
 
-            from langchain_community.chat_message_histories import FileChatMessageHistory
-            import os
-            from pathlib import Path
+
 
             # Create sessions directory
             sessions_dir = Path(os.getenv("DA_CODE_SESSIONS_DIR", "./da_code_sessions"))
@@ -219,59 +152,3 @@ def create_chat_memory_manager(session_id: str) -> ChatMemoryManager:
     """Factory function to create a chat memory manager."""
     return ChatMemoryManager(session_id)
 
-
-def test_memory_connections() -> dict:
-    """Test all available memory connections and return status."""
-    status = {
-        "postgres": {"available": POSTGRES_AVAILABLE, "connected": False},
-        "redis": {"available": REDIS_AVAILABLE, "connected": False},
-        "file": {"available": True, "connected": False},
-        "memory": {"available": True, "connected": True}
-    }
-
-    # Test PostgreSQL
-    if POSTGRES_AVAILABLE:
-        manager = ChatMemoryManager("test_session")
-        postgres_history = manager._try_postgres()
-        status["postgres"]["connected"] = postgres_history is not None
-
-    # Test Redis
-    if REDIS_AVAILABLE:
-        manager = ChatMemoryManager("test_session")
-        redis_history = manager._try_redis()
-        status["redis"]["connected"] = redis_history is not None
-
-    # Test File
-    manager = ChatMemoryManager("test_session")
-    file_history = manager._try_file()
-    status["file"]["connected"] = file_history is not None
-
-    return status
-
-
-if __name__ == "__main__":
-    # Demo/test the memory manager
-    import json
-
-    print("Testing da_code Chat Memory Manager")
-    print("=" * 40)
-
-    # Test connections
-    status = test_memory_connections()
-    print("\nConnection Status:")
-    print(json.dumps(status, indent=2))
-
-    # Test memory manager
-    print("\nTesting Chat Memory Manager:")
-    manager = create_chat_memory_manager("demo_session")
-    history = manager.get_chat_history()
-
-    print(f"Memory Type: {manager.memory_type}")
-    print(f"Memory Info: {json.dumps(manager.get_memory_info(), indent=2)}")
-
-    # Add test message
-    from langchain_core.messages import HumanMessage
-    history.add_message(HumanMessage(content="Test message"))
-
-    print(f"Messages after adding test: {len(history.messages)}")
-    print(f"Export: {manager.export_history()}")

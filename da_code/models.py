@@ -293,7 +293,7 @@ class AgentConfig(BaseModel):
     # Agent behavior
     temperature: float = Field(0.7, ge=0.0, le=2.0, description="Model temperature")
     max_tokens: Optional[int] = Field(None, description="Maximum tokens per response")
-    timeout: Optional[int] = Field(60, description="Request timeout in seconds")
+    agent_timeout: Optional[int] = Field(60, description="Request timeout in seconds")
     max_retries: int = Field(2, description="Maximum number of retries")
 
     # Tool configuration

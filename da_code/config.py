@@ -57,7 +57,7 @@ class ConfigManager:
         api_version = os.getenv('AZURE_OPENAI_API_VERSION', '2023-12-01-preview')
         temperature = float(os.getenv('DA_CODE_TEMPERATURE', '0.7'))
         max_tokens = os.getenv('DA_CODE_MAX_TOKENS')
-        timeout = int(os.getenv('DA_CODE_TIMEOUT', '60'))
+        agent_timeout = int(os.getenv('DA_CODE_AGENT_TIMEOUT', '600'))
         max_retries = int(os.getenv('DA_CODE_MAX_RETRIES', '2'))
         command_timeout = int(os.getenv('DA_CODE_COMMAND_TIMEOUT', '300'))
         require_confirmation = os.getenv('DA_CODE_REQUIRE_CONFIRMATION', 'true').lower() == 'true'
@@ -69,7 +69,7 @@ class ConfigManager:
             deployment_name=deployment_name,
             temperature=temperature,
             max_tokens=int(max_tokens) if max_tokens else None,
-            timeout=timeout,
+            agent_timeout=agent_timeout,
             max_retries=max_retries,
             command_timeout=command_timeout,
             require_confirmation=require_confirmation
@@ -91,7 +91,7 @@ AZURE_OPENAI_API_VERSION=2023-12-01-preview
 # Agent Behavior Settings (Optional)
 DA_CODE_TEMPERATURE=0.7
 DA_CODE_MAX_TOKENS=
-DA_CODE_TIMEOUT=60
+DA_CODE_AGENT_TIMEOUT=600
 DA_CODE_MAX_RETRIES=2
 DA_CODE_COMMAND_TIMEOUT=300
 DA_CODE_REQUIRE_CONFIRMATION=true

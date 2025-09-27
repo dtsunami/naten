@@ -7,7 +7,7 @@ name = "da_code"
 version = "0.1.0"
 description = "Agentic CLI tool with LangChain and Azure OpenAI"
 authors = [
-    {name = "da_code", email = "noreply@example.com"}
+    {name = "da_code", email = "daniel.tsunami@intel.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -29,18 +29,11 @@ dependencies = [
     "motor>=3.1.0",
     "rich>=13.7.0",
     "questionary>=2.0.0",
+    "langchain_postgres",
+    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]
-postgres = [
-    "psycopg2-binary>=2.9.0",
-]
-redis = [
-    "redis>=4.0.0",
-]
-persistence = [
-    "da_code[postgres,redis]",
-]
 dev = [
     "pytest>=7.0.0",
     "black>=23.0.0",
@@ -48,16 +41,14 @@ dev = [
     "ruff>=0.1.0",
 ]
 all = [
-    "da_code[persistence,dev]",
+    "da_code[dev]",
 ]
 
 [project.scripts]
-da_code = "da_code.cli:cli_entry_point"
+da_code = "da_code.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/example/da_code"
-Repository = "https://github.com/example/da_code"
-Issues = "https://github.com/example/da_code/issues"
+Repository = "https://github.com/dtsunami/naten/da_code"
 
 [tool.setuptools]
 package-dir = {"da_code" = "."}
