@@ -4,13 +4,14 @@ An intelligent command-line interface that combines LangChain agents with Azure 
 
 ## 🌟 Features
 
-- **🤖 LangChain Agent**: Powered by Azure OpenAI (GPT-4/3.5-turbo)
-- **🔒 Safe Command Execution**: All commands require user approval with risk assessment
+- **🤖 Custom Async Agent**: Native ReAct agent with Azure OpenAI (GPT-4+)
+- **🔒 Safe Command Execution**: Interactive confirmation with arrow key navigation
 - **📋 Project Context Awareness**: Loads project information from DA.md
 - **🔧 MCP Server Integration**: Connect to Model Context Protocol servers
-- **📊 AgentOps Monitoring**: Optional performance and cost tracking
-- **💾 Session Management**: Persistent tracking of all interactions and commands
-- **⚡ Interactive CLI**: Rich terminal interface with conversation memory
+- **💾 Multi-tier Chat Memory**: PostgreSQL → File → In-memory fallback
+- **📝 Todo Management**: Built-in todo.md file management tool
+- **⚡ Rich Terminal Interface**: Clean status display and file-based command history
+- **📊 MongoDB Telemetry**: Optional performance and usage tracking
 
 ## 🚀 Quick Start
 
@@ -82,6 +83,7 @@ Once in the session, you can:
 - **Request operations**: "Install the requests package"
 - **Code analysis**: "Review the main.py file for potential issues"
 - **System commands**: "Run the test suite"
+- **Todo management**: Agent automatically tracks work items in todo.md
 
 ### Special Commands
 
@@ -107,14 +109,18 @@ AZURE_OPENAI_API_VERSION=2023-12-01-preview
 # Optional: Agent Behavior
 DA_CODE_TEMPERATURE=0.7
 DA_CODE_MAX_TOKENS=
-DA_CODE_TIMEOUT=60
+DA_CODE_AGENT_TIMEOUT=600
 DA_CODE_MAX_RETRIES=2
 DA_CODE_COMMAND_TIMEOUT=300
 DA_CODE_REQUIRE_CONFIRMATION=true
 
-# Optional: AgentOps Monitoring
-AGENTOPS_API_KEY=your_agentops_key_here
-DA_CODE_AGENTOPS_TAGS=da_code,azure,langchain
+# Optional: Chat Memory
+POSTGRES_CHAT_URL=postgresql://user:pass@localhost:5432/db
+DA_CODE_CHAT_MEMORY_DIR=./da_code_chat_memory
+
+# Optional: MongoDB Telemetry
+MONGO_HOST=localhost
+MONGO_PORT=8004
 
 # Optional: Logging
 LOG_LEVEL=INFO
@@ -194,15 +200,15 @@ Dangerous commands are highlighted:
 - 🌐 **NETWORK**: Commands accessing the internet
 - ⚙️ **SYSTEM**: Commands affecting system services
 
-## 📊 Monitoring with AgentOps
+## 📊 MongoDB Telemetry
 
-Enable comprehensive monitoring by setting `AGENTOPS_API_KEY`:
+Optional MongoDB integration for tracking session performance:
 
-- **Performance Tracking**: Response times and token usage
-- **Cost Monitoring**: Track Azure OpenAI API costs
-- **Session Analytics**: Command success rates and patterns
-- **Error Tracking**: Detailed error logs and contexts
-- **Interactive Dashboard**: View real-time session metrics
+- **Session Metrics**: Response times and token usage
+- **Command Tracking**: Success rates and execution patterns
+- **Agent Performance**: Detailed execution analytics
+- **Error Logging**: Comprehensive error tracking and context
+- **Real-time Monitoring**: Live session data collection
 
 ## 🔌 MCP Server Integration
 
@@ -225,7 +231,7 @@ Available MCP servers in this stack:
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   User Input    │───▶│  LangChain Agent │───▶│  Azure OpenAI   │
+│   User Input    │───▶│   Async Agent    │───▶│  Azure OpenAI   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
          │                        │                        │
          ▼                        ▼                        ▼
@@ -236,8 +242,8 @@ Available MCP servers in this stack:
          │                        │                        │
          ▼                        ▼                        ▼
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ Session Tracking│    │   Shell Process  │    │ AgentOps Monitor│
-│   & Persistence │    │   Management     │    │   & Analytics   │
+│ PostgreSQL Chat │    │ Todo Management  │    │ MongoDB Monitor │
+│    Memory       │    │   & Tracking     │    │   & Telemetry   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
 ```
 
@@ -300,13 +306,13 @@ pytest installed successfully!
 ```
 da_code/
 ├── __init__.py          # Package initialization
-├── models.py            # Pydantic2 data models
-├── context.py           # Project context loading
+├── models.py            # Pydantic data models
 ├── config.py            # Configuration management
-├── shell.py             # Command execution with approval
-├── agent.py             # LangChain agent implementation
-├── monitoring.py        # AgentOps integration
-├── cli.py               # CLI entry point
+├── async_agent.py       # Custom async ReAct agent
+├── chat_memory.py       # Multi-tier chat memory management
+├── todo_tool.py         # Todo.md file management
+├── telemetry.py         # MongoDB telemetry tracking
+├── cli.py               # CLI entry point with rich interface
 ├── pyproject.toml       # Project configuration
 └── README.md           # This file
 ```
@@ -332,10 +338,11 @@ ruff check da_code/
 
 ### Adding New Features
 
-1. **New Tools**: Add to `agent.py` `_create_tools()` method
+1. **New Tools**: Add to `async_agent.py` `_create_tools()` method
 2. **New Commands**: Extend `cli.py` argument parser
-3. **New Models**: Add to `models.py` with Pydantic2
-4. **MCP Integration**: Extend `MCPTool` class in `agent.py`
+3. **New Models**: Add to `models.py` with Pydantic validation
+4. **Memory Integration**: Extend `chat_memory.py` for new storage types
+5. **Telemetry**: Add tracking to `telemetry.py` for new features
 
 ## ❗ Troubleshooting
 
@@ -352,10 +359,10 @@ da_code setup
 - Check API key is valid and has proper permissions
 - Ensure deployment name matches your Azure OpenAI deployment
 
-**MCP servers not responding:**
-- Check server URLs in DA.json
-- Verify MCP servers are running: `docker compose ps`
-- Test server health: `curl http://localhost:8080/fileio/health`
+**Chat memory issues:**
+- Check PostgreSQL connection with `POSTGRES_CHAT_URL`
+- Verify file permissions for `DA_CODE_CHAT_MEMORY_DIR`
+- Review logs for memory fallback behavior
 
 **Commands hanging:**
 - Check timeout settings in configuration
@@ -396,8 +403,8 @@ MIT License - see LICENSE file for details.
 - Check the troubleshooting section above
 - Review configuration with `da_code status`
 - Enable debug logging for detailed error information
-- Check AgentOps dashboard for monitoring insights
+- Monitor MongoDB telemetry for session insights
 
 ---
 
-**Built with ❤️ using LangChain, Azure OpenAI, and the power of human-AI collaboration.**
+**Built with ❤️ using custom async agents, Azure OpenAI, and the power of human-AI collaboration.**

@@ -13,39 +13,25 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from .agent_interface import AgentInterface
 from .models import (
     AgentConfig, CodeSession, CommandExecution, CommandStatus,
-    LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, da_mongo
+    LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, UserResponse, da_mongo
 )
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .chat_memory import create_chat_memory_manager
 from .telemetry import TelemetryManager, PerformanceTracker
+from .todo_tool import create_todo_tool
 
 logger = logging.getLogger(__name__)
 
 
-class ConfirmationRequired(Exception):
-    """Exception raised when command confirmation is required."""
-    pass
+# ConfirmationRequired exception removed - using direct callbacks now
 
 
-class AsyncTool:
-    """Base class for async tools."""
+class AsyncCommandTool:
+    """Async command execution tool with direct confirmation support."""
 
-    def __init__(self, name: str, description: str):
-        self.name = name
-        self.description = description
-
-    async def execute(self, input_data: str) -> str:
-        """Execute the tool asynchronously."""
-        raise NotImplementedError
-
-
-class AsyncCommandTool(AsyncTool):
-    """Async command execution tool with native confirmation support."""
-
-    def __init__(self, session: CodeSession, event_emitter):
-        super().__init__(
-            "execute_command",
-            """Execute shell/bash commands with automatic user confirmation.
+    def __init__(self, session: CodeSession, agent):
+        self.name = "execute_command"
+        self.description = """Execute shell/bash commands with automatic user confirmation.
 
 Input should be a JSON string with:
 - command: The command to execute
@@ -57,33 +43,47 @@ Input should be a JSON string with:
 Example: {"command": "ls -la", "explanation": "List directory contents", "reasoning": "User wants to see files"}
 
 The tool will request user confirmation before executing any command."""
-        )
         self.session = session
-        self.event_emitter = event_emitter
+        self.agent = agent
 
     async def execute(self, input_data: str) -> str:
-        """Execute command with real-time confirmation."""
+        """Execute command with direct confirmation callback."""
         try:
-            # Parse input with better error handling
-            logger.info(f"Tool input received: {repr(input_data)}")
+            # Parse input
+            logger.debug(f"Tool input received: {repr(input_data)}")
 
             if isinstance(input_data, str):
                 try:
                     params = json.loads(input_data)
-                    logger.info(f"Successfully parsed JSON: {params}")
                 except json.JSONDecodeError as e:
-                    logger.warning(f"JSON decode error: {e}. Using input as command: {repr(input_data)}")
-                    params = {"command": input_data, "explanation": "Execute shell command"}
+                    logger.warning(f"JSON decode error for tool input: {e}")
+                    logger.warning(f"Raw input: {repr(input_data)}")
+
+                    # Better fallback: if input looks like JSON but is malformed, try to extract command
+                    if input_data.strip().startswith('{') and '"command"' in input_data:
+                        # Try to extract command from malformed JSON
+                        import re
+                        command_match = re.search(r'"command"\s*:\s*"([^"]*)"', input_data)
+                        if command_match:
+                            extracted_command = command_match.group(1)
+                            logger.info(f"Extracted command from malformed JSON: {extracted_command}")
+                            params = {"command": extracted_command, "explanation": "Extracted from malformed JSON"}
+                        else:
+                            return f"Error: Malformed JSON input and couldn't extract command: {input_data[:100]}"
+                    else:
+                        # Treat entire input as command (old fallback behavior)
+                        params = {"command": input_data, "explanation": "Direct command input"}
             else:
                 params = input_data
-                logger.info(f"Non-string input received: {params}")
 
             command = params.get("command", "").strip()
             if not command:
-                logger.debug(f"No command found in params: {params}")
+                logger.error(f"No command found in params: {params}")
+                logger.error(f"Original input_data: {repr(input_data)}")
                 return "Error: No command provided"
 
-            logger.debug(f"Extracted command: {repr(command)}")
+            # Debug log the parsed command
+            logger.debug(f"Parsed command: {repr(command)}")
 
             # Create command execution record
             execution = CommandExecution(
@@ -94,21 +94,48 @@ The tool will request user confirmation before executing any command."""
                 related_files=params.get("related_files", [])
             )
 
-            # Store this execution globally for the CLI to find
-            if not hasattr(self.session, '_current_confirmation'):
-                self.session._current_confirmation = None
+            # Use direct callback - much simpler!
+            if self.agent.confirmation_handler:
+                confirmation_response = await self.agent.confirmation_handler(execution)
+                if not confirmation_response:
+                    execution.update_status(CommandStatus.DENIED)
+                    self.session.add_execution(execution)
+                    return "❌ Command execution cancelled - no response received"
 
-            self.session._current_confirmation = execution
+                # Handle the response directly
+                return await self._handle_confirmation_response(execution, confirmation_response)
+            else:
+                # No confirmation handler, execute directly (for testing)
+                return await self._execute_approved_command(execution)
 
-            # Raise special exception to trigger confirmation flow
-            raise ConfirmationRequired(f"Command confirmation needed: {command}")
-
-        except ConfirmationRequired:
-            # Re-raise to trigger confirmation
-            raise
         except Exception as e:
             logger.error(f"Error in command execution tool: {e}")
             return f"Error executing command: {str(e)}"
+
+    async def _handle_confirmation_response(self, execution: CommandExecution, confirmation_response) -> str:
+        """Handle confirmation response and execute command."""
+        # Use enum values for consistent comparison
+        choice = confirmation_response.choice.lower()
+
+        if choice == UserResponse.YES.value:
+            return await self._execute_approved_command(execution)
+        elif choice == UserResponse.NO.value:
+            execution.update_status(CommandStatus.DENIED)
+            self.session.add_execution(execution)
+            return "❌ Command execution cancelled by user"
+        elif choice == UserResponse.MODIFY.value:
+            if confirmation_response.modified_command:
+                execution.command = confirmation_response.modified_command
+                execution.user_modifications = confirmation_response.modified_command
+            return await self._execute_approved_command(execution)
+        elif choice == UserResponse.EXPLAIN.value:
+            execution.update_status(CommandStatus.DENIED)
+            self.session.add_execution(execution)
+            return f"❓ Command explanation requested: {execution.command}"
+        else:
+            execution.update_status(CommandStatus.DENIED)
+            self.session.add_execution(execution)
+            return f"❌ Unknown confirmation choice: {confirmation_response.choice}"
 
     async def _execute_approved_command(self, execution: CommandExecution) -> str:
         """Execute an approved command."""
@@ -140,9 +167,15 @@ The tool will request user confirmation before executing any command."""
                 self.session.add_execution(execution)
 
                 output = f"✅ Command executed successfully\n"
-                output += f"Exit code: {result.returncode}\n"
                 if result.stdout:
-                    output += f"Output: {result.stdout[:500]}..."
+                    # Show full output for shorter results, truncate longer ones intelligently
+                    stdout = result.stdout.strip()
+                    if len(stdout) <= 2000:
+                        output += f"Output:\n{stdout}"
+                    else:
+                        output += f"Output:\n{stdout[:2000]}...\n(truncated - showing first 2000 chars)"
+                else:
+                    output += "No output"
                 return output
             else:
                 execution.update_status(CommandStatus.FAILED)
@@ -151,7 +184,13 @@ The tool will request user confirmation before executing any command."""
                 output = f"❌ Command failed\n"
                 output += f"Exit code: {result.returncode}\n"
                 if result.stderr:
-                    output += f"Error: {result.stderr[:500]}..."
+                    stderr = result.stderr.strip()
+                    if len(stderr) <= 1000:
+                        output += f"Error:\n{stderr}"
+                    else:
+                        output += f"Error:\n{stderr[:1000]}...\n(truncated - showing first 1000 chars)"
+                else:
+                    output += "No error output"
                 return output
 
         except subprocess.TimeoutExpired:
@@ -167,71 +206,7 @@ The tool will request user confirmation before executing any command."""
             return f"❌ Command execution failed: {str(e)}"
 
 
-class AsyncEventEmitter:
-    """Handles async event emission and confirmation requests."""
-
-    def __init__(self):
-        self._event_queue = asyncio.Queue()
-        self._pending_confirmations = {}
-        self._next_confirmation_id = 0
-
-    async def emit_event(self, event: ExecutionEvent):
-        """Emit an event to the queue."""
-        await self._event_queue.put(event)
-
-    async def request_confirmation(self, execution: CommandExecution) -> Optional[ConfirmationResponse]:
-        """Request confirmation and wait for response."""
-        confirmation_id = self._next_confirmation_id
-        self._next_confirmation_id += 1
-
-        # Store the execution for later retrieval
-        self._pending_confirmations[confirmation_id] = {"execution": execution, "response": None}
-
-        # Emit confirmation event with ID embedded
-        event = ExecutionEvent(
-            event_type=EventType.COMMAND_CONFIRMATION_NEEDED,
-            framework="custom_async",
-            execution=execution,
-            content=f"Command confirmation needed: {execution.command}",
-            metadata={"confirmation_id": confirmation_id}
-        )
-
-        await self.emit_event(event)
-
-        # Wait for response using polling instead of futures
-        for _ in range(3000):  # 5 minutes with 0.1s intervals
-            await asyncio.sleep(0.1)
-            if confirmation_id in self._pending_confirmations:
-                pending = self._pending_confirmations[confirmation_id]
-                if pending["response"] is not None:
-                    response = pending["response"]
-                    del self._pending_confirmations[confirmation_id]
-                    return response
-            else:
-                # Confirmation was handled and removed
-                return None
-
-        # Timeout
-        logger.warning(f"Confirmation timeout for command: {execution.command}")
-        if confirmation_id in self._pending_confirmations:
-            del self._pending_confirmations[confirmation_id]
-        return None
-
-    def provide_confirmation_response(self, confirmation_id: int, response: ConfirmationResponse):
-        """Provide a confirmation response."""
-        if confirmation_id in self._pending_confirmations:
-            future = self._pending_confirmations.pop(confirmation_id)
-            if not future.done():
-                future.set_result(response)
-        else:
-            logger.warning(f"No pending confirmation found for ID: {confirmation_id}")
-
-    async def get_next_event(self) -> Optional[ExecutionEvent]:
-        """Get the next event from the queue."""
-        try:
-            return await asyncio.wait_for(self._event_queue.get(), timeout=0.1)
-        except asyncio.TimeoutError:
-            return None
+# AsyncEventEmitter removed - using direct callbacks now for much simpler flow!
 
 
 class CustomAsyncAgent(AgentInterface):
@@ -259,20 +234,23 @@ class CustomAsyncAgent(AgentInterface):
         # Initialize chat memory manager
         self.memory_manager = create_chat_memory_manager(session.session_id)
 
-        # Initialize event emitter
-        self.event_emitter = AsyncEventEmitter()
+        # Simple callback for confirmations - no complex event system needed
+        self.confirmation_handler = None
 
         # Initialize tools
         self.tools = self._create_tools()
 
         logger.info("Custom async agent initialized successfully")
 
-    def _create_tools(self) -> Dict[str, AsyncTool]:
+    def _create_tools(self) -> Dict[str, Any]:
         """Create async tools."""
         tools = {}
 
-        # Command execution tool
-        tools["execute_command"] = AsyncCommandTool(self.session, self.event_emitter)
+        # Command execution tool with direct agent reference
+        tools["execute_command"] = AsyncCommandTool(self.session, self)
+
+        # Todo file management tool
+        tools["todo_file_manager"] = create_todo_tool(self.session.working_directory)
 
         return tools
 
@@ -309,6 +287,14 @@ INSTRUCTIONS:
 5. Provide clear reasoning for each action
 6. Give a comprehensive final answer when the task is complete
 
+TODO MANAGEMENT:
+- ALWAYS use the todo_file_manager tool to track work items for complex multi-step tasks
+- Read existing todos at the start: {{"operation": "read"}}
+- Create/update todos when planning work: {{"operation": "create", "content": "markdown todo list"}}
+- Use proper markdown format with checkboxes: `- [ ] Task description`
+- Mark completed items: `- [x] Completed task`
+- Proactively manage todos throughout the conversation to keep track of progress
+
 FORMAT:
 Think: [Your reasoning about what to do next]
 Action: [tool_name]
@@ -328,8 +314,11 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
                 break
         return final_response or "No response generated"
 
-    async def execute_task_stream(self, task: str) -> AsyncGenerator[ExecutionEvent, ConfirmationResponse]:
+    async def execute_task_stream(self, task: str, confirmation_handler=None) -> AsyncGenerator[ExecutionEvent, ConfirmationResponse]:
         """Execute a task with streaming events and confirmation support."""
+
+        # Set the confirmation handler for this execution
+        self.confirmation_handler = confirmation_handler
 
         with PerformanceTracker(self.telemetry, "custom_async", "execute_task_stream") as tracker:
             # Emit execution start event
@@ -340,54 +329,12 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
             )
 
             try:
-                # Clear any previous confirmation
-                if hasattr(self.session, '_current_confirmation'):
-                    self.session._current_confirmation = None
-
-                # Add user message to chat history at the beginning
+                # Add user message to chat history
                 chat_history = self.memory_manager.get_chat_history()
                 chat_history.add_message(HumanMessage(content=task))
 
-                # Start the ReAct loop in a background task
-                react_task = asyncio.create_task(self._execute_task_with_history(task))
-
-                # Stream events while the task runs
-                while not react_task.done():
-                    # Check for events in the queue
-                    event = await self.event_emitter.get_next_event()
-                    if event:
-                        if event.event_type == EventType.COMMAND_CONFIRMATION_NEEDED:
-                            # Yield the confirmation event and wait for response
-                            confirmation_response = yield event
-                            logger.info(f"Received confirmation response: {confirmation_response.choice if confirmation_response else 'None'}")
-
-                            # Handle the confirmation response directly
-                            if confirmation_response and hasattr(self.session, '_current_confirmation') and self.session._current_confirmation:
-                                execution = self.session._current_confirmation
-                                result_message = await self._handle_confirmation_directly(execution, confirmation_response)
-
-                                # Store the result for the waiting tool
-                                self.session._confirmation_result = result_message
-
-                                # Emit command executed event
-                                yield ExecutionEvent(
-                                    event_type=EventType.COMMAND_EXECUTED,
-                                    framework="custom_async",
-                                    execution=execution,
-                                    content=result_message
-                                )
-
-                                # Clear the confirmation
-                                self.session._current_confirmation = None
-                        else:
-                            # Yield other events
-                            yield event
-
-                    # Small delay to prevent busy waiting
-                    await asyncio.sleep(0.05)
-
-                # Get the final result
-                final_response = await react_task
+                # Execute task directly - much simpler!
+                final_response = await self._execute_task_with_history(task)
 
                 # Track successful execution
                 await self.telemetry.track_framework_call(
@@ -431,81 +378,11 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
 
                 logger.error(f"Custom async agent execution failed: {e}")
 
-    async def _handle_confirmation_directly(self, execution: CommandExecution, confirmation_response: ConfirmationResponse) -> str:
-        """Handle confirmation response and execute command."""
-        if confirmation_response.choice == "yes":
-            return await self._execute_approved_command(execution)
-        elif confirmation_response.choice == "no":
-            execution.update_status(CommandStatus.DENIED)
-            self.session.add_execution(execution)
-            return "❌ Command execution cancelled by user"
-        elif confirmation_response.choice == "modify" and confirmation_response.modified_command:
-            execution.command = confirmation_response.modified_command
-            execution.user_modifications = confirmation_response.modified_command
-            return await self._execute_approved_command(execution)
-        elif confirmation_response.choice == "explain":
-            execution.update_status(CommandStatus.DENIED)
-            self.session.add_execution(execution)
-            return f"❓ Command explanation requested: {execution.command}"
-        else:
-            execution.update_status(CommandStatus.DENIED)
-            self.session.add_execution(execution)
-            return f"❌ Unknown confirmation choice: {confirmation_response.choice}"
+            finally:
+                # Clean up
+                self.confirmation_handler = None
 
-    async def _execute_approved_command(self, execution: CommandExecution) -> str:
-        """Execute an approved command using config timeout."""
-        import subprocess
-
-        try:
-            execution.update_status(CommandStatus.APPROVED)
-
-            # Execute the command using timeout from config
-            start_time = time.time()
-
-            result = subprocess.run(
-                execution.command,
-                shell=True,
-                cwd=execution.working_directory,
-                capture_output=True,
-                text=True,
-                timeout=self.config.command_timeout
-            )
-
-            execution.exit_code = result.returncode
-            execution.stdout = result.stdout
-            execution.stderr = result.stderr
-            execution.execution_time = time.time() - start_time
-
-            if result.returncode == 0:
-                execution.update_status(CommandStatus.SUCCESS)
-                self.session.add_execution(execution)
-
-                output = f"✅ Command executed successfully\n"
-                output += f"Exit code: {result.returncode}\n"
-                if result.stdout:
-                    output += f"Output: {result.stdout[:500]}..."
-                return output
-            else:
-                execution.update_status(CommandStatus.FAILED)
-                self.session.add_execution(execution)
-
-                output = f"❌ Command failed\n"
-                output += f"Exit code: {result.returncode}\n"
-                if result.stderr:
-                    output += f"Error: {result.stderr[:500]}..."
-                return output
-
-        except subprocess.TimeoutExpired:
-            execution.update_status(CommandStatus.TIMEOUT)
-            execution.timeout_seconds = self.config.command_timeout
-            self.session.add_execution(execution)
-            return f"⏰ Command timed out after {self.config.command_timeout} seconds"
-
-        except Exception as e:
-            execution.update_status(CommandStatus.FAILED)
-            execution.stderr = str(e)
-            self.session.add_execution(execution)
-            return f"❌ Command execution failed: {str(e)}"
+# Old confirmation methods removed - now handled directly in the tool
 
     async def _execute_task_with_history(self, task: str) -> str:
         """Execute task with chat history management."""
@@ -547,12 +424,7 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
             iteration += 1
             logger.info(f"ReAct iteration {iteration}")
 
-            # Emit thinking event
-            await self.event_emitter.emit_event(ExecutionEvent(
-                event_type=EventType.LLM_START,
-                framework="custom_async",
-                content=f"Thinking... (iteration {iteration})"
-            ))
+            # Note: Event emission removed - using direct callback pattern now
 
             # Get AI response
             start_time = time.time()
@@ -575,13 +447,7 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
                 llm_call.status = LLMCallStatus.SUCCESS
                 llm_call.response_time_ms = (time.time() - start_time) * 1000
 
-                # Emit LLM end event
-                await self.event_emitter.emit_event(ExecutionEvent(
-                    event_type=EventType.LLM_END,
-                    framework="custom_async",
-                    content="AI response received",
-                    tokens_used=0  # TODO: Track actual tokens
-                ))
+                # Note: Event emission removed - using direct callback pattern now
 
             except Exception as e:
                 llm_call.status = LLMCallStatus.FAILED
@@ -602,29 +468,34 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
 
             # Parse for actions
             action_match = re.search(r"Action:\s*(\w+)", response_text)
-            action_input_match = re.search(r"Action Input:\s*(.+?)(?=\n|$)", response_text, re.DOTALL)
+
+            # Better parsing for Action Input - handle multi-line JSON and various formats
+            action_input_match = re.search(r"Action Input:\s*(.+?)(?=\n(?:Think:|Action:|Observation:|Final Answer:)|$)", response_text, re.DOTALL)
 
             if action_match and action_input_match:
                 action_name = action_match.group(1).strip()
-                action_input = action_input_match.group(1).strip()
+                raw_action_input = action_input_match.group(1).strip()
 
-                # Clean up JSON formatting
+                logger.debug(f"Raw action input before cleaning: {repr(raw_action_input)}")
+
+                # Clean up JSON formatting - handle various code block formats
+                action_input = raw_action_input
                 if action_input.startswith('```json'):
                     action_input = action_input.replace('```json', '').replace('```', '').strip()
+                elif action_input.startswith('```'):
+                    action_input = action_input.replace('```', '').strip()
+
+                # Remove any trailing whitespace or newlines
+                action_input = action_input.strip()
 
                 logger.info(f"Executing action: {action_name} with input: {action_input[:100]}...")
+                logger.debug(f"Full cleaned action input: {repr(action_input)}")
 
                 # Execute the action
                 if action_name in self.tools:
                     tool = self.tools[action_name]
 
-                    # Emit tool start event
-                    await self.event_emitter.emit_event(ExecutionEvent(
-                        event_type=EventType.TOOL_START,
-                        framework="custom_async",
-                        tool_name=action_name,
-                        content=f"Using tool: {action_name}"
-                    ))
+                    # Note: Event emission removed - using direct callback pattern now
 
                     # Track tool call
                     tool_call = ToolCall(
@@ -641,42 +512,10 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
                         tool_call.result = {"output": observation}
                         tool_call.status = ToolCallStatus.SUCCESS
 
-                        # Emit tool end event
-                        await self.event_emitter.emit_event(ExecutionEvent(
-                            event_type=EventType.TOOL_END,
-                            framework="custom_async",
-                            tool_name=action_name,
-                            content=f"Tool completed: {action_name}"
-                        ))
-
-                    except ConfirmationRequired as e:
-                        # Tool needs confirmation - this will be handled by the CLI
-                        logger.info(f"Tool {action_name} requires confirmation: {e}")
-
-                        # Emit confirmation event
-                        if hasattr(self.session, '_current_confirmation') and self.session._current_confirmation:
-                            await self.event_emitter.emit_event(ExecutionEvent(
-                                event_type=EventType.COMMAND_CONFIRMATION_NEEDED,
-                                framework="custom_async",
-                                execution=self.session._current_confirmation,
-                                content=str(e)
-                            ))
-
-                        # Wait for the confirmation to be handled and get the real result
-                        for _ in range(600):  # Wait up to 60 seconds (0.1s intervals)
-                            await asyncio.sleep(0.1)
-                            if hasattr(self.session, '_confirmation_result'):
-                                observation = self.session._confirmation_result
-                                delattr(self.session, '_confirmation_result')  # Clean up
-                                break
-                        else:
-                            # Timeout waiting for confirmation
-                            observation = "❌ Confirmation timeout - command was not executed"
-
-                        tool_call.result = {"output": observation}
-                        tool_call.status = ToolCallStatus.SUCCESS
+                        # Note: Event emission removed - using direct callback pattern now
 
                     except Exception as e:
+                        # All exceptions are handled as tool failures now - no special confirmation handling
                         observation = f"Error executing {action_name}: {str(e)}"
                         tool_call.status = ToolCallStatus.FAILED
                         tool_call.result = {"error": str(e)}
@@ -706,6 +545,9 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
 
             else:
                 # No clear action found, treat as final answer
+                logger.warning(f"No valid action found in AI response: {repr(response_text[:500])}")
+                logger.debug(f"Action match: {action_match}")
+                logger.debug(f"Action input match: {action_input_match}")
                 logger.info("No action found, treating as final answer")
                 return response_text
 

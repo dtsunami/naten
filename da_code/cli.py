@@ -1,7 +1,6 @@
 
 """Main CLI entry point for da_code tool."""
 
-import argparse
 import asyncio
 import logging
 import os
@@ -9,14 +8,19 @@ import sys
 import time
 
 import random
-from typing import List
-from datetime import datetime, timezone
+from typing import List, Optional
 from pathlib import Path
-from typing import Optional
+import termios
+import tty
 
-from rich.prompt import Prompt
 from rich.console import Console
 from rich.status import Status
+from rich.text import Text
+from rich.panel import Panel
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.formatted_text import HTML
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
@@ -27,6 +31,7 @@ from .config import ConfigManager, setup_logging
 from .context import ContextLoader
 from .models import CodeSession
 from .execution_events import EventType, ConfirmationResponse
+from .models import CommandExecution, UserResponse
 
 logger = logging.getLogger(__name__)
 
@@ -34,76 +39,77 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-async def async_prompt_user(message: str, choices: List[str], default: str = None) -> str:
-    """Beautiful async prompt with arrow key navigation and number shortcuts."""
-    import asyncio
-    import sys
-    import termios
-    import tty
-    from rich.panel import Panel
-    from rich.text import Text
+async def async_prompt_user_silent(choices: List[str], default: str = None, command: str = None) -> str:
+    """Interactive prompt with visual arrow indicator for selected option."""
+
 
     # Choice configuration with colors
     choice_config = {
         "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
         "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
-        "modify": {"label": "✏️ Modify", "desc": "Edit the command before execution", "color": "yellow"},
+        "modify": {"label": "✏️  Modify", "desc": "Edit the command before execution", "color": "yellow"},
         "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
     }
 
-    selected_index = 0
+    def display_static_confirmation():
+        """Display confirmation panel once - no updates until selection made."""
+        content_lines = Text()
 
-    def display_choices():
-        choice_lines = []
+        # Add command info if provided
+        if command:
+            command_text = Text()
+            command_text.append("Command: ", style="bold cyan")
+            command_text.append(f"`{command}`", style="bold yellow")
+            content_lines.append(command_text)
+            content_lines.append("\n")
+
+        # Add choices (no arrow initially)
         for i, choice in enumerate(choices):
-            config = choice_config.get(choice, {"label": choice, "desc": "", "color": "white"})
+            config = choice_config.get(choice.lower(), {"label": choice, "desc": "", "color": "white"})
+            line = Text()
+            line.append("    ", style="white")
+            line.append(f"{i+1}. {config['label']}", style=config['color'])
+            if config['desc']:
+                line.append(f" - {config['desc']}", style="white dim")
+            line.append("\n")
+            content_lines.append(line) 
 
-            if i == selected_index:
-                # Highlighted choice
-                line = Text()
-                line.append("  ▶ ", style="cyan bold")
-                line.append(f"{i+1}. {config['label']}", style=f"{config['color']} bold")
-                if config['desc']:
-                    line.append(f" - {config['desc']}", style="white dim")
-            else:
-                # Normal choice
-                line = Text()
-                line.append("    ", style="white")
-                line.append(f"{i+1}. {config['label']}", style=config['color'])
-                if config['desc']:
-                    line.append(f" - {config['desc']}", style="white dim")
-
-            choice_lines.append(line)
 
         # Instructions
         instructions = Text()
-        instructions.append("Use ", style="white dim")
+        instructions.append("Press 1-4", style="cyan bold")
+        instructions.append(" or use ", style="white dim")
         instructions.append("↑/↓ arrows", style="cyan bold")
-        instructions.append(" to navigate, ", style="white dim")
-        instructions.append("Enter", style="green bold")
-        instructions.append(" to select, or press ", style="white dim")
-        instructions.append("1-4", style="yellow bold")
-        instructions.append(" for quick selection", style="white dim")
+        instructions.append(" and ", style="white dim")
+        instructions.append("Enter", style="red bold")
+        instructions.append(" to select\n", style="white dim")
+        content_lines.append(instructions)
 
-        choice_lines.append("")
-        choice_lines.append(instructions)
 
-        panel = Panel(
-            "\n".join(str(line) for line in choice_lines),
-            title="Choose Action",
+        # Display the panel once
+        unified_panel = Panel(
+            content_lines,
+            title="🤖 Confirm Agent Command",
             title_align="left",
-            border_style="green",
-            padding=(1, 2)
+            border_style="cyan"
         )
-        console.print(panel)
+        console.print(unified_panel)
 
     def get_keypress_choice() -> str:
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
+        selected_index = 0  # Initialize locally
 
         try:
             tty.setraw(sys.stdin.fileno())
 
+            # Display confirmation panel once
+            display_static_confirmation()
+            
+            # display the default choice
+            config = choice_config.get(choices[selected_index].lower(), {"label": choices[selected_index], "desc": "", "color": "white"})
+            print(f"\r\033[K▶ {selected_index + 1}. {config['label']}", end='', flush=True)
+            
             while True:
                 key = sys.stdin.read(1)
 
@@ -111,30 +117,26 @@ async def async_prompt_user(message: str, choices: List[str], default: str = Non
                 if key in ['1', '2', '3', '4']:
                     idx = int(key) - 1
                     if idx < len(choices):
-                        nonlocal selected_index
-                        selected_index = idx
-                        console.clear()
-                        console.print(f"[green bold]Selected: {choice_config.get(choices[idx], {}).get('label', choices[idx])}[/green bold]")
                         return choices[idx]
 
-                # Arrow keys
+                # Arrow keys - track selection and show simple feedback
                 elif key == '\x1b':
                     key += sys.stdin.read(2)
                     if key == '\x1b[A':  # Up
                         selected_index = (selected_index - 1) % len(choices)
-                        # Move cursor up to start of current panel and clear screen from there
-                        print('\033[2J\033[H', end='', flush=True)
-                        display_choices()
+                        # Show simple selection feedback
+                        config = choice_config.get(choices[selected_index].lower(), {"label": choices[selected_index], "color": "white"})
+                        print(f"\r\033[K▶ {selected_index + 1}. {config['label']}", end='', flush=True)
                     elif key == '\x1b[B':  # Down
                         selected_index = (selected_index + 1) % len(choices)
-                        # Move cursor up to start of current panel and clear screen from there
-                        print('\033[2J\033[H', end='', flush=True)
-                        display_choices()
+                        # Show simple selection feedback
+                        config = choice_config.get(choices[selected_index].lower(), {"label": choices[selected_index], "color": "white"})
+                        print(f"\r\033[K▶ {selected_index + 1}. {config['label']}", end='', flush=True)
 
                 # Enter key
                 elif key in ['\r', '\n']:
-                    console.clear()
-                    console.print(f"[green bold]Selected: {choice_config.get(choices[selected_index], {}).get('label', choices[selected_index])}[/green bold]")
+                    # Clear any status line before returning
+                    print('\r\033[K', end='', flush=True)
                     return choices[selected_index]
 
                 # Ctrl+C
@@ -143,73 +145,16 @@ async def async_prompt_user(message: str, choices: List[str], default: str = Non
 
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    # Display initial choices
-    display_choices()
 
     # Get choice asynchronously
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, get_keypress_choice)
+    selected_choice = await loop.run_in_executor(None, get_keypress_choice)
 
+    # Show clean selection result in console history
+    config = choice_config.get(selected_choice.lower(), {"label": selected_choice, "color": "white"})
+    console.print(f"[green bold]✅ Selected: {config['label']}[/green bold]")
 
-async def async_prompt_user_silent(choices: List[str], default: str = None) -> str:
-    """Silent async prompt that only handles input without displaying choices."""
-    import asyncio
-    import sys
-    import termios
-    import tty
-    from rich.text import Text
-
-    # Choice configuration with colors
-    choice_config = {
-        "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
-        "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
-        "modify": {"label": "✏️ Modify", "desc": "Edit the command before execution", "color": "yellow"},
-        "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
-    }
-
-    selected_index = 0
-
-    def get_keypress_choice() -> str:
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
-
-        try:
-            tty.setraw(sys.stdin.fileno())
-
-            while True:
-                key = sys.stdin.read(1)
-
-                # Number key shortcuts
-                if key in ['1', '2', '3', '4']:
-                    idx = int(key) - 1
-                    if idx < len(choices):
-                        nonlocal selected_index
-                        selected_index = idx
-                        return choices[idx]
-
-                # Arrow keys - update selection but don't redisplay
-                elif key == '\x1b':
-                    key += sys.stdin.read(2)
-                    if key == '\x1b[A':  # Up
-                        selected_index = (selected_index - 1) % len(choices)
-                    elif key == '\x1b[B':  # Down
-                        selected_index = (selected_index + 1) % len(choices)
-
-                # Enter key
-                elif key in ['\r', '\n']:
-                    return choices[selected_index]
-
-                # Ctrl+C
-                elif key == '\x03':
-                    raise KeyboardInterrupt()
-
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    # Get choice asynchronously without displaying anything
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, get_keypress_choice)
+    return selected_choice
 
 
 async def async_prompt_text(message: str, default: str = None) -> str:
@@ -224,12 +169,12 @@ async def async_prompt_text(message: str, default: str = None) -> str:
     )
 
 
-def display_combined_confirmation(execution) -> None:
-    """Display command information and choices in a single beautiful panel."""
+def display_simple_confirmation(execution) -> None:
+    """Display simplified command confirmation panel using UserResponse enum."""
     from rich.panel import Panel
     from rich.text import Text
 
-    # Build content with command info and choices
+    # Build content
     content = []
 
     # Command info section
@@ -238,36 +183,21 @@ def display_combined_confirmation(execution) -> None:
     command_text.append(execution.command, style="bold white")
     content.append(str(command_text))
 
-    #directory_text = Text()
-    #directory_text.append("Directory: ", style="bold cyan")
-    #directory_text.append(execution.working_directory, style="white")
-    #content.append(str(directory_text))
-
-    #if execution.explanation:
-    #    purpose_text = Text()
-    #    purpose_text.append("Purpose: ", style="bold cyan")
-    #    purpose_text.append(execution.explanation, style="white")
-    #    content.append(str(purpose_text))
-
     # Add separator
     content.append("")
 
-    # Choice configuration with colors
-    choice_config = {
-        "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
-        "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
-        "modify": {"label": "✏️ Modify", "desc": "Edit the command before execution", "color": "yellow"},
-        "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
-    }
+    # Complete choice display using all UserResponse enum values
+    choices = [
+        ("✅ Yes", "Execute the command as shown"),
+        ("❌ No", "Cancel command execution"),
+        ("✏️ Modify", "Edit the command before execution"),
+        ("❓ Explain", "Ask agent to explain the command")
+    ]
 
-    choices = ["yes", "no", "modify", "explain"]
-
-    # Add choices
-    for i, choice in enumerate(choices):
-        config = choice_config[choice]
+    for i, (label, desc) in enumerate(choices):
         choice_line = Text()
-        choice_line.append(f"  {i+1}. {config['label']}", style=f"{config['color']} bold")
-        choice_line.append(f" - {config['desc']}", style="white dim")
+        choice_line.append(f"  {i+1}. {label}", style="bold")
+        choice_line.append(f" - {desc}", style="white dim")
         content.append(str(choice_line))
 
     # Add instructions
@@ -281,7 +211,7 @@ def display_combined_confirmation(execution) -> None:
     instructions.append("Enter", style="green bold")
     content.append(str(instructions))
 
-    # Create single beautiful panel
+    # Create panel
     panel = Panel(
         "\n".join(content),
         title="🤖 Command Confirmation",
@@ -293,6 +223,7 @@ def display_combined_confirmation(execution) -> None:
     console.print(panel)
 
 
+
 async def execute_with_streaming_confirmations(
     agent: AgentInterface,
     user_input: str,
@@ -300,98 +231,65 @@ async def execute_with_streaming_confirmations(
 ) -> Optional[str]:
     """Execute task with beautiful unified streaming and confirmation handling."""
 
+    async def confirmation_handler(execution: CommandExecution) -> ConfirmationResponse:
+        """Handle command confirmation directly."""
+        # Stop status to show confirmation dialog cleanly
+        status_interface.stop_execution()
+
+        # Get user choice using enum values with command display
+        response = await async_prompt_user_silent([
+            UserResponse.YES.value.title(),    # "Yes"
+            UserResponse.NO.value.title(),     # "No"
+            UserResponse.MODIFY.value.title(), # "Modify"
+            UserResponse.EXPLAIN.value.title() # "Explain"
+        ], default=UserResponse.YES.value.title(), command=execution.command)
+
+        modified_command = None
+        if response.lower() == UserResponse.MODIFY.value:
+            # Get modified command from user
+            modified_command = await async_prompt_text("Enter modified command", default=execution.command)
+            if not modified_command:
+                response = UserResponse.NO.value.title()
+
+        # Response selection is already shown in the arrow interface, no need to print again
+
+        # Restart status interface for continued execution
+        status_interface.start_execution("Processing...")
+
+        # Convert response back to enum value for consistency
+        response_lower = response.lower()
+        if response_lower == "yes":
+            enum_choice = UserResponse.YES.value
+        elif response_lower == "no":
+            enum_choice = UserResponse.NO.value
+        elif response_lower == "modify":
+            enum_choice = UserResponse.MODIFY.value
+        elif response_lower == "explain":
+            enum_choice = UserResponse.EXPLAIN.value
+        else:
+            enum_choice = UserResponse.NO.value  # Default fallback
+
+        return ConfirmationResponse(
+            choice=enum_choice,
+            modified_command=modified_command
+        )
+
     final_response = None
-    event_generator = agent.execute_task_stream(user_input)
+    event_generator = agent.execute_task_stream(user_input, confirmation_handler)
 
     try:
         async for event in event_generator:
-            # Update status based on event type
+            # Simplified event handling - only process events that are actually emitted
             if event.event_type == EventType.EXECUTION_START:
                 status_interface.update_status("Starting execution...")
 
-            elif event.event_type == EventType.LLM_START:
-                status_interface.llm_calls += 1
-                status_interface.update_status("Thinking...")
-
-            elif event.event_type == EventType.LLM_END:
-                if event.tokens_used:
-                    status_interface.total_tokens += event.tokens_used
-                status_interface.update_status("Processing...")
-
-            elif event.event_type == EventType.TOOL_START:
-                status_interface.tool_calls += 1
-                status_interface.update_status(f"Using tool: {event.tool_name}")
-
-            elif event.event_type == EventType.TOOL_END:
-                status_interface.update_status("Tool completed")
-
-            elif event.event_type == EventType.COMMAND_CONFIRMATION_NEEDED:
-                # 🎯 This is where the magic happens!
-                # Stop the status spinner during confirmation
-                status_interface.stop_execution(success=True, final_message="")
-
-                console.print("\n")  # Add spacing
-                # Display combined command information and choices
-                display_combined_confirmation(event.execution)
-
-                # Get user choice (choices already displayed in combined panel)
-                try:
-                    response = await async_prompt_user_silent(
-                        choices=["yes", "no", "modify", "explain"],
-                        default="no"
-                    )
-                    console.print()  # Just add spacing, no duplicate confirmation message
-                except KeyboardInterrupt:
-                    console.print("\n[yellow]⚠️ Confirmation cancelled[/yellow]")
-                    return "❌ Command confirmation cancelled by user"
-                except Exception as e:
-                    console.print(f"\n[red]❌ Confirmation error[/red]")
-                    return f"❌ Confirmation failed"
-
-                # Handle modify workflow
-                modified_command = None
-                if response == "modify":
-                    modified_command = await async_prompt_text(
-                        "Enter modified command",
-                        default=event.execution.command
-                    )
-
-                # Send response back to generator
-                confirmation_response = ConfirmationResponse(
-                    choice=response,
-                    modified_command=modified_command
-                )
-
-                # Resume streaming with clean status
-                status_interface.start_execution("Processing...")
-
-                # Send the response back to the generator and continue processing
-                try:
-                    # This sends the confirmation and resumes the generator
-                    await event_generator.asend(confirmation_response)
-                    # Continue the loop to process subsequent events
-                    # The generator will yield more events after processing the confirmation
-                except StopAsyncIteration:
-                    # Generator finished after handling confirmation
-                    break
-
-            elif event.event_type == EventType.COMMAND_EXECUTED:
-                result = event.execution
-                if result.status.value == "success":
-                    status_interface.update_status("Command executed successfully")
-                else:
-                    status_interface.update_status(f"Command failed: {result.status.value}")
-
             elif event.event_type == EventType.FINAL_RESPONSE:
                 final_response = event.content
-                status_interface.update_status("Finalizing response...")
+                status_interface.update_status("Task completed")
 
             elif event.event_type == EventType.ERROR:
                 status_interface.update_status(f"Error: {event.error_message}")
                 return f"❌ Execution failed: {event.error_message}"
-
-            elif event.event_type == EventType.EXECUTION_END:
-                status_interface.update_status("Execution completed")
 
         return final_response
 
@@ -837,10 +735,6 @@ def show_status(config_mgr: ConfigManager, context_ldr: ContextLoader) -> int:
 #---------------------------------------------------------------
 
 # Agent will be initialized in main() after config validation
-agent = None
-default_timeout = 300
-code_session = None
-session_start_time = None
 
 
 # Available commands
@@ -908,9 +802,29 @@ async def async_main():
             # Combined status line
             status_interface.stop_execution(True, f"Ready | 🤖 {deployment_name} | 💾 {memory_status} | 🍃 {mongo_status_str}")
 
+    history = FileHistory(agent.config.history_file_path)
+
+    # Create PromptSession for async usage
+    session = PromptSession(
+        history=history,
+        multiline=False,
+        complete_style='column',
+    )
+
+    async def get_user_input_with_history():
+        """Get user input with file-based history and arrow key support."""
+        try:
+            return await session.prompt_async(HTML('<cyan>></cyan> '))
+        except (EOFError, KeyboardInterrupt):
+            return None
+
     while True:
         try:
-            user_input = Prompt.ask("[cyan]>")
+            user_input = await get_user_input_with_history()
+
+            # Handle EOF or interrupt
+            if user_input is None:
+                break
 
             if user_input.lower() in ['exit', 'quit', 'q']:
                 console.print("👋 Goodbye!")

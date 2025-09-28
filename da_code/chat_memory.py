@@ -8,13 +8,10 @@ from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_postgres import PostgresChatMessageHistory
 from langchain_community.chat_message_histories import FileChatMessageHistory
-import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Try to import PostgreSQL chat history (graceful fallback if not available)
-POSTGRES_AVAILABLE = False
 
 
 class ChatMemoryManager:

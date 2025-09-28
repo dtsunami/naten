@@ -52,6 +52,13 @@ class ConfigManager:
         command_timeout = int(os.getenv('DA_CODE_COMMAND_TIMEOUT', '300'))
         require_confirmation = os.getenv('DA_CODE_REQUIRE_CONFIRMATION', 'true').lower() == 'true'
 
+        # History file path configuration
+        history_file_path = os.getenv('DA_CODE_HISTORY_FILE')
+        if not history_file_path:
+            # Default to .prompt.history in current working directory
+            history_file_path = os.path.join(os.getcwd(), '.prompt.history')
+
+
         return AgentConfig(
             azure_endpoint=azure_endpoint,
             api_key=api_key,
@@ -62,7 +69,8 @@ class ConfigManager:
             agent_timeout=agent_timeout,
             max_retries=max_retries,
             command_timeout=command_timeout,
-            require_confirmation=require_confirmation
+            require_confirmation=require_confirmation,
+            history_file_path=history_file_path
         )
 
     def create_sample_env(self, env_path: Optional[str] = None) -> None:
@@ -129,7 +137,7 @@ class ConfigManager:
 
         print(f"\\n=== Project Files ===")
         print(f".env file: {'✓' if env_file.exists() else '✗'} {env_file.absolute()}")
-        print(f"DA.md file: {'✓' if da_md.exists() else '✗'} {da_json.absolute()}")
+        print(f"DA.md file: {'✓' if da_md.exists() else '✗'} {da_md.absolute()}")
         print(f"DA.json file: {'✓' if da_json.exists() else '✗'} {da_json.absolute()}")
 
         if not azure_endpoint or not api_key:

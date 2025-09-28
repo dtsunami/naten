@@ -323,6 +323,8 @@ class AgentConfig(BaseModel):
     framework_preference: AgentFramework = Field(AgentFramework.LANGCHAIN, description="Preferred agent framework")
     enable_hybrid_routing: bool = Field(False, description="Enable intelligent task routing between frameworks")
     auto_fallback: bool = Field(True, description="Automatically fallback to LangChain if other frameworks fail")
+    # CLI configuration
+    history_file_path: str = Field(..., description="Path to command history file")
 
 
 class DaMongoTracker:
@@ -338,7 +340,7 @@ class DaMongoTracker:
         """Initialize MongoDB client."""
         try:
             mongo_host = os.getenv('MONGO_HOST', 'localhost')
-            mongo_port = int(os.getenv('MONGO_PORT', '27017'))  # Direct MongoDB port, not MCP
+            mongo_port = int(os.getenv('MONGO_PORT', '8004'))  # MongoDB port for da_code telemetry
             mongo_uri = f"mongodb://{mongo_host}:{mongo_port}"
 
             self.client = AsyncIOMotorClient(mongo_uri, serverSelectionTimeoutMS=3000)
