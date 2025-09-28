@@ -34,19 +34,25 @@ class ChatMemoryManager:
         return self.chat_history
 
     def _create_chat_history(self) -> BaseChatMessageHistory:
-        """Create chat history with fallback strategy: PostgreSQL -> Redis -> File -> In-Memory."""
+        """Create chat history with fallback strategy: PostgreSQL -> File -> In-Memory."""
+        logger.debug(f"Creating chat history for session: {self.session_id}")
 
         # Strategy 1: PostgreSQL (preferred for production)
+        logger.debug("Attempting PostgreSQL chat memory...")
         postgres_history = self._try_postgres()
         if postgres_history:
+            logger.debug("PostgreSQL chat memory successfully created")
             return postgres_history
 
         # Strategy 2: File-based (persistence without database)
+        logger.debug("PostgreSQL failed, attempting file-based chat memory...")
         file_history = self._try_file()
         if file_history:
+            logger.debug("File-based chat memory successfully created")
             return file_history
 
         # Strategy 3: In-memory (fallback)
+        logger.debug("All persistent storage failed, using in-memory chat history")
         logger.info("Using in-memory chat history (no persistence)")
         self.memory_type = "memory"
         return ChatMessageHistory()
@@ -56,56 +62,87 @@ class ChatMemoryManager:
 
         # Check for PostgreSQL environment variables
         postgres_url = os.getenv("POSTGRES_CHAT_URL", None)
+        logger.debug(f"Checking PostgreSQL chat memory with URL: {postgres_url and 'configured' or 'not configured'}")
 
         if not postgres_url:
-            logger.debug("PostgreSQL configuration not found")
+            logger.info("❌ PostgreSQL chat memory: POSTGRES_CHAT_URL not found, falling back to file/memory storage")
             return None
 
         try:
+            logger.debug(f"Attempting PostgreSQL connection for session: {self.session_id}")
+            # Log the actual URL being used (mask password)
+            if postgres_url and '@' in postgres_url:
+                url_parts = postgres_url.split('@')
+                masked_url = url_parts[0].split(':')[:-1] + ['***'] + ['@'] + url_parts[1:]
+                logger.debug(f"Connection URL: {''.join(masked_url)}")
+
             # Test the connection and create chat history
+            # Create connection from URL and pass to PostgresChatMessageHistory
+            import psycopg
+            logger.debug("Creating psycopg connection...")
+
+            # Try to force IPv4 by replacing localhost with 127.0.0.1
+            if 'localhost' in postgres_url:
+                ipv4_url = postgres_url.replace('localhost', '127.0.0.1')
+                logger.debug("Trying IPv4 connection (127.0.0.1 instead of localhost)")
+                sync_connection = psycopg.connect(ipv4_url)
+            else:
+                sync_connection = psycopg.connect(postgres_url)
+
+            # Create table if it doesn't exist
+            PostgresChatMessageHistory.create_tables(sync_connection, "da_code_chat_history")
+
             chat_history = PostgresChatMessageHistory(
-                connection_string=postgres_url,
-                session_id=self.session_id,
-                table_name="da_code_chat_history"
+                "da_code_chat_history",  # table_name (positional)
+                self.session_id,         # session_id (positional)
+                sync_connection=sync_connection  # connection (keyword)
             )
 
             # Try to access the chat history to test connection
-            chat_history.messages  # This will trigger connection test
+            logger.debug("Testing PostgreSQL connection by accessing messages...")
+            messages = chat_history.messages  # This will trigger connection test
+            logger.debug(f"PostgreSQL connection successful, found {len(messages)} existing messages")
 
-            logger.info(f"Connected to PostgreSQL chat memory: !")
-            print(f"Connected to PostgreSQL chat memory: !")
+            logger.info(f"✅ PostgreSQL chat memory connected (session: {self.session_id})")
             self.memory_type = "postgres"
             return chat_history
 
         except Exception as e:
-            logger.warning(f"PostgreSQL chat history connection failed: {e}")
+            logger.warning(f"❌ PostgreSQL chat memory connection failed: {type(e).__name__}: {e}")
+            logger.debug(f"PostgreSQL connection error details: {e}", exc_info=True)
             return None
 
     def _try_file(self) -> Optional[BaseChatMessageHistory]:
         """Try to create file-based chat history."""
         try:
-            # Check if file storage is enabled
-            enable_file_storage = os.getenv("DA_CODE_FILE_MEMORY", "false").lower() == "true"
-            if not enable_file_storage:
-                logger.debug("File-based chat history disabled")
-                return None
+            # Create chat memory directory
+            chat_memory_dir_path = os.getenv("DA_CODE_CHAT_MEMORY_DIR", "./da_code_chat_memory")
+            logger.debug(f"Attempting file-based chat history in directory: {chat_memory_dir_path}")
 
+            chat_memory_dir = Path(chat_memory_dir_path)
+            chat_memory_dir.mkdir(exist_ok=True, parents=True)
+            logger.debug(f"Chat memory directory created/verified: {chat_memory_dir.absolute()}")
 
-
-            # Create sessions directory
-            sessions_dir = Path(os.getenv("DA_CODE_SESSIONS_DIR", "./da_code_sessions"))
-            sessions_dir.mkdir(exist_ok=True, parents=True)
-
-            session_file = sessions_dir / f"{self.session_id}.json"
+            session_file = chat_memory_dir / f"{self.session_id}.json"
+            logger.debug(f"Session file path: {session_file.absolute()}")
 
             chat_history = FileChatMessageHistory(str(session_file))
 
-            logger.info(f"Using file-based chat history: {session_file}")
+            # Test if file exists and check message count
+            if session_file.exists():
+                try:
+                    existing_messages = chat_history.messages
+                    logger.debug(f"Found existing file with {len(existing_messages)} messages")
+                except Exception as e:
+                    logger.debug(f"Error reading existing file: {e}")
+
+            logger.info(f"✅ Using file-based chat history: {session_file}")
             self.memory_type = "file"
             return chat_history
 
         except Exception as e:
-            logger.warning(f"File-based chat history failed: {e}")
+            logger.warning(f"❌ File-based chat history failed: {type(e).__name__}: {e}")
+            logger.debug(f"File-based chat history error details: {e}", exc_info=True)
             return None
 
     def get_memory_info(self) -> dict:

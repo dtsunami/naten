@@ -1,8 +1,14 @@
 """Configuration management for da_code CLI tool."""
 
+# Load .env file FIRST before any other imports
+from pathlib import Path
+env_file = Path('.env')
+if env_file.exists():
+    from dotenv import load_dotenv
+    load_dotenv(env_file, override=False)
+
 import os
 import logging
-from pathlib import Path
 from typing import Optional
 
 from .models import AgentConfig
@@ -15,24 +21,8 @@ class ConfigManager:
 
     def __init__(self):
         """Initialize configuration manager."""
-        self._load_environment()
+        pass
 
-    def _load_environment(self) -> None:
-        """Load environment variables from .env file if present."""
-        env_file = Path('.env')
-        if env_file.exists():
-            try:
-                with open(env_file, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith('#') and '=' in line:
-                            key, value = line.split('=', 1)
-                            # Only set if not already in environment
-                            if key not in os.environ:
-                                os.environ[key] = value
-                logger.info("Loaded environment variables from .env file")
-            except Exception as e:
-                logger.error(f"Failed to load .env file: {e}")
 
     def create_agent_config(self) -> AgentConfig:
         """Create agent configuration from environment variables."""
@@ -76,40 +66,27 @@ class ConfigManager:
         )
 
     def create_sample_env(self, env_path: Optional[str] = None) -> None:
-        """Create a sample .env file with required variables."""
+        """Create a sample .env file by copying from .env.example."""
         if env_path is None:
             env_path = '.env'
 
-        sample_content = """# da_code Configuration
-
-# Azure OpenAI Configuration (Required)
-AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com/
-AZURE_OPENAI_API_KEY=your_azure_openai_api_key_here
-AZURE_OPENAI_DEPLOYMENT=gpt-4
-AZURE_OPENAI_API_VERSION=2023-12-01-preview
-
-# Agent Behavior Settings (Optional)
-DA_CODE_TEMPERATURE=0.7
-DA_CODE_MAX_TOKENS=
-DA_CODE_AGENT_TIMEOUT=600
-DA_CODE_MAX_RETRIES=2
-DA_CODE_COMMAND_TIMEOUT=300
-DA_CODE_REQUIRE_CONFIRMATION=true
-
-# MongoDB Tracking (Optional)
-MONGO_HOST=localhost
-MONGO_PORT=8004
-
-# Logging
-LOG_LEVEL=INFO
-"""
+        example_file = Path(__file__).parent / '.env.example'
 
         try:
-            with open(env_path, 'w') as f:
-                f.write(sample_content)
-            logger.info(f"Created sample environment file at {env_path}")
-            print(f"Sample environment file created at {env_path}")
-            print("Please update the Azure OpenAI settings with your actual values.")
+            if example_file.exists():
+                # Copy from .env.example
+                with open(example_file, 'r') as f:
+                    sample_content = f.read()
+
+                with open(env_path, 'w') as f:
+                    f.write(sample_content)
+
+                logger.info(f"Created sample environment file at {env_path} from .env.example")
+                print(f"Sample environment file created at {env_path}")
+                print("Please update the configuration with your actual values.")
+            else:
+                raise FileNotFoundError(f".env.example not found at {example_file}")
+
         except Exception as e:
             logger.error(f"Failed to create sample .env file: {e}")
             raise
@@ -117,7 +94,7 @@ LOG_LEVEL=INFO
     def validate_config(self) -> bool:
         """Validate that all required configuration is present."""
         try:
-            config = self.create_agent_config()
+            self.create_agent_config()
             logger.info("Configuration validation successful")
             return True
         except ValueError as e:
@@ -162,23 +139,13 @@ LOG_LEVEL=INFO
 
 def setup_logging(log_level: str = "INFO") -> None:
     """Setup logging configuration."""
-    # Set minimal logging - only show errors by default
-    if log_level.upper() in ["DEBUG", "INFO"]:
-        log_level = "ERROR"
+    # Use the actual log level from environment
+    effective_level = getattr(logging, log_level.upper(), logging.INFO)
 
     logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.ERROR),
-        format="%(message)s",
+        level=effective_level,
+        format="%(name)s - %(levelname)s - %(message)s",
         handlers=[
             logging.StreamHandler(),
         ],
     )
-
-    # Silence noisy loggers
-    logging.getLogger('httpx').setLevel(logging.ERROR)
-    logging.getLogger('openai').setLevel(logging.ERROR)
-    logging.getLogger('azure').setLevel(logging.ERROR)
-    logging.getLogger('langchain').setLevel(logging.ERROR)
-    logging.getLogger('da_code.chat_memory').setLevel(logging.ERROR)
-    logging.getLogger('da_code.agent').setLevel(logging.ERROR)
-    logging.getLogger('da_code.monitoring').setLevel(logging.ERROR)

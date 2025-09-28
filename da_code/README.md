@@ -35,7 +35,7 @@ pip install -e ".[monitoring,dev]"
    ```
 
 2. **Configure Azure OpenAI:**
-   Edit `.env.da_code` with your credentials:
+   Edit `.env` with your credentials:
    ```bash
    AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
    AZURE_OPENAI_API_KEY=your_api_key_here
@@ -95,7 +95,7 @@ During interactive session:
 
 ### Environment Variables
 
-Create `.env.da_code` with:
+Create `.env` with:
 
 ```bash
 # Required: Azure OpenAI Configuration
@@ -344,7 +344,7 @@ ruff check da_code/
 **Configuration not found:**
 ```bash
 da_code setup
-# Edit .env.da_code with your Azure OpenAI credentials
+# Edit .env with your Azure OpenAI credentials
 ```
 
 **Azure OpenAI connection failed:**

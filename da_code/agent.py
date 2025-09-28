@@ -271,8 +271,14 @@ class DaCodeAgent:
                 max_retries=self.config.max_retries
             )
 
-            # Initialize chat memory manager
+            # Initialize chat memory manager and force chat history creation
             self.memory_manager = create_chat_memory_manager(self.session.session_id)
+            logger.debug(f"Chat memory manager created for session: {self.session.session_id}")
+
+            # Force chat history initialization to determine memory backend early
+            chat_history = self.memory_manager.get_chat_history()
+            memory_info = self.memory_manager.get_memory_info()
+            logger.info(f"Chat memory initialized: {memory_info['memory_type']} ({memory_info['message_count']} existing messages)")
 
             # Create tools
             tools = self._create_tools()

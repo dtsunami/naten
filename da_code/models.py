@@ -52,6 +52,15 @@ class ToolCallStatus(str, Enum):
     TIMEOUT = "timeout"
 
 
+class StatusType(str, Enum):
+    """Status message types for live interface."""
+    INFO = "info"
+    WORKING = "working"
+    SUCCESS = "success"
+    ERROR = "error"
+    WARNING = "warning"
+
+
 class CommandExecution(BaseModel):
     """Model for individual command execution tracking."""
     model_config = ConfigDict(
@@ -379,5 +388,70 @@ class DaMongoTracker:
             self.client.close()
 
 
+class StatusMessage(BaseModel):
+    """Status message for live interface display."""
+    model_config = ConfigDict(
+        validate_assignment=True,
+        extra='forbid',
+        str_strip_whitespace=True
+    )
+
+    message: str = Field(..., description="Status message text")
+    status_type: StatusType = Field(StatusType.INFO, description="Type of status message")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    details: Optional[str] = Field(None, description="Additional details")
+    session_id: Optional[str] = Field(None, description="Associated session ID")
+
+
+class InterfaceState(BaseModel):
+    """State tracking for live interface."""
+    model_config = ConfigDict(
+        validate_assignment=True,
+        extra='forbid'
+    )
+
+    is_executing: bool = Field(False, description="Whether agent is currently executing")
+    execution_start_time: Optional[float] = Field(None, description="Execution start timestamp")
+    current_status: str = Field("Ready", description="Current status description")
+    timeout_seconds: int = Field(300, description="Execution timeout in seconds")
+
+    # Events for async coordination
+    interrupt_requested: bool = Field(False, description="Whether interrupt was requested")
+    confirmation_pending: bool = Field(False, description="Whether confirmation is pending")
+    confirmation_result: Optional[bool] = Field(None, description="Result of confirmation")
+
+    def start_execution(self, description: str) -> None:
+        """Start execution tracking."""
+        self.is_executing = True
+        self.execution_start_time = datetime.now(timezone.utc).timestamp()
+        self.current_status = description
+        self.interrupt_requested = False
+
+    def stop_execution(self) -> None:
+        """Stop execution tracking."""
+        self.is_executing = False
+        self.execution_start_time = None
+        self.current_status = "Ready"
+
+    def get_elapsed_time(self) -> float:
+        """Get elapsed execution time in seconds."""
+        if not self.execution_start_time:
+            return 0.0
+        return datetime.now(timezone.utc).timestamp() - self.execution_start_time
+
+    def get_remaining_time(self) -> float:
+        """Get remaining time before timeout."""
+        elapsed = self.get_elapsed_time()
+        return max(0.0, self.timeout_seconds - elapsed)
+
+
 # Global session tracker
 da_mongo = DaMongoTracker()
+
+
+def get_mongo_status() -> bool:
+    """Get current MongoDB connection status."""
+    try:
+        return da_mongo.mongo_enabled and da_mongo.client is not None
+    except:
+        return False
