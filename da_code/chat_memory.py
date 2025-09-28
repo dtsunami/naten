@@ -25,6 +25,7 @@ class ChatMemoryManager:
         self.session_id = session_id
         self.chat_history: Optional[BaseChatMessageHistory] = None
         self.memory_type = "unknown"
+        self._create_chat_history()
 
     def get_chat_history(self) -> BaseChatMessageHistory:
         """Get chat history with automatic fallback strategy."""

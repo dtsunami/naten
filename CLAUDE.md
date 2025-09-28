@@ -1,154 +1,409 @@
-# CLAUDE.md
+# da_code Development Roadmap: Agno Integration
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this codebase and outlines the incremental plan for integrating Agno agents alongside our proven LangChain implementation.
 
-## Project Overview
+## Current State: Solid Foundation ✅
 
-This is the Orenco n8n Docker Stack - a complete containerized setup for n8n workflow automation with integrated databases and MCP servers. The project provides a multi-database environment supporting workflow automation, vector operations, chat memory, document storage, and Model Context Protocol (MCP) services.
+We have successfully established:
+- **Async LangChain agents** with real-time status monitoring
+- **PostgreSQL chat memory** with proper persistence
+- **Rich CLI interface** with clean startup and execution
+- **Unified telemetry** via MongoDB tracking
+- **MCP server integration** for extensible tooling
+- **python-dotenv** configuration with variable substitution
+- **Clean architecture** with proper separation of concerns
 
-## Architecture
+## Agno Integration Philosophy
 
-### Core Services
-- **n8n**: Workflow automation platform running in queue execution mode with Redis
-- **Redis**: Message queue and caching layer for n8n workflows
-- **PostgreSQL (3 instances)**:
-  - Main DB: n8n execution history and workflow data
-  - Vector DB: pgvector extension for vector operations
-  - Chat DB: Chat memory and conversation storage
-- **MongoDB**: Document storage for Pydantic models
+**Incremental & Test-Driven**: Small, focused changes that build on existing patterns
+**Performance Enhancement**: Add Agno for speed while keeping LangChain for reasoning
+**Pythonic Approach**: Clean, maintainable code following established patterns
+**Unified Experience**: Same CLI, same memory, same monitoring - just faster execution
 
-### MCP Servers
-- **FileIO MCP**: File operations for n8n workflows (port 8000)
-- **Python MCP**: Interactive Python tool sessions (port 8002)
-- **Search MCP**: Web search and content extraction (port 8003)
-- **MongoDB MCP**: Database operations for MongoDB (port 8004)
-- **MCP Gateway**: Nginx proxy for all MCP services (port 8080)
+---
 
-### Management
-- **Orenco Dashboard**: Service health monitoring (port 8090)
+## Phase 1: Foundation & Research (Week 1)
+*Goal: Understand Agno and create minimal integration without breaking existing functionality*
 
-## Standing Orders for Development
+### Task 1.1: Agno Research & Setup
+- [ ] Install Agno in development environment: `pip install agno`
+- [ ] Create `tests/test_agno_basic.py` - basic Agno agent creation test
+- [ ] Document Agno capabilities and API in `docs/agno_research.md`
+- [ ] Verify Agno works with our Azure OpenAI configuration
 
-### 1. Docker Image Management
-- **ALWAYS use new tag with docker image updates**
-- Never reuse existing tags when modifying services
-- Use descriptive tags like `dashboard:v1`, `dashboard:orenco`, `mongo-mcp:fixed`
-- Update docker-compose.yml with new tag before restarting services
+**Acceptance Criteria:**
+- Agno installed and basic agent can be created
+- Test passes showing Agno agent responds to simple prompts
+- No impact on existing LangChain functionality
 
-### 2. Python Code Standards
-- **Never use extra classes in Python code**
-- Keep code simple and functional
-- Use direct function calls and data structures
-- Avoid unnecessary object-oriented complexity
+### Task 1.2: Pydantic Models for Agno Tracking
+```python
+# Add to models.py
+class AgnoAgentExecution(BaseModel):
+    """Track Agno agent execution metrics."""
+    agent_name: str
+    framework: str = "agno"
+    task_type: str
+    execution_time_ms: float
+    memory_usage_kb: float
+    token_count: int
+    success: bool
+    error_message: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-### 3. Technology Stack
-- **Python backend and JavaScript frontend**
-- Backend: FastAPI, asyncio, pydantic models
-- Frontend: Vanilla JavaScript, HTML, CSS
-- No React, Vue, or other frontend frameworks
-- Keep frontend lightweight and responsive
-
-### Directory Structure
-- `work/`: Workflow data processing directory
-  - `ingress/`: Entry point for new data and workflow inputs
-  - `wip/`: Active processing area for workflows in progress
-  - `completed/`: Final destination for processed data and outputs
-- `naten/`: n8n instance directory with services and configurations
-- `*.json`: n8n workflow definitions and configurations
-- `.env.example`: Template for environment configuration
-
-## Development Commands
-
-### Docker Operations
-```bash
-# Start all services
-docker-compose up -d
-
-# Stop all services
-docker-compose down
-
-# View logs for specific service
-docker-compose logs -f [service_name]
-
-# Check service health status
-docker-compose ps
-
-# Restart a service
-docker-compose restart [service_name]
+class FrameworkMetrics(BaseModel):
+    """Compare performance between frameworks."""
+    framework: str
+    total_executions: int
+    avg_execution_time_ms: float
+    total_tokens: int
+    success_rate: float
+    last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 ```
 
-### Database Access
-```bash
-# PostgreSQL main database
-docker-compose exec pgn8n psql -U lostboy -d orenco_workflows
+**Acceptance Criteria:**
+- Models added to `models.py` following existing patterns
+- MongoDB can store Agno execution data
+- Test coverage for new models
 
-# PostgreSQL vector database
-docker-compose exec pgvect psql -U lostboy -d orenco_vectors
+### Task 1.3: Minimal Agno Agent Class
+```python
+# Create da_code/agno_agents.py
+class AgnoAgentWrapper:
+    """Wrapper for Agno agents that integrates with our telemetry."""
 
-# PostgreSQL chat database
-docker-compose exec pgchat psql -U lostboy -d orenco_chatmemory
+    def __init__(self, name: str, instructions: str, config: AgentConfig):
+        self.name = name
+        self.config = config
+        self.agno_agent = self._create_agno_agent(instructions)
+        self.telemetry = da_mongo
 
-# Redis CLI access
-docker-compose exec redisn8n redis-cli
-
-# MongoDB shell
-docker-compose exec mongo mongosh -u lostboy -p OrencoMongo2024* --authenticationDatabase admin
+    async def execute(self, task: str) -> str:
+        """Execute task with telemetry tracking."""
+        start_time = time.time()
+        try:
+            result = await self.agno_agent.arun(task)
+            await self._track_execution(task, time.time() - start_time, True)
+            return result
+        except Exception as e:
+            await self._track_execution(task, time.time() - start_time, False, str(e))
+            raise
 ```
 
-### MCP Server Management
-```bash
-# Build and restart an MCP server
-docker build -t server:new_tag ./mcp/server_name
-docker-compose restart server_name
+**Acceptance Criteria:**
+- Single Agno agent can be created and executed
+- Execution tracked in MongoDB with consistent format
+- Error handling follows existing patterns
+- Test coverage for wrapper class
 
-# Test MCP server health
-curl http://localhost:PORT/health
+---
 
-# Test MCP tools
-curl -X POST http://localhost:PORT/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'
+## Phase 2: Integration Layer (Week 2)
+*Goal: Create unified interface without changing CLI behavior*
+
+### Task 2.1: Agent Framework Abstraction
+```python
+# Add to da_code/agent_framework.py
+class AgentFramework(Enum):
+    LANGCHAIN = "langchain"
+    AGNO = "agno"
+
+class UnifiedAgentInterface:
+    """Abstract interface for both agent frameworks."""
+
+    async def execute_task(self, task: str) -> str:
+        """Execute a task - implementation specific."""
+        raise NotImplementedError
+
+    def get_framework_name(self) -> str:
+        """Return framework identifier."""
+        raise NotImplementedError
+
+    async def get_metrics(self) -> Dict[str, Any]:
+        """Get execution metrics."""
+        raise NotImplementedError
 ```
 
-## Service Access Points
+**Acceptance Criteria:**
+- Clean abstraction that both frameworks can implement
+- No changes to existing CLI or user experience
+- LangChain agent implements interface without modification
+- Test coverage for interface contract
 
-- **n8n UI**: http://localhost:5678 (admin/admin123)
-- **Orenco Dashboard**: http://localhost:8090
-- **MCP Gateway**: http://localhost:8080
-- **PostgreSQL Main**: localhost:5432
-- **PostgreSQL Vector**: localhost:5433
-- **PostgreSQL Chat**: localhost:5434
-- **Redis**: localhost:6379
-- **MongoDB**: localhost:27017
+### Task 2.2: Simple Task Router
+```python
+# Add to da_code/task_router.py
+class TaskRouter:
+    """Route tasks to appropriate framework."""
 
-### MCP Server Endpoints
-- **FileIO MCP**: http://localhost:8000 (direct) or http://localhost:8080/fileio/ (via gateway)
-- **Python MCP**: http://localhost:8002 (direct) or http://localhost:8080/python/ (via gateway)
-- **Search MCP**: http://localhost:8003 (direct) or http://localhost:8080/search/ (via gateway)
-- **MongoDB MCP**: http://localhost:8004 (direct) or http://localhost:8080/mongo/ (via gateway)
+    def __init__(self):
+        self.routing_rules = {
+            'default': AgentFramework.LANGCHAIN,  # Safe default
+            'keywords': {
+                'lint': AgentFramework.AGNO,      # Future: when implemented
+                'format': AgentFramework.AGNO,    # Future: when implemented
+            }
+        }
 
-## Configuration
+    def route_task(self, task: str) -> AgentFramework:
+        """Determine which framework should handle task."""
+        # Phase 2: Always route to LangChain (no behavior change)
+        # Phase 3+: Add intelligent routing
+        return AgentFramework.LANGCHAIN
+```
 
-Environment variables are configured in `.env` file with current Orenco credentials. All services use the credentials defined in the environment file:
-- All databases use `lostboy` as the primary user
+**Acceptance Criteria:**
+- Router exists but doesn't change current behavior
+- All tasks still go to LangChain (zero risk)
+- Foundation for future smart routing
+- Test coverage for routing logic
 
-## Data Persistence
+### Task 2.3: Enhanced Status Interface
+```python
+# Extend cli.py SimpleStatusInterface
+class HybridStatusInterface(SimpleStatusInterface):
+    """Status interface that can track multiple frameworks."""
 
-All data persists through Docker volumes:
-- `./naten/n8ngui/`: n8n GUI workflows and settings
-- `./naten/n8nwork/`: n8n Worker configuration
-- `./naten/pgn8n/`: PostgreSQL main database storage
-- `./naten/pgvect/`: PostgreSQL vector database storage
-- `./naten/pgchat/`: PostgreSQL chat database storage
-- `./naten/redisn8n/`: Redis queue and cache data
-- `./mongo/`: MongoDB document storage
-- `./work/`: Workflow processing directories
+    def __init__(self):
+        super().__init__()
+        self.framework_metrics = {
+            'langchain': {'calls': 0, 'tokens': 0},
+            'agno': {'calls': 0, 'tokens': 0}
+        }
 
-## File Processing Workflow
+    def track_framework_call(self, framework: str, tokens: int = 0):
+        """Track calls from specific framework."""
+        if framework in self.framework_metrics:
+            self.framework_metrics[framework]['calls'] += 1
+            self.framework_metrics[framework]['tokens'] += tokens
+```
 
-The system follows a standardized workflow pattern:
-1. **Ingest**: Place data in `work/ingress/`
-2. **Process**: Move to `work/wip/` during active processing
-3. **Complete**: Archive results in `work/completed/`
+**Acceptance Criteria:**
+- Status interface ready for multi-framework tracking
+- No changes to current display (same user experience)
+- Foundation for showing framework breakdown
+- Backward compatible with existing status
 
-Use timestamped subdirectories and implement retention policies for efficient file management.
+---
+
+## Phase 3: Agno Agent Pool (Week 3)
+*Goal: Add fast Agno agents for specific tasks*
+
+### Task 3.1: Single Agno Specialist Agent
+```python
+# Create first production Agno agent
+class AgnoCodeLinter(AgnoAgentWrapper):
+    """Fast code linting agent using Agno."""
+
+    def __init__(self, config: AgentConfig):
+        instructions = """You are a fast code linter. Quickly identify:
+        - Syntax errors
+        - Style violations
+        - Import issues
+        - Basic code smells
+        Respond concisely with specific line numbers and fixes."""
+
+        super().__init__("CodeLinter", instructions, config)
+```
+
+**Acceptance Criteria:**
+- Single Agno agent for linting tasks
+- Measurably faster than LangChain equivalent
+- Same quality output as LangChain
+- Comprehensive test suite comparing both approaches
+
+### Task 3.2: Task Classification & Routing
+```python
+# Update TaskRouter with real routing logic
+def route_task(self, task: str) -> AgentFramework:
+    """Intelligent task routing."""
+    task_lower = task.lower()
+
+    # Route to Agno for specific quick tasks
+    agno_keywords = ['lint', 'check syntax', 'format code', 'style check']
+    if any(keyword in task_lower for keyword in agno_keywords):
+        return AgentFramework.AGNO
+
+    # Route to LangChain for everything else (reasoning, conversation)
+    return AgentFramework.LANGCHAIN
+```
+
+**Acceptance Criteria:**
+- Intelligent routing based on task content
+- A/B testing shows Agno faster for designated tasks
+- LangChain still handles complex reasoning
+- User can override with command flags if needed
+
+### Task 3.3: Unified Agent Manager
+```python
+# Add to da_code/hybrid_agents.py
+class HybridAgentManager:
+    """Manages both LangChain and Agno agents."""
+
+    def __init__(self, config: AgentConfig, session: CodeSession):
+        self.config = config
+        self.session = session
+        self.router = TaskRouter()
+
+        # Initialize both frameworks
+        self.langchain_agent = DaCodeAgent(config, session)
+        self.agno_agents = {
+            'linter': AgnoCodeLinter(config),
+            # Add more as we build them
+        }
+
+    async def execute_task(self, task: str) -> str:
+        """Route task to appropriate framework."""
+        framework = self.router.route_task(task)
+
+        if framework == AgentFramework.AGNO:
+            agent_name = self._select_agno_agent(task)
+            return await self.agno_agents[agent_name].execute(task)
+        else:
+            return await self.langchain_agent.chat(task)
+```
+
+**Acceptance Criteria:**
+- Seamless routing between frameworks
+- Performance metrics show improvement for routed tasks
+- No degradation in user experience
+- Comprehensive integration tests
+
+---
+
+## Phase 4: CLI Enhancement (Week 4)
+*Goal: Expose framework choice to users while maintaining simplicity*
+
+### Task 4.1: Enhanced CLI Options
+```bash
+# New CLI options (backward compatible)
+da_code "review this code"                    # Auto-routing
+da_code --agent auto "best approach"          # Smart selection
+da_code --agent agno "quick lint check"       # Force Agno
+da_code --agent langchain "explain design"    # Force LangChain
+da_code --performance                          # Show framework metrics
+```
+
+**Acceptance Criteria:**
+- All existing commands work unchanged
+- New options provide framework control
+- Performance command shows useful metrics
+- Help text clearly explains options
+
+### Task 4.2: Enhanced Status Display
+```
+✅ Complete | 0.8s | Ready | 🤖 gpt-5-chat | 💾 PostgreSQL | 🍃 Connected
+⚡ Agno: 3 agents (avg: 0.05s) | 🦜 LangChain: 1 agent (avg: 1.2s) | 🎯 Auto-routing
+```
+
+**Acceptance Criteria:**
+- Status shows framework breakdown
+- Performance comparison visible
+- Clean, informative display
+- Updates in real-time during execution
+
+### Task 4.3: Performance Benchmarking
+```python
+# Add to da_code/benchmarks.py
+class FrameworkBenchmark:
+    """Compare framework performance for different task types."""
+
+    async def benchmark_task_type(self, task_type: str, iterations: int = 10):
+        """Benchmark both frameworks on same task type."""
+        agno_times = []
+        langchain_times = []
+
+        # Run same task on both frameworks, measure performance
+        # Store results in MongoDB for analysis
+```
+
+**Acceptance Criteria:**
+- Automated benchmarking of both frameworks
+- Performance data stored and queryable
+- Reports show where each framework excels
+- Guides future routing improvements
+
+---
+
+## Phase 5: Advanced Multi-Agent Workflows (Week 5+)
+*Goal: Leverage Agno's speed for parallel task execution*
+
+### Task 5.1: Parallel Agent Execution
+```python
+async def comprehensive_code_analysis(self, code: str):
+    """Use multiple Agno agents in parallel for fast analysis."""
+
+    # Run multiple fast analyses in parallel
+    tasks = [
+        self.agno_agents['linter'].execute(f"Lint: {code}"),
+        self.agno_agents['security'].execute(f"Security scan: {code}"),
+        self.agno_agents['performance'].execute(f"Performance check: {code}"),
+    ]
+
+    results = await asyncio.gather(*tasks)
+
+    # Use LangChain to synthesize results with reasoning
+    synthesis = await self.langchain_agent.chat(f"""
+    Analyze these code reviews and provide comprehensive assessment:
+    {chr(10).join(results)}
+    """)
+
+    return synthesis
+```
+
+**Acceptance Criteria:**
+- Multiple Agno agents execute in parallel
+- LangChain synthesizes results with reasoning
+- Total time faster than sequential execution
+- Quality maintained or improved
+
+---
+
+## Development Principles
+
+### Code Quality Standards
+- **Pythonic**: Follow PEP 8, use type hints, leverage Python idioms
+- **Testable**: Every feature has comprehensive tests
+- **Maintainable**: Clear separation of concerns, minimal coupling
+- **Observable**: Rich telemetry and logging for debugging
+
+### Pydantic Model Guidelines
+- **All models in models.py**: Centralized data structures
+- **MongoDB integration**: Consistent field naming and validation
+- **Version compatibility**: Handle schema evolution gracefully
+- **Performance**: Efficient serialization for high-frequency operations
+
+### Integration Testing Strategy
+- **Backward compatibility**: Existing functionality never breaks
+- **Performance regression**: Monitor execution times continuously
+- **Error handling**: Graceful degradation when frameworks fail
+- **Memory usage**: Track and optimize resource consumption
+
+### Success Metrics
+- **Performance**: Measureable speed improvement for quick tasks
+- **Quality**: Same or better output quality compared to LangChain-only
+- **Reliability**: No increase in error rates or failures
+- **User Experience**: CLI remains simple and intuitive
+
+---
+
+## Risk Mitigation
+
+### Technical Risks
+- **Framework conflicts**: Isolate frameworks, careful dependency management
+- **Memory issues**: Monitor resource usage, implement circuit breakers
+- **API changes**: Pin versions, test upgrades in isolation
+
+### Product Risks
+- **Complexity creep**: Maintain simple CLI interface, hide implementation
+- **Performance regression**: Continuous benchmarking, rollback capability
+- **User confusion**: Clear documentation, sensible defaults
+
+### Rollback Strategy
+- **Feature flags**: Disable Agno integration if issues arise
+- **Gradual rollout**: Start with non-critical tasks, expand carefully
+- **Monitoring**: Alert on performance or error rate changes
+
+---
+
+This roadmap ensures we build on our solid foundation while incrementally adding Agno's performance benefits. Each phase delivers value while maintaining the quality and reliability users expect from da_code.

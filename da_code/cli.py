@@ -21,15 +21,385 @@ from rich.status import Status
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
 
-from .agent import DaCodeAgent
+from .agent_factory import AgentFactory
+from .agent_interface import AgentInterface
 from .config import ConfigManager, setup_logging
 from .context import ContextLoader
 from .models import CodeSession
+from .execution_events import EventType, ConfirmationResponse
 
 logger = logging.getLogger(__name__)
 
 # Global console for clean interaction
 console = Console()
+
+
+async def async_prompt_user(message: str, choices: List[str], default: str = None) -> str:
+    """Beautiful async prompt with arrow key navigation and number shortcuts."""
+    import asyncio
+    import sys
+    import termios
+    import tty
+    from rich.panel import Panel
+    from rich.text import Text
+
+    # Choice configuration with colors
+    choice_config = {
+        "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
+        "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
+        "modify": {"label": "✏️ Modify", "desc": "Edit the command before execution", "color": "yellow"},
+        "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
+    }
+
+    selected_index = 0
+
+    def display_choices():
+        choice_lines = []
+        for i, choice in enumerate(choices):
+            config = choice_config.get(choice, {"label": choice, "desc": "", "color": "white"})
+
+            if i == selected_index:
+                # Highlighted choice
+                line = Text()
+                line.append("  ▶ ", style="cyan bold")
+                line.append(f"{i+1}. {config['label']}", style=f"{config['color']} bold")
+                if config['desc']:
+                    line.append(f" - {config['desc']}", style="white dim")
+            else:
+                # Normal choice
+                line = Text()
+                line.append("    ", style="white")
+                line.append(f"{i+1}. {config['label']}", style=config['color'])
+                if config['desc']:
+                    line.append(f" - {config['desc']}", style="white dim")
+
+            choice_lines.append(line)
+
+        # Instructions
+        instructions = Text()
+        instructions.append("Use ", style="white dim")
+        instructions.append("↑/↓ arrows", style="cyan bold")
+        instructions.append(" to navigate, ", style="white dim")
+        instructions.append("Enter", style="green bold")
+        instructions.append(" to select, or press ", style="white dim")
+        instructions.append("1-4", style="yellow bold")
+        instructions.append(" for quick selection", style="white dim")
+
+        choice_lines.append("")
+        choice_lines.append(instructions)
+
+        panel = Panel(
+            "\n".join(str(line) for line in choice_lines),
+            title="Choose Action",
+            title_align="left",
+            border_style="green",
+            padding=(1, 2)
+        )
+        console.print(panel)
+
+    def get_keypress_choice() -> str:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+
+        try:
+            tty.setraw(sys.stdin.fileno())
+
+            while True:
+                key = sys.stdin.read(1)
+
+                # Number key shortcuts
+                if key in ['1', '2', '3', '4']:
+                    idx = int(key) - 1
+                    if idx < len(choices):
+                        nonlocal selected_index
+                        selected_index = idx
+                        console.clear()
+                        console.print(f"[green bold]Selected: {choice_config.get(choices[idx], {}).get('label', choices[idx])}[/green bold]")
+                        return choices[idx]
+
+                # Arrow keys
+                elif key == '\x1b':
+                    key += sys.stdin.read(2)
+                    if key == '\x1b[A':  # Up
+                        selected_index = (selected_index - 1) % len(choices)
+                        # Move cursor up to start of current panel and clear screen from there
+                        print('\033[2J\033[H', end='', flush=True)
+                        display_choices()
+                    elif key == '\x1b[B':  # Down
+                        selected_index = (selected_index + 1) % len(choices)
+                        # Move cursor up to start of current panel and clear screen from there
+                        print('\033[2J\033[H', end='', flush=True)
+                        display_choices()
+
+                # Enter key
+                elif key in ['\r', '\n']:
+                    console.clear()
+                    console.print(f"[green bold]Selected: {choice_config.get(choices[selected_index], {}).get('label', choices[selected_index])}[/green bold]")
+                    return choices[selected_index]
+
+                # Ctrl+C
+                elif key == '\x03':
+                    raise KeyboardInterrupt()
+
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    # Display initial choices
+    display_choices()
+
+    # Get choice asynchronously
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_keypress_choice)
+
+
+async def async_prompt_user_silent(choices: List[str], default: str = None) -> str:
+    """Silent async prompt that only handles input without displaying choices."""
+    import asyncio
+    import sys
+    import termios
+    import tty
+    from rich.text import Text
+
+    # Choice configuration with colors
+    choice_config = {
+        "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
+        "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
+        "modify": {"label": "✏️ Modify", "desc": "Edit the command before execution", "color": "yellow"},
+        "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
+    }
+
+    selected_index = 0
+
+    def get_keypress_choice() -> str:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+
+        try:
+            tty.setraw(sys.stdin.fileno())
+
+            while True:
+                key = sys.stdin.read(1)
+
+                # Number key shortcuts
+                if key in ['1', '2', '3', '4']:
+                    idx = int(key) - 1
+                    if idx < len(choices):
+                        nonlocal selected_index
+                        selected_index = idx
+                        return choices[idx]
+
+                # Arrow keys - update selection but don't redisplay
+                elif key == '\x1b':
+                    key += sys.stdin.read(2)
+                    if key == '\x1b[A':  # Up
+                        selected_index = (selected_index - 1) % len(choices)
+                    elif key == '\x1b[B':  # Down
+                        selected_index = (selected_index + 1) % len(choices)
+
+                # Enter key
+                elif key in ['\r', '\n']:
+                    return choices[selected_index]
+
+                # Ctrl+C
+                elif key == '\x03':
+                    raise KeyboardInterrupt()
+
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    # Get choice asynchronously without displaying anything
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_keypress_choice)
+
+
+async def async_prompt_text(message: str, default: str = None) -> str:
+    """Async wrapper for Rich text prompts."""
+    import asyncio
+    from rich.prompt import Prompt
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: Prompt.ask(message, default=default)
+    )
+
+
+def display_combined_confirmation(execution) -> None:
+    """Display command information and choices in a single beautiful panel."""
+    from rich.panel import Panel
+    from rich.text import Text
+
+    # Build content with command info and choices
+    content = []
+
+    # Command info section
+    command_text = Text()
+    command_text.append("Command: ", style="bold cyan")
+    command_text.append(execution.command, style="bold white")
+    content.append(str(command_text))
+
+    #directory_text = Text()
+    #directory_text.append("Directory: ", style="bold cyan")
+    #directory_text.append(execution.working_directory, style="white")
+    #content.append(str(directory_text))
+
+    #if execution.explanation:
+    #    purpose_text = Text()
+    #    purpose_text.append("Purpose: ", style="bold cyan")
+    #    purpose_text.append(execution.explanation, style="white")
+    #    content.append(str(purpose_text))
+
+    # Add separator
+    content.append("")
+
+    # Choice configuration with colors
+    choice_config = {
+        "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
+        "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
+        "modify": {"label": "✏️ Modify", "desc": "Edit the command before execution", "color": "yellow"},
+        "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
+    }
+
+    choices = ["yes", "no", "modify", "explain"]
+
+    # Add choices
+    for i, choice in enumerate(choices):
+        config = choice_config[choice]
+        choice_line = Text()
+        choice_line.append(f"  {i+1}. {config['label']}", style=f"{config['color']} bold")
+        choice_line.append(f" - {config['desc']}", style="white dim")
+        content.append(str(choice_line))
+
+    # Add instructions
+    content.append("")
+    instructions = Text()
+    instructions.append("Press ", style="white dim")
+    instructions.append("1-4", style="cyan bold")
+    instructions.append(" or use ", style="white dim")
+    instructions.append("↑/↓ arrows", style="cyan bold")
+    instructions.append(" + ", style="white dim")
+    instructions.append("Enter", style="green bold")
+    content.append(str(instructions))
+
+    # Create single beautiful panel
+    panel = Panel(
+        "\n".join(content),
+        title="🤖 Command Confirmation",
+        title_align="left",
+        border_style="cyan",
+        padding=(1, 2)
+    )
+
+    console.print(panel)
+
+
+async def execute_with_streaming_confirmations(
+    agent: AgentInterface,
+    user_input: str,
+    status_interface
+) -> Optional[str]:
+    """Execute task with beautiful unified streaming and confirmation handling."""
+
+    final_response = None
+    event_generator = agent.execute_task_stream(user_input)
+
+    try:
+        async for event in event_generator:
+            # Update status based on event type
+            if event.event_type == EventType.EXECUTION_START:
+                status_interface.update_status("Starting execution...")
+
+            elif event.event_type == EventType.LLM_START:
+                status_interface.llm_calls += 1
+                status_interface.update_status("Thinking...")
+
+            elif event.event_type == EventType.LLM_END:
+                if event.tokens_used:
+                    status_interface.total_tokens += event.tokens_used
+                status_interface.update_status("Processing...")
+
+            elif event.event_type == EventType.TOOL_START:
+                status_interface.tool_calls += 1
+                status_interface.update_status(f"Using tool: {event.tool_name}")
+
+            elif event.event_type == EventType.TOOL_END:
+                status_interface.update_status("Tool completed")
+
+            elif event.event_type == EventType.COMMAND_CONFIRMATION_NEEDED:
+                # 🎯 This is where the magic happens!
+                # Stop the status spinner during confirmation
+                status_interface.stop_execution(success=True, final_message="")
+
+                console.print("\n")  # Add spacing
+                # Display combined command information and choices
+                display_combined_confirmation(event.execution)
+
+                # Get user choice (choices already displayed in combined panel)
+                try:
+                    response = await async_prompt_user_silent(
+                        choices=["yes", "no", "modify", "explain"],
+                        default="no"
+                    )
+                    console.print()  # Just add spacing, no duplicate confirmation message
+                except KeyboardInterrupt:
+                    console.print("\n[yellow]⚠️ Confirmation cancelled[/yellow]")
+                    return "❌ Command confirmation cancelled by user"
+                except Exception as e:
+                    console.print(f"\n[red]❌ Confirmation error[/red]")
+                    return f"❌ Confirmation failed"
+
+                # Handle modify workflow
+                modified_command = None
+                if response == "modify":
+                    modified_command = await async_prompt_text(
+                        "Enter modified command",
+                        default=event.execution.command
+                    )
+
+                # Send response back to generator
+                confirmation_response = ConfirmationResponse(
+                    choice=response,
+                    modified_command=modified_command
+                )
+
+                # Resume streaming with clean status
+                status_interface.start_execution("Processing...")
+
+                # Send the response back to the generator and continue processing
+                try:
+                    # This sends the confirmation and resumes the generator
+                    await event_generator.asend(confirmation_response)
+                    # Continue the loop to process subsequent events
+                    # The generator will yield more events after processing the confirmation
+                except StopAsyncIteration:
+                    # Generator finished after handling confirmation
+                    break
+
+            elif event.event_type == EventType.COMMAND_EXECUTED:
+                result = event.execution
+                if result.status.value == "success":
+                    status_interface.update_status("Command executed successfully")
+                else:
+                    status_interface.update_status(f"Command failed: {result.status.value}")
+
+            elif event.event_type == EventType.FINAL_RESPONSE:
+                final_response = event.content
+                status_interface.update_status("Finalizing response...")
+
+            elif event.event_type == EventType.ERROR:
+                status_interface.update_status(f"Error: {event.error_message}")
+                return f"❌ Execution failed: {event.error_message}"
+
+            elif event.event_type == EventType.EXECUTION_END:
+                status_interface.update_status("Execution completed")
+
+        return final_response
+
+    except StopAsyncIteration:
+        return final_response
+    except KeyboardInterrupt:
+        console.print("❌ Execution interrupted by user.")
+        return "❌ Execution cancelled."
 
 
 class RealTimeAgentCallbackHandler(AsyncCallbackHandler):
@@ -91,6 +461,11 @@ class SimpleStatusInterface:
         self.tool_calls = 0
         self.total_tokens = 0
         self.callback_handler = None
+        # Framework-aware metrics
+        self.framework_metrics = {
+            'langchain': {'calls': 0, 'tokens': 0},
+            'agno': {'calls': 0, 'tokens': 0}
+        }
 
     def start_execution(self, message: str):
         """Start execution with status message."""
@@ -98,6 +473,9 @@ class SimpleStatusInterface:
         self.llm_calls = 0
         self.tool_calls = 0
         self.total_tokens = 0
+        # Reset framework metrics
+        for framework in self.framework_metrics:
+            self.framework_metrics[framework] = {'calls': 0, 'tokens': 0}
         self.current_status = Status(f"🤖 {message}", spinner="dots")
         self.current_status.start()
         self.callback_handler = RealTimeAgentCallbackHandler(self)
@@ -126,6 +504,12 @@ class SimpleStatusInterface:
         """Log a tool call."""
         self.tool_calls += 1
         self.update_status(f"Using tool: {tool_name}" if tool_name else "Using tool...")
+
+    def track_framework_call(self, framework: str, tokens: int = 0):
+        """Track calls from specific framework."""
+        if framework in self.framework_metrics:
+            self.framework_metrics[framework]['calls'] += 1
+            self.framework_metrics[framework]['tokens'] += tokens
 
     def stop_execution(self, success: bool = True, final_message: str = None):
         """Stop execution and show final result."""
@@ -367,15 +751,16 @@ def create_session(context_ldr: ContextLoader):
     return code_session
 
 
-def initialize_agent(config_mgr: ConfigManager, code_session: CodeSession):
+def initialize_agent(config_mgr: ConfigManager, code_session: CodeSession) -> Optional[AgentInterface]:
     """Initialize agent after configuration is validated."""
     try:
         # Validate configuration
         if not config_mgr.validate_config():
             return None
 
-        # Create agent
-        new_agent = DaCodeAgent(config_mgr.create_agent_config(), code_session)
+        # Create agent using the factory
+        agent_config = config_mgr.create_agent_config()
+        new_agent = AgentFactory.create_agent(agent_config, code_session)
 
         logger.info("Agent initialized successfully")
         return new_agent
@@ -384,8 +769,6 @@ def initialize_agent(config_mgr: ConfigManager, code_session: CodeSession):
         logger.error(f"Agent initialization failed: {e}")
         print(f"❌ Failed to initialize agent: {e}")
         return None
-    
-    return new_agent
 
 
 def create_example_configuration(config_mgr: ConfigManager, context_ldr: ContextLoader) -> int:
@@ -490,9 +873,10 @@ async def async_main():
             # Get deployment name
             deployment_name = os.getenv('AZURE_OPENAI_DEPLOYMENT', 'gpt-4')
 
-            # Get chat memory status
+            # Get chat memory status from agent
             try:
-                memory_info = agent.memory_manager.get_memory_info()
+                session_info = agent.get_session_info()
+                memory_info = session_info.get('memory_info', {})
                 memory_type = memory_info.get('memory_type', 'unknown')
                 message_count = memory_info.get('message_count', 0)
 
@@ -572,93 +956,12 @@ async def async_main():
                     console.print("[yellow]Agent not initialized. Run 'setup' first.[/yellow]")
                     continue
 
-                # Real-time agent execution with streaming events
+                # Beautiful unified streaming execution 🚀
                 status_interface.start_execution(f"Processing: {user_input[:40]}...")
                 try:
-                    # Use the agent's underlying executor for streaming
-                    agent_executor = agent.agent_executor
-                    final_response = ""
-
-                    # Track agent thoughts and actions
-                    agent_thoughts = []
-                    current_action = None
-
-                    # Stream events from the agent executor
-                    async for event in agent_executor.astream_events(
-                        {"input": user_input},
-                        version="v1"
-                    ):
-                        event_type = event.get("event")
-                        event_name = event.get("name", "")
-                        data = event.get("data", {})
-
-                        # Handle different event types for real-time updates
-                        if event_type == "on_llm_start":
-                            status_interface.llm_calls += 1
-                            status_interface.update_status("Thinking...")
-
-                        elif event_type == "on_llm_end":
-                            # Extract token usage and capture thoughts
-                            if "output" in data:
-                                output = data["output"]
-
-                                # Track token usage
-                                if hasattr(output, "usage_metadata"):
-                                    tokens = output.usage_metadata.get("total_tokens", 0)
-                                    if tokens > 0:
-                                        status_interface.total_tokens += tokens
-
-                                # Capture agent thoughts/reasoning
-                                if hasattr(output, "content"):
-                                    content = output.content
-
-                                    # Look for thoughts in the content
-                                    if "Thought:" in content:
-                                        lines = content.split('\n')
-                                        for line in lines:
-                                            if line.strip().startswith("Thought:"):
-                                                thought = line.replace("Thought:", "").strip()
-                                                if thought and len(thought) > 15:
-                                                    # Clean up and truncate thought
-                                                    clean_thought = thought.replace("The user", "User").replace("I should", "Planning to")
-                                                    truncated = clean_thought[:60] + "..." if len(clean_thought) > 60 else clean_thought
-                                                    agent_thoughts.append(truncated)
-                                                    # Show thought immediately
-                                                    status_interface.update_status(f"💭 {truncated}")
-                                            elif line.strip().startswith("Action:"):
-                                                current_action = line.replace("Action:", "").strip()
-
-                                    # Look for Final Answer
-                                    elif "Final Answer:" in content:
-                                        status_interface.update_status("Preparing final answer...")
-
-                            status_interface.update_status("Processing...")
-
-                        elif event_type == "on_tool_start":
-                            tool_name = event.get("name", "Unknown")
-                            status_interface.tool_calls += 1
-
-                            # Show current thought if available
-                            if agent_thoughts:
-                                latest_thought = agent_thoughts[-1]
-                                status_interface.update_status(f"Using {tool_name}: {latest_thought[:40]}...")
-                            else:
-                                status_interface.update_status(f"Using {tool_name}")
-
-                        elif event_type == "on_tool_end":
-                            status_interface.update_status("Tool completed")
-
-                        elif event_type == "on_chain_start":
-                            if "agent" in event_name.lower():
-                                status_interface.update_status("Planning...")
-
-                        elif event_type == "on_chain_end":
-                            # Check if this is the final agent executor output
-                            if "output" in data:
-                                output_data = data["output"]
-                                if isinstance(output_data, dict) and "output" in output_data:
-                                    final_response = output_data["output"]
-                                    status_interface.update_status("Finalizing...")
+                    final_response = await execute_with_streaming_confirmations(
+                        agent, user_input, status_interface
+                    )
 
                     status_interface.stop_execution(True)
                     console.print()  # Empty line for spacing

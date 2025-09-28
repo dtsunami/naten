@@ -17,6 +17,15 @@ from pydantic import BaseModel, Field, ConfigDict
 logger = logging.getLogger(__name__)
 
 
+# Removed CommandConfirmationNeeded - using pure generator pattern now
+
+
+class AgentFramework(str, Enum):
+    """Supported agent frameworks."""
+    LANGCHAIN = "langchain"
+    AGNO = "agno"
+
+
 class CommandStatus(str, Enum):
     """Status of command execution."""
     PENDING = "pending"
@@ -95,6 +104,7 @@ class CommandExecution(BaseModel):
     # Agent context
     agent_reasoning: Optional[str] = Field(None, description="Agent's reasoning for this command")
     related_files: List[str] = Field(default_factory=list, description="Files related to this command")
+    explanation_requested: bool = Field(False, description="Whether user requested explanation for this command")
 
     def update_status(self, status: CommandStatus) -> None:
         """Update command status and timestamp."""
@@ -286,7 +296,7 @@ class CodeSession(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    """Configuration for the LangChain agent."""
+    """Configuration for multi-framework agents."""
     model_config = ConfigDict(
         validate_assignment=True,
         extra='forbid',
@@ -308,6 +318,11 @@ class AgentConfig(BaseModel):
     # Tool configuration
     command_timeout: int = Field(300, description="Default command timeout in seconds")
     require_confirmation: bool = Field(True, description="Require user confirmation for commands")
+
+    # Framework selection
+    framework_preference: AgentFramework = Field(AgentFramework.LANGCHAIN, description="Preferred agent framework")
+    enable_hybrid_routing: bool = Field(False, description="Enable intelligent task routing between frameworks")
+    auto_fallback: bool = Field(True, description="Automatically fallback to LangChain if other frameworks fail")
 
 
 class DaMongoTracker:
