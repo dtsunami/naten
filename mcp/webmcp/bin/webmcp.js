@@ -14,7 +14,8 @@ program
   .parse();
 
 const options = program.opts();
-const port = parseInt(options.port);
+const port = options.port ? parseInt(options.port) : undefined; // Only parse if provided
+const headless = options.headless;
 
-const server = new WebMCPServer(port);
+const server = new WebMCPServer(port, headless);
 server.start().catch(console.error);

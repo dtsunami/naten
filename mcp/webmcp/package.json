@@ -22,10 +22,9 @@
   "author": "da_code <daniel.tsunami@intel.com>",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/server-playwright": "^0.6.0",
+    "@playwright/mcp": "^0.0.40",
     "commander": "^11.0.0",
-    "clipboardy": "^4.0.0",
-    "os": "^0.1.2"
+    "clipboardy": "^4.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.0"
