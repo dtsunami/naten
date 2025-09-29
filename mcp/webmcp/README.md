@@ -1,36 +1,38 @@
 # 🌐 webmcp - Browser Automation MCP Server
 
-[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://python.org)
-[![Playwright](https://img.shields.io/badge/playwright-automation-green.svg)](https://playwright.dev)
+[![Node.js](https://img.shields.io/badge/node.js-18+-green.svg)](https://nodejs.org)
+[![Playwright](https://img.shields.io/badge/playwright-automation-blue.svg)](https://playwright.dev)
 [![MCP](https://img.shields.io/badge/MCP-protocol-orange.svg)](https://github.com/anthropics/mcp)
 
-> **Revolutionary browser automation MCP server that inherits your local browser credentials and sessions**
+> **Browser automation MCP server using official Playwright MCP with da_code integration**
 
 ## 🚀 The Magic
 
 **webmcp** follows our **revolutionary local MCP pattern**:
 
-1. **Start locally**: `webmcp` (auto-detects your browser profile)
+1. **Start locally**: `webmcp` (starts Playwright MCP server)
 2. **Auto-copies connection**: JSON config copied to clipboard
-3. **Remote connection**: Paste in da_code cloud → instant browser automation with YOUR credentials
-4. **Full power**: Remote AI agent controls your local browser with all your logged-in sessions
+3. **Remote connection**: Paste in da_code → instant browser automation
+4. **Full power**: Remote AI agent controls browser via Playwright tools
 
 ## ⚡ Key Features
 
-### 🔑 **Local Credential Inheritance**
-- **Auto-detects** your browser profile directory
-- **Inherits** all your logged-in sessions (Gmail, GitHub, etc.)
-- **Reuses** saved passwords and authentication cookies
-- **Zero setup** - works with your existing browser state
+### 🎭 **Official Playwright MCP Integration**
+- **Wraps** `@modelcontextprotocol/server-playwright`
+- **All tools** from official Playwright MCP server
+- **Real browser** automation (not headless by default)
+- **Cross-platform** browser support
 
 ### 🌐 **Full Browser Automation**
-- **Navigate** to any URL with wait conditions
-- **Click** elements using CSS selectors or accessibility names
-- **Fill forms** with automatic field clearing
+- **Navigate** to URLs with wait conditions
+- **Click** elements using selectors
+- **Fill forms** and interact with inputs
 - **Take screenshots** (full page or viewport)
 - **Execute JavaScript** with return values
-- **Wait** for elements or text content
+- **Wait** for elements or conditions
 - **Multi-tab** management
+- **Network monitoring**
+- **Console access**
 
 ### 🔄 **da_code Integration**
 - **Automatic clipboard copy** of connection JSON
@@ -43,10 +45,13 @@
 ### **Local Setup** (Your machine with browser)
 ```bash
 # Install webmcp
-cd /path/to/mcp/webmcp
-pip install -e .
+cd /mnt/blk/lostboy/mcp/webmcp
+npm install
 
-# Start server (auto-detects browser profile)
+# Install globally for webmcp command
+npm install -g .
+
+# Start server
 webmcp
 
 # Output:
@@ -68,203 +73,159 @@ webmcp
 
 # Instantly available tools:
 > browser_navigate {"url": "https://github.com"}
-🤖 Navigated to GitHub using your local browser with your login!
+🤖 Navigated to GitHub using your local browser!
 ```
 
-## 🛠️ Tool Reference
+## 🛠️ Available Tools
 
-### **Navigation**
-```bash
-# Navigate to URL
-browser_navigate {"url": "https://example.com", "wait_until": "networkidle"}
+All tools from `@modelcontextprotocol/server-playwright`:
 
-# Navigate with custom timeout
-browser_navigate {"url": "https://slow-site.com", "timeout": 60000}
-```
-
-### **Element Interaction**
-```bash
-# Click elements
-browser_click {"selector": "#login-button"}
-browser_click {"selector": "text=Sign In", "button": "left"}
-
-# Fill forms
-browser_fill {"selector": "#username", "value": "myuser"}
-browser_fill {"selector": "input[type=password]", "value": "secret", "clear": true}
-```
+### **Navigation & Control**
+- `browser_navigate` - Navigate to URLs
+- `browser_click` - Click elements
+- `browser_type` - Type text into elements
+- `browser_fill_form` - Fill multiple form fields
+- `browser_press_key` - Press keyboard keys
+- `browser_hover` - Hover over elements
+- `browser_drag` - Drag and drop elements
 
 ### **Content & Screenshots**
-```bash
-# Take screenshots
-browser_screenshot {"full_page": true, "format": "png"}
-browser_screenshot {"path": "/tmp/page.jpg", "format": "jpeg", "quality": 80}
-
-# Get page content
-browser_get_content  # Returns HTML, text, title, URL
-```
-
-### **JavaScript Execution**
-```bash
-# Execute JavaScript
-browser_evaluate {"script": "return document.title"}
-browser_evaluate {"script": "window.scrollTo(0, document.body.scrollHeight)"}
-
-# With arguments
-browser_evaluate {
-  "script": "return arguments[0] + arguments[1]",
-  "args": [5, 10]
-}
-```
+- `browser_screenshot` - Take screenshots
+- `browser_take_screenshot` - Enhanced screenshot tool
+- `browser_snapshot` - Accessibility snapshot
+- `browser_evaluate` - Execute JavaScript
 
 ### **Waiting & Timing**
-```bash
-# Wait for elements
-browser_wait {"selector": "#dynamic-content", "state": "visible", "timeout": 30000}
+- `browser_wait_for` - Wait for conditions
 
-# Wait for text
-browser_wait {"text": "Loading complete", "timeout": 15000}
+### **Advanced Features**
+- `browser_tabs` - Tab management
+- `browser_resize` - Resize browser window
+- `browser_console_messages` - Access console
+- `browser_network_requests` - Monitor network
+- `browser_handle_dialog` - Handle dialogs
+- `browser_file_upload` - Upload files
+- `browser_navigate_back` - Navigate back
+- `browser_close` - Close browser
+- `browser_install` - Install browser
+
+## 🎪 Usage Examples
+
+### **Quick Navigation**
+```bash
+> browser_navigate {"url": "https://example.com"}
+🤖 ✅ Navigated to https://example.com
+
+> browser_click {"element": "Sign In button", "ref": "#signin"}
+🤖 ✅ Clicked Sign In button
 ```
 
-### **Tab Management**
+### **Form Interaction**
 ```bash
-# Create new tab
-browser_new_tab {"url": "https://example.com"}
-
-# Close specific tab
-browser_close_tab {"page_id": "tab_1"}
-
-# Close current tab
-browser_close_tab
+> browser_fill_form {
+    "fields": [
+      {"name": "username", "type": "textbox", "ref": "#user", "value": "myuser"},
+      {"name": "password", "type": "textbox", "ref": "#pass", "value": "secret"}
+    ]
+  }
+🤖 ✅ Filled 2 form fields successfully
 ```
 
-## 🎪 Revolutionary Use Cases
-
-### **Authenticated Workflows**
+### **Screenshots & Content**
 ```bash
-# Your browser is already logged into GitHub
-> "navigate to my GitHub repositories and create a new repo called 'ai-experiment'"
+> browser_take_screenshot {"fullPage": true, "type": "png"}
+🤖 📸 Screenshot taken and saved
 
-🤖 1. Navigating to github.com...
-   ✅ Already logged in (using your credentials)
-
-   2. Clicking "New repository"...
-   ✅ Repository creation form opened
-
-   3. Filling repository name...
-   ✅ Entered "ai-experiment"
-
-   4. Clicking "Create repository"...
-   ✅ Repository created successfully!
-```
-
-### **Cross-Platform Development**
-```bash
-# Local browser on Windows, da_code on Linux
-> "open the staging environment and run the test suite in the browser console"
-
-🤖 Using your local browser with saved staging credentials...
-   ✅ Navigated to staging.example.com
-   ✅ Executed test suite: 15 tests passed
-   📸 Screenshot saved for verification
-```
-
-### **Automated Testing**
-```bash
-# Test with real browser state
-> "test the login flow on our app using my existing session"
-
-🤖 1. Opening app.example.com...
-   ✅ Page loaded (already authenticated)
-
-   2. Testing logout/login flow...
-   ✅ Logout successful
-   ✅ Login form appeared
-   ✅ Re-authentication successful
-
-   All tests passed! 🎉
+> browser_evaluate {"function": "() => document.title"}
+🤖 📄 Page title: "Example Domain"
 ```
 
 ## ⚙️ Configuration Options
 
 ### **Browser Selection**
 ```bash
-# Use different browsers
-webmcp --browser chromium    # Default
-webmcp --browser firefox     # Firefox
-webmcp --browser webkit      # Safari engine
-```
-
-### **Custom Profile Directory**
-```bash
-# Specify custom browser profile
-webmcp --user-data-dir "/path/to/browser/profile"
-
-# Headless mode (for cloud deployment)
-webmcp --headless
-```
-
-### **Network Configuration**
-```bash
-# Bind to specific interface
-webmcp --host 0.0.0.0 --port 8005
+# Default port
+webmcp
 
 # Custom port
 webmcp --port 9000
+
+# Headless mode
+webmcp --headless
 ```
 
 ## 🏗️ Architecture
 
-### **Local Browser Integration**
+### **MCP Integration Flow**
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  Your Browser   │◄──►│    webmcp       │◄──►│ Remote da_code  │
+│  Local Browser  │◄──►│     webmcp      │◄──►│ Remote da_code  │
 │                 │    │                 │    │                 │
-│ 🔑 Your Logins  │    │ 🎭 Playwright   │    │ 🤖 AI Agent     │
-│ 🍪 Your Cookies │    │ 🌐 HTTP Server  │    │ 🧠 Commands     │
-│ 📁 Your Profile │    │ 📋 Auto-copy    │    │ 🔗 MCP Client   │
+│ 🎭 Playwright   │    │ 🔌 MCP Wrapper  │    │ 🤖 AI Agent     │
+│ 🌐 Real Browser │    │ 📋 Auto-copy    │    │ 🧠 Commands     │
+│ 🔑 Your Session │    │ 🚀 Node.js      │    │ 🔗 MCP Client   │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-### **Security Model**
-- **Local execution**: Browser runs on your machine with your permissions
-- **Network isolation**: Only HTTP API exposed, no direct browser access
-- **Session inheritance**: Uses your existing authentication safely
-- **Timeout protection**: All operations have configurable timeouts
+### **Technology Stack**
+- **Core**: `@modelcontextprotocol/server-playwright`
+- **Runtime**: Node.js 18+
+- **Browser**: Playwright (Chromium/Firefox/WebKit)
+- **Clipboard**: `clipboardy` for auto-copy
+- **CLI**: `commander` for argument parsing
 
 ## 🚨 Security Considerations
 
 ### **Safe Defaults**
 - **Non-headless by default**: See what the browser is doing
-- **Local binding**: Only localhost access unless explicitly configured
-- **Timeout limits**: Prevents runaway operations
-- **Error boundaries**: Graceful failure handling
+- **Local binding**: Server runs on local network interface
+- **Session isolation**: Each connection is independent
+- **Clean shutdown**: Proper resource cleanup
 
-### **Authentication**
-- **No credential storage**: Uses your existing browser sessions
-- **No credential transmission**: Credentials never leave your machine
-- **Session reuse**: Leverages existing authenticated state
-- **Clean disconnection**: No persistent connections
+### **Network Security**
+- **Local network only**: No internet exposure by default
+- **Known IP binding**: Uses actual local IP for connection
+- **Port configuration**: Configurable port for flexibility
 
 ## 🎯 Perfect for da_code
 
 **webmcp** integrates seamlessly with the da_code ecosystem:
 
-1. **Follows MCP patterns**: Standard tool naming and error handling
+1. **Official MCP tools**: Uses standard Playwright MCP server
 2. **Auto-discovery**: Clipboard copy for instant connection
 3. **Session management**: Clean connection lifecycle
 4. **Rich responses**: Detailed success/error feedback
-5. **Async architecture**: Non-blocking operations
+5. **Cross-platform**: Works on Windows, macOS, Linux
+
+## 🔧 Development
+
+### **Local Development**
+```bash
+# Install dependencies
+npm install
+
+# Run in development mode
+npm run dev
+
+# Test connection
+node bin/webmcp.js --port 8005
+```
+
+### **Dependencies**
+- `@modelcontextprotocol/server-playwright` - Official Playwright MCP
+- `commander` - CLI argument parsing
+- `clipboardy` - Cross-platform clipboard access
 
 ## 🔮 Future Enhancements
 
-- **Mobile browsers**: iOS Safari and Android Chrome support
-- **Browser extensions**: Direct extension communication
-- **Video recording**: Capture browser interactions
+- **Browser profile support**: Custom user data directories
+- **Extension integration**: Browser extension communication
+- **Mobile browsers**: iOS Safari and Android Chrome
 - **Performance metrics**: Page load timing and analysis
-- **Advanced selectors**: XPath and custom selector engines
+- **Video recording**: Capture browser interactions
 
 ---
 
-**webmcp: Where local browser power meets remote AI intelligence.**
+**webmcp: Official Playwright MCP with da_code magic.**
 
-**Your browser. Your credentials. Unlimited automation possibilities.**
+**Simple setup. Powerful automation. Unlimited possibilities.**
