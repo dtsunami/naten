@@ -174,7 +174,8 @@ export class ClipjsServer {
             description: `Windows clipboard MCP server at ${ip}`,
             tools: Object.keys(this.tools)
         };
-        return JSON.stringify(config, null, 2);
+        // Return compact JSON as complete command
+        return `add_mcp ${JSON.stringify(config)}`;
     }
 
     async readClipboardText() {
@@ -308,10 +309,10 @@ export class ClipjsServer {
 
     async copyConnectionPromptToClipboard() {
         try {
-            const prompt = this.generateConnectionPrompt();
-            await clipboardy.write(prompt);
-            console.log(`✅ JSON connection config copied to clipboard:`);
-            console.log(prompt);
+            const command = this.generateConnectionPrompt();
+            await clipboardy.write(command);
+            console.log(`✅ Complete command copied to clipboard:`);
+            console.log(`   ${command}`);
         } catch (error) {
             console.log(`❌ Could not copy to clipboard: ${error.message}`);
         }
@@ -326,7 +327,7 @@ export class ClipjsServer {
         // Copy connection prompt to clipboard
         await this.copyConnectionPromptToClipboard();
 
-        console.log(`\n📝 Use: add_mcp <JSON_CONFIG> in your da_code agent to enable remote clipboard access.`);
+        console.log(`\n📝 Paste the command above into your da_code agent to enable remote clipboard access.`);
         console.log(`⏹️  Press Ctrl+C to stop the server\n`);
 
         this.app.listen(this.port, '0.0.0.0', () => {

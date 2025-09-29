@@ -195,7 +195,7 @@ class ClippyServer:
             return "localhost"
 
     def generate_connection_prompt(self) -> str:
-        """Generate JSON connection config for da_code agent."""
+        """Generate compact command for da_code agent."""
         import json
         ip = self.get_local_ip()
         config = {
@@ -205,7 +205,8 @@ class ClippyServer:
             "description": f"Windows clipboard MCP server at {ip}",
             "tools": list(self.tools.keys())
         }
-        return json.dumps(config, indent=2)
+        # Return compact JSON as complete command
+        return f"add_mcp {json.dumps(config, separators=(',', ':'))}"
 
     def _read_clipboard_text(self) -> str:
         """Read text from Windows clipboard."""
@@ -308,12 +309,12 @@ class ClippyServer:
             return f"❌ Error writing clipboard image: {str(e)}"
 
     def copy_connection_prompt_to_clipboard(self):
-        """Copy JSON connection config to clipboard for easy pasting."""
+        """Copy complete add_mcp command to clipboard for easy pasting."""
         try:
-            config_json = self.generate_connection_prompt()
-            pyperclip.copy(config_json)
-            print(f"✅ JSON connection config copied to clipboard:")
-            print(config_json)
+            command = self.generate_connection_prompt()
+            pyperclip.copy(command)
+            print(f"✅ Complete command copied to clipboard:")
+            print(f"   {command}")
         except Exception as e:
             print(f"❌ Could not copy to clipboard: {e}")
 
@@ -326,7 +327,7 @@ class ClippyServer:
 
         self.copy_connection_prompt_to_clipboard()
 
-        print(f"\n📝 Use: add_mcp <JSON_CONFIG> in your da_code agent to enable remote clipboard access.")
+        print(f"\n📝 Paste the command above into your da_code agent to enable remote clipboard access.")
         print(f"⏹️  Press Ctrl+C to stop the server\n")
 
         config = uvicorn.Config(
