@@ -1,15 +1,64 @@
-# da_code Development Roadmap: Agno Integration
+# da_code Development Guide & Achievements
 
-This file provides guidance to Claude Code when working with this codebase and outlines the incremental plan for integrating Agno agents alongside our proven LangChain implementation.
+This file provides guidance to Claude Code when working with this codebase and documents our successful implementations.
 
-## Current State: Solid Foundation ✅
+## ✅ MAJOR ACHIEVEMENT: Dynamic MCP Architecture (October 2025)
+
+We have successfully implemented a **revolutionary dynamic MCP server integration** that enables:
+
+### 🚀 **Cross-Platform Agent Tool Expansion**
+- **Windows ↔ Linux**: Seamless tool access across different machines
+- **On-demand tools**: Add capabilities without agent restart
+- **Session-scoped**: Clean, temporary integration (no persistent config pollution)
+- **One-command setup**: Copy/paste JSON config and immediately gain new tools
+
+### 📋 **Clipboard MCP Servers (Clippy & ClipJS)**
+
+**Location**: `/mcp/clippy/` (Python) and `/mcp/clipjs/` (Node.js)
+
+**Tools Available**:
+- `read_text` - Read text from Windows clipboard
+- `read_image` - Read images from Windows clipboard as base64
+- `write_text` - Write text to Windows clipboard
+- `write_image` - Write base64 images to Windows clipboard
+
+**Usage Flow**:
+1. **Windows**: `clippy` or `clipjs` → Auto-copies connection command
+2. **Linux da_code**: Paste command → `add_mcp {"name":"clipboard",...}`
+3. **Agent**: Immediately gains `clipboard_read_text`, `clipboard_write_text`, etc.
+4. **Magic**: Cross-platform clipboard access from Linux agent to Windows machine!
+
+### 🔧 **Technical Implementation**
+
+**Key Files Modified**:
+- `/da_code/async_agent.py` - Added `_create_mcps()` and `_create_mcp_tool()` methods
+- `/da_code/cli.py` - Added `add_mcp` command with JSON parsing and session integration
+- `/da_code/tools.py` - Enhanced tool suite (removed redundant mcp_connect tool)
+
+**MCP Tool Integration**:
+```python
+# In async_agent.py _create_tools()
+mcp_tools = self._create_mcps()  # Load from session.mcp_servers
+tools.update(mcp_tools)          # Add to agent's tool dictionary
+
+# Tools named as: {server_name}_{tool_name}
+# Example: clipboard_read_text, clipboard_write_image
+```
+
+**Async Event Loop Handling**:
+- Fixed `asyncio.run()` conflicts in running event loops
+- Used `ThreadPoolExecutor` for proper async-to-sync tool execution
+- Maintains clean async architecture throughout
+
+## Current State: Production-Ready Foundation ✅
 
 We have successfully established:
 - **Async LangChain agents** with real-time status monitoring
 - **PostgreSQL chat memory** with proper persistence
 - **Rich CLI interface** with clean startup and execution
 - **Unified telemetry** via MongoDB tracking
-- **MCP server integration** for extensible tooling
+- **Dynamic MCP server integration** 🔥 **NEW!**
+- **Cross-platform tool access** 🔥 **NEW!**
 - **python-dotenv** configuration with variable substitution
 - **Clean architecture** with proper separation of concerns
 

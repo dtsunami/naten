@@ -421,7 +421,12 @@ class SimpleStatusInterface:
         else:
             result_text = "❌ Failed"
 
-        result_text += f" | {elapsed:.1f}s"
+        result_text += f" {elapsed:.1f}s"
+
+        # Add current directory
+        current_dir = os.path.basename(os.getcwd()) or "/"
+        result_text += f" | 📂 {current_dir}"
+
         if self.llm_calls > 0:
             result_text += f" | LLM: {self.llm_calls}"
         if self.tool_calls > 0:
@@ -800,7 +805,7 @@ async def async_main():
                 mongo_status_str = "[red]Unknown[/red]"
 
             # Combined status line
-            status_interface.stop_execution(True, f"Ready | 🤖 {deployment_name} | 💾 {memory_status} | 🍃 {mongo_status_str}")
+            status_interface.stop_execution(True, f"🤖 {deployment_name} | 💾 {memory_status} | 🍃 {mongo_status_str}")
 
     history = FileHistory(agent.config.history_file_path)
 
@@ -870,19 +875,19 @@ async def async_main():
                     console.print('[yellow]Example: add_mcp {"name": "clipboard", "url": "http://192.168.1.100:8000", "port": 8000, "description": "Windows clipboard", "tools": ["read_text", "write_text"]}[/yellow]')
                     continue
 
-                # Parse JSON config
-                status_interface.update_status("Parsing MCP configuration...")
-                try:
-                    mcp_config = json.loads(mcp_config_json)
-                except json.JSONDecodeError as e:
-                    status_interface.stop_execution(False, "Invalid JSON format")
-                    console.print(f"[red]❌ Invalid JSON: {str(e)}[/red]")
-                    continue
-
                 status_interface.start_execution("Adding MCP server...")
                 try:
                     import json
                     from pathlib import Path
+
+                    # Parse JSON config
+                    status_interface.update_status("Parsing MCP configuration...")
+                    try:
+                        mcp_config = json.loads(mcp_config_json)
+                    except json.JSONDecodeError as e:
+                        status_interface.stop_execution(False, "Invalid JSON format")
+                        console.print(f"[red]❌ Invalid JSON: {str(e)}[/red]")
+                        continue
 
                     # Validate required fields
                     required_fields = ["name", "url", "port", "description", "tools"]
@@ -896,8 +901,8 @@ async def async_main():
                     status_interface.update_status("Adding MCP server to current session...")
 
                     # Create MCP server object for the session
-                    from .models import MCPServer
-                    mcp_server = MCPServer(
+                    from .models import MCPServerInfo
+                    mcp_server = MCPServerInfo(
                         name=mcp_config["name"],
                         url=mcp_config["url"],
                         port=mcp_config["port"],

@@ -328,10 +328,18 @@ class CustomAsyncAgent(AgentInterface):
         def sync_wrapper(tool_input: str) -> str:
             """Sync wrapper for async MCP calls."""
             try:
-                loop = asyncio.get_event_loop()
-                return loop.run_until_complete(call_mcp_tool(tool_input))
+                # Check if we're already in an event loop
+                loop = asyncio.get_running_loop()
+                # If we're in a loop, create a task and run it
+                task = asyncio.create_task(call_mcp_tool(tool_input))
+                # We need to wait for the task, but we can't await in a sync function
+                # So we'll use a different approach - run in thread pool
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, call_mcp_tool(tool_input))
+                    return future.result()
             except RuntimeError:
-                # If no event loop is running, create one
+                # No event loop is running, safe to use asyncio.run()
                 return asyncio.run(call_mcp_tool(tool_input))
 
         return Tool(
