@@ -43,6 +43,3 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
-
-# n8n workflows
-*.json
