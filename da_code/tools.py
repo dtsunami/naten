@@ -53,6 +53,16 @@ class PythonCodeParams(BaseModel):
     code: str = Field(..., description="Python code to execute")
     timeout: int = Field(30, ge=1, le=300, description="Timeout in seconds (1-300)")
 
+class GitParams(BaseModel):
+    """Structured parameters for git operations."""
+    model_config = ConfigDict(extra='forbid')
+
+    operation: Literal["status", "commit", "diff", "branch", "log"] = "status"
+    message: Optional[str] = Field(None, description="Commit message (required for commit operation)")
+    branch_name: Optional[str] = Field(None, description="Branch name for branch operations")
+    files: Optional[List[str]] = Field(None, description="Specific files for diff operation")
+    limit: int = Field(10, ge=1, le=50, description="Number of log entries to show")
+
 
 
 class TodoManager:
@@ -418,6 +428,85 @@ class PythonCodeExecutor:
             return f"❌ Execution error: {str(e)}"
 
 
+class GitManager:
+    """Modern git operations manager with async support."""
+
+    def __init__(self, working_directory: str = None):
+        """Initialize git manager."""
+        self.working_dir = working_directory or os.getcwd()
+
+    async def execute_git_command(self, cmd: List[str]) -> str:
+        """Execute git command asynchronously."""
+        try:
+            # Run git command in working directory
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=self.working_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            stdout, stderr = await process.communicate()
+
+            # Decode output
+            stdout_text = stdout.decode('utf-8', errors='replace').strip()
+            stderr_text = stderr.decode('utf-8', errors='replace').strip()
+
+            if process.returncode != 0:
+                return f"❌ Git command failed (exit {process.returncode}):\n{stderr_text or stdout_text}"
+
+            return stdout_text or "✅ Command completed successfully"
+
+        except FileNotFoundError:
+            return "❌ Git not found. Please ensure git is installed and in PATH."
+        except Exception as e:
+            return f"❌ Git command error: {str(e)}"
+
+    async def git_status(self) -> str:
+        """Get git repository status."""
+        return await self.execute_git_command(['git', 'status', '--porcelain', '-b'])
+
+    async def git_commit(self, message: str, files: Optional[List[str]] = None) -> str:
+        """Commit changes with message."""
+        if not message:
+            return "❌ Commit message is required"
+
+        # Add files if specified, otherwise add all
+        if files:
+            for file in files:
+                result = await self.execute_git_command(['git', 'add', file])
+                if result.startswith("❌"):
+                    return result
+        else:
+            result = await self.execute_git_command(['git', 'add', '.'])
+            if result.startswith("❌"):
+                return result
+
+        # Commit changes
+        return await self.execute_git_command(['git', 'commit', '-m', message])
+
+    async def git_diff(self, files: Optional[List[str]] = None) -> str:
+        """Show git diff for files."""
+        cmd = ['git', 'diff']
+        if files:
+            cmd.extend(files)
+        return await self.execute_git_command(cmd)
+
+    async def git_branch(self, branch_name: Optional[str] = None) -> str:
+        """List branches or create/switch to branch."""
+        if branch_name:
+            # Create and switch to new branch
+            return await self.execute_git_command(['git', 'checkout', '-b', branch_name])
+        else:
+            # List all branches
+            return await self.execute_git_command(['git', 'branch', '-a'])
+
+    async def git_log(self, limit: int = 10) -> str:
+        """Show git log with specified limit."""
+        return await self.execute_git_command([
+            'git', 'log', f'--max-count={limit}',
+            '--oneline', '--graph', '--decorate'
+        ])
 
 
 # Tool factory functions with modern patterns
@@ -440,6 +529,8 @@ def _parse_tool_input(tool_input: Union[str, dict], model_class: type) -> Union[
                     return TimeParams(format=tool_input)
                 elif model_class == PythonCodeParams:
                     return PythonCodeParams(code=tool_input)
+                elif model_class == GitParams:
+                    return GitParams(operation="status")
                 else:
                     return f"Invalid input format for {model_class.__name__}"
         else:
@@ -680,6 +771,71 @@ Returns: Formatted output with stdout, stderr, and exit codes.""",
     )
 
 
+def create_git_tool(working_directory: str = None) -> Tool:
+    """Create a git operations tool with async support."""
+    git_manager = GitManager(working_directory)
+
+    def handle_git_operation(tool_input: str) -> str:
+        """Handle git operations with structured validation."""
+        params = _parse_tool_input(tool_input, GitParams)
+        if isinstance(params, str):
+            return params
+
+        try:
+            # Create async wrapper since LangChain tools are sync
+            import asyncio
+            loop = asyncio.get_event_loop()
+
+            if params.operation == "status":
+                return loop.run_until_complete(git_manager.git_status())
+            elif params.operation == "commit":
+                if not params.message:
+                    return "❌ Commit message is required for commit operation"
+                return loop.run_until_complete(git_manager.git_commit(params.message, params.files))
+            elif params.operation == "diff":
+                return loop.run_until_complete(git_manager.git_diff(params.files))
+            elif params.operation == "branch":
+                return loop.run_until_complete(git_manager.git_branch(params.branch_name))
+            elif params.operation == "log":
+                return loop.run_until_complete(git_manager.git_log(params.limit))
+            else:
+                return f"❌ Unknown git operation: {params.operation}"
+
+        except Exception as e:
+            return f"Git tool error: {str(e)}"
+
+    return Tool(
+        name="git_operations",
+        description="""Perform git repository operations with full async support.
+
+SUPPORTED OPERATIONS:
+- "status": Show repository status (modified, staged, untracked files)
+- "commit": Add and commit changes with message
+- "diff": Show differences in files
+- "branch": List branches or create/switch to new branch
+- "log": Show commit history with graph
+
+SUPPORTED FORMATS:
+- JSON: {"operation": "commit", "message": "Add feature", "files": ["file1.py"]}
+- Simple text: "status" (for status operation only)
+
+EXAMPLE INPUTS:
+- {"operation": "status"} → Repository status
+- {"operation": "commit", "message": "Fix bug in parser"} → Commit all changes
+- {"operation": "commit", "message": "Add tests", "files": ["test_parser.py"]} → Commit specific files
+- {"operation": "diff", "files": ["src/main.py"]} → Show diff for specific file
+- {"operation": "branch", "branch_name": "feature-xyz"} → Create and switch to branch
+- {"operation": "log", "limit": 5} → Show last 5 commits
+- "status" → Quick status check
+
+AUTHENTICATION:
+- Uses existing git configuration (SSH keys, credential helpers)
+- No additional setup required
+- Inherits user's git authentication automatically
+
+Returns: Formatted git command output with status indicators.""",
+        func=handle_git_operation
+    )
 
 
 # Convenience function to create all tools
@@ -691,4 +847,5 @@ def create_all_tools(working_directory: str = None) -> Dict[str, Tool]:
         "file_search": create_file_search_tool(working_directory),
         "current_time": create_time_tool(),
         "python_executor": create_python_executor_tool(),
+        "git_operations": create_git_tool(working_directory),
     }
