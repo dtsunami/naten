@@ -738,7 +738,7 @@ def show_status(config_mgr: ConfigManager, context_ldr: ContextLoader) -> int:
 
 
 # Available commands
-commands = ['help', 'setup', 'status', 'test', 'reload', 'exit', 'quit', 'q']
+commands = ['help', 'setup', 'status', 'test', 'reload', 'add_mcp', 'exit', 'quit', 'q']
 
 async def async_main():
     """Async main with simple status interface."""
@@ -863,6 +863,73 @@ async def async_main():
                 except Exception as e:
                     status_interface.stop_execution(False, f"Reload error: {str(e)}")
                     console.print(f"[red]❌ Reload failed: {e}[/red]")
+            elif user_input.lower().startswith('add_mcp '):
+                mcp_config_json = user_input[8:].strip()  # Remove 'add_mcp ' prefix
+                if not mcp_config_json:
+                    console.print("[yellow]Usage: add_mcp <JSON_CONFIG>[/yellow]")
+                    console.print('[yellow]Example: add_mcp {"name": "clipboard", "url": "http://192.168.1.100:8000", "port": 8000, "description": "Windows clipboard", "tools": ["read_text", "write_text"]}[/yellow]')
+                    continue
+
+                # Parse JSON config
+                status_interface.update_status("Parsing MCP configuration...")
+                try:
+                    mcp_config = json.loads(mcp_config_json)
+                except json.JSONDecodeError as e:
+                    status_interface.stop_execution(False, "Invalid JSON format")
+                    console.print(f"[red]❌ Invalid JSON: {str(e)}[/red]")
+                    continue
+
+                status_interface.start_execution("Adding MCP server...")
+                try:
+                    import json
+                    from pathlib import Path
+
+                    # Validate required fields
+                    required_fields = ["name", "url", "port", "description", "tools"]
+                    missing_fields = [field for field in required_fields if field not in mcp_config]
+                    if missing_fields:
+                        status_interface.stop_execution(False, f"Missing required fields: {missing_fields}")
+                        console.print(f"[red]❌ Missing required fields: {', '.join(missing_fields)}[/red]")
+                        continue
+
+                    # Add to current session dynamically (session-only, not persistent)
+                    status_interface.update_status("Adding MCP server to current session...")
+
+                    # Create MCP server object for the session
+                    from .models import MCPServer
+                    mcp_server = MCPServer(
+                        name=mcp_config["name"],
+                        url=mcp_config["url"],
+                        port=mcp_config["port"],
+                        description=mcp_config["description"],
+                        tools=mcp_config["tools"]
+                    )
+
+                    # Add to current code_session (session-only)
+                    if code_session and hasattr(code_session, 'mcp_servers'):
+                        # Remove existing server with same name if it exists
+                        code_session.mcp_servers = [s for s in code_session.mcp_servers if s.name != mcp_server.name]
+                        # Add new server
+                        code_session.mcp_servers.append(mcp_server)
+
+                        # Reinitialize agent with updated session
+                        status_interface.update_status("Reinitializing agent with new MCP server...")
+                        agent = initialize_agent(config_mgr=ConfigManager(), code_session=code_session)
+                        if agent is None:
+                            status_interface.stop_execution(False, "Agent initialization failed")
+                            console.print("[red]Agent initialization failed with new MCP server.[/red]")
+                        else:
+                            status_interface.stop_execution(True, f"MCP server '{mcp_server.name}' added to session")
+                            console.print(f"[green]✅ MCP server '{mcp_server.name}' added successfully![/green]")
+                            console.print(f"[green]📋 Available tools: {', '.join(mcp_server.tools)}[/green]")
+                            console.print(f"[yellow]⚠️  Session-only: Server will be removed when da_code restarts[/yellow]")
+                    else:
+                        status_interface.stop_execution(False, "No active session")
+                        console.print("[red]❌ No active code session available[/red]")
+
+                except Exception as e:
+                    status_interface.stop_execution(False, f"Add MCP error: {str(e)}")
+                    console.print(f"[red]❌ Failed to add MCP server: {e}[/red]")
             elif user_input.strip() == '':
                 continue
             else:

@@ -18,7 +18,7 @@ from .models import (
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .chat_memory import create_chat_memory_manager
 from .telemetry import TelemetryManager, PerformanceTracker
-from .todo_tool import create_todo_tool
+from .tools import create_all_tools
 
 logger = logging.getLogger(__name__)
 
@@ -243,16 +243,102 @@ class CustomAsyncAgent(AgentInterface):
         logger.info("Custom async agent initialized successfully")
 
     def _create_tools(self) -> Dict[str, Any]:
-        """Create async tools."""
+        """Create async tools with modern 2025 patterns."""
         tools = {}
 
         # Command execution tool with direct agent reference
         tools["execute_command"] = AsyncCommandTool(self.session, self)
 
-        # Todo file management tool
-        tools["todo_file_manager"] = create_todo_tool(self.session.working_directory)
+        # Modern tool suite: todo, web search, file search, and time
+        modern_tools = create_all_tools(self.session.working_directory)
+        tools.update(modern_tools)
+
+        # Add MCP server tools
+        mcp_tools = self._create_mcps()
+        tools.update(mcp_tools)
 
         return tools
+
+    def _create_mcps(self) -> Dict[str, Any]:
+        """Create MCP server tools from session configuration."""
+        mcp_tools = {}
+
+        if not self.session.mcp_servers:
+            logger.info("No MCP servers configured in session")
+            return mcp_tools
+
+        logger.info(f"Loading {len(self.session.mcp_servers)} MCP servers")
+
+        for mcp_server in self.session.mcp_servers:
+            try:
+                # Create tools for each MCP server
+                for tool_name in mcp_server.tools:
+                    mcp_tool_name = f"{mcp_server.name}_{tool_name}"
+                    mcp_tools[mcp_tool_name] = self._create_mcp_tool(mcp_server, tool_name)
+                    logger.info(f"Added MCP tool: {mcp_tool_name} from {mcp_server.name}")
+
+            except Exception as e:
+                logger.error(f"Failed to load MCP server {mcp_server.name}: {e}")
+                continue
+
+        logger.info(f"Successfully loaded {len(mcp_tools)} MCP tools")
+        return mcp_tools
+
+    def _create_mcp_tool(self, mcp_server, tool_name: str):
+        """Create a tool that calls an MCP server."""
+        from langchain.tools import Tool
+        import httpx
+
+        async def call_mcp_tool(tool_input: str) -> str:
+            """Call MCP server tool via HTTP."""
+            try:
+                # Parse tool input as JSON if possible
+                try:
+                    import json
+                    arguments = json.loads(tool_input) if tool_input.strip().startswith('{') else {"input": tool_input}
+                except json.JSONDecodeError:
+                    arguments = {"input": tool_input}
+
+                # Call MCP server
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        f"{mcp_server.url}/mcp/call/{tool_name}",
+                        json={"arguments": arguments}
+                    )
+                    response.raise_for_status()
+
+                    result = response.json()
+                    if result.get("isError", False):
+                        return f"❌ MCP Error: {result.get('content', [{}])[0].get('text', 'Unknown error')}"
+
+                    content = result.get("content", [])
+                    if content:
+                        return content[0].get("text", "No response")
+                    else:
+                        return "No response from MCP server"
+
+            except httpx.TimeoutException:
+                return f"❌ MCP server timeout: {mcp_server.url}"
+            except httpx.RequestError as e:
+                return f"❌ MCP server connection error: {str(e)}"
+            except Exception as e:
+                return f"❌ MCP tool error: {str(e)}"
+
+        # For async tools, we need to handle them properly in the agent execution
+        def sync_wrapper(tool_input: str) -> str:
+            """Sync wrapper for async MCP calls."""
+            try:
+                loop = asyncio.get_event_loop()
+                return loop.run_until_complete(call_mcp_tool(tool_input))
+            except RuntimeError:
+                # If no event loop is running, create one
+                return asyncio.run(call_mcp_tool(tool_input))
+
+        return Tool(
+            name=f"{mcp_server.name}_{tool_name}",
+            description=f"{tool_name} tool from {mcp_server.name} MCP server at {mcp_server.url}",
+            func=sync_wrapper
+        )
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt for the agent."""
@@ -506,8 +592,15 @@ Remember: Use proper JSON format for Action Input, and always provide clear expl
                     )
 
                     try:
-                        # This is where confirmations happen naturally!
-                        observation = await tool.execute(action_input)
+                        # Handle different tool interfaces
+                        if hasattr(tool, 'execute'):
+                            # AsyncCommandTool with async execute method
+                            observation = await tool.execute(action_input)
+                        elif hasattr(tool, 'func'):
+                            # LangChain Tool with sync func method
+                            observation = tool.func(action_input)
+                        else:
+                            raise AttributeError(f"Tool {action_name} has no execute() or func() method")
 
                         tool_call.result = {"output": observation}
                         tool_call.status = ToolCallStatus.SUCCESS
