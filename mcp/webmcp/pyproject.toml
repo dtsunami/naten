@@ -42,7 +42,7 @@ dev = [
 ]
 
 [project.scripts]
-webmcp = "webmcp.server:main"
+webmcp = "server:main"
 
 [project.urls]
 Repository = "https://github.com/dtsunami/naten/mcp/webmcp"
