@@ -1,4 +1,9 @@
 """Pydantic models and session tracking for da_code CLI tool."""
+from pathlib import Path
+env_file = Path('.env')
+if env_file.exists():
+    from dotenv import load_dotenv
+    load_dotenv(env_file, override=False)
 
 import asyncio
 import json
@@ -22,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 class AgentFramework(str, Enum):
     """Supported agent frameworks."""
-    LANGCHAIN = "langchain"
+    LANGCHAIN = "langchain"  # Legacy custom async agent
+    LANGGRAPH = "langgraph"  # Modern LangGraph agent
     AGNO = "agno"
 
 
@@ -320,7 +326,7 @@ class AgentConfig(BaseModel):
     require_confirmation: bool = Field(True, description="Require user confirmation for commands")
 
     # Framework selection
-    framework_preference: AgentFramework = Field(AgentFramework.LANGCHAIN, description="Preferred agent framework")
+    framework_preference: AgentFramework = Field(AgentFramework.LANGGRAPH, description="Preferred agent framework")
     enable_hybrid_routing: bool = Field(False, description="Enable intelligent task routing between frameworks")
     auto_fallback: bool = Field(True, description="Automatically fallback to LangChain if other frameworks fail")
     # CLI configuration

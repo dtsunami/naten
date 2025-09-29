@@ -10,7 +10,8 @@ from .execution_events import ExecutionEvent, ConfirmationResponse
 
 class AgentFramework(str, Enum):
     """Supported agent frameworks."""
-    LANGCHAIN = "langchain"
+    LANGCHAIN = "langchain"  # Legacy custom async agent
+    LANGGRAPH = "langgraph"  # Modern LangGraph agent
     AGNO = "agno"
 
 

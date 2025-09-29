@@ -5,6 +5,7 @@ from typing import Optional
 
 from .agent_interface import AgentInterface, AgentFramework
 from .async_agent import CustomAsyncAgent
+from .langgraph_agent_correct import CorrectLangGraphAgent
 from .models import AgentConfig, CodeSession
 
 logger = logging.getLogger(__name__)
@@ -27,23 +28,25 @@ class AgentFactory:
         logger.debug(f"Creating agent with framework: {selected_framework}")
 
         try:
-            if selected_framework == AgentFramework.LANGCHAIN:
+            if selected_framework == AgentFramework.LANGGRAPH:
+                return CorrectLangGraphAgent(config, session)
+            elif selected_framework == AgentFramework.LANGCHAIN:
                 return CustomAsyncAgent(config, session)
             elif selected_framework == AgentFramework.AGNO:
                 # TODO: Implement Agno adapter in future phases
-                logger.warning("Agno framework not yet implemented, falling back to Custom Async")
+                logger.warning("Agno framework not yet implemented, falling back to LangGraph")
                 if config.auto_fallback:
-                    return CustomAsyncAgent(config, session)
+                    return CorrectLangGraphAgent(config, session)
                 else:
                     raise NotImplementedError("Agno framework not yet implemented")
             else:
                 raise ValueError(f"Unsupported framework: {selected_framework}")
 
         except Exception as e:
-            # Auto-fallback to Custom Async if enabled
-            if config.auto_fallback and selected_framework != AgentFramework.LANGCHAIN:
-                logger.warning(f"Failed to create {selected_framework} agent, falling back to Custom Async: {e}")
-                return CustomAsyncAgent(config, session)
+            # Auto-fallback to LangGraph if enabled
+            if config.auto_fallback and selected_framework != AgentFramework.LANGGRAPH:
+                logger.warning(f"Failed to create {selected_framework} agent, falling back to LangGraph: {e}")
+                return CorrectLangGraphAgent(config, session)
             else:
                 logger.error(f"Failed to create agent with framework {selected_framework}: {e}")
                 raise
@@ -51,8 +54,7 @@ class AgentFactory:
     @staticmethod
     def get_available_frameworks() -> list[AgentFramework]:
         """Get list of available frameworks."""
-        # For now, only LangChain is implemented
-        return [AgentFramework.LANGCHAIN]
+        return [AgentFramework.LANGGRAPH, AgentFramework.LANGCHAIN]
 
     @staticmethod
     def is_framework_available(framework: AgentFramework) -> bool:
@@ -62,4 +64,4 @@ class AgentFactory:
     @staticmethod
     def get_default_framework() -> AgentFramework:
         """Get the default framework."""
-        return AgentFramework.LANGCHAIN
+        return AgentFramework.LANGGRAPH
