@@ -25,11 +25,7 @@ logger = logging.getLogger(__name__)
 # Removed CommandConfirmationNeeded - using pure generator pattern now
 
 
-class AgentFramework(str, Enum):
-    """Supported agent frameworks."""
-    LANGCHAIN = "langchain"  # Legacy custom async agent
-    LANGGRAPH = "langgraph"  # Modern LangGraph agent
-    AGNO = "agno"
+# Agent framework removed - da_code now uses LangGraph exclusively
 
 
 class CommandStatus(str, Enum):
@@ -325,10 +321,8 @@ class AgentConfig(BaseModel):
     command_timeout: int = Field(300, description="Default command timeout in seconds")
     require_confirmation: bool = Field(True, description="Require user confirmation for commands")
 
-    # Framework selection
-    framework_preference: AgentFramework = Field(AgentFramework.LANGGRAPH, description="Preferred agent framework")
-    enable_hybrid_routing: bool = Field(False, description="Enable intelligent task routing between frameworks")
-    auto_fallback: bool = Field(True, description="Automatically fallback to LangChain if other frameworks fail")
+    # Framework configuration (LangGraph only)
+    # Note: da_code now uses LangGraph exclusively for simplicity and reliability
     # CLI configuration
     history_file_path: str = Field(..., description="Path to command history file")
 

@@ -367,11 +367,8 @@ class SimpleStatusInterface:
         self.tool_calls = 0
         self.total_tokens = 0
         self.callback_handler = None
-        # Framework-aware metrics
-        self.framework_metrics = {
-            'langchain': {'calls': 0, 'tokens': 0},
-            'agno': {'calls': 0, 'tokens': 0}
-        }
+        # Agent metrics (LangGraph only)
+        self.agent_metrics = {'calls': 0, 'tokens': 0}
 
     def start_execution(self, message: str):
         """Start execution with status message."""
@@ -379,9 +376,8 @@ class SimpleStatusInterface:
         self.llm_calls = 0
         self.tool_calls = 0
         self.total_tokens = 0
-        # Reset framework metrics
-        for framework in self.framework_metrics:
-            self.framework_metrics[framework] = {'calls': 0, 'tokens': 0}
+        # Reset agent metrics
+        self.agent_metrics = {'calls': 0, 'tokens': 0}
         self.current_status = Status(f"🤖 {message}", spinner="dots")
         self.current_status.start()
         self.callback_handler = RealTimeAgentCallbackHandler(self)
@@ -411,11 +407,10 @@ class SimpleStatusInterface:
         self.tool_calls += 1
         self.update_status(f"Using tool: {tool_name}" if tool_name else "Using tool...")
 
-    def track_framework_call(self, framework: str, tokens: int = 0):
-        """Track calls from specific framework."""
-        if framework in self.framework_metrics:
-            self.framework_metrics[framework]['calls'] += 1
-            self.framework_metrics[framework]['tokens'] += tokens
+    def track_agent_call(self, tokens: int = 0):
+        """Track agent calls and token usage."""
+        self.agent_metrics['calls'] += 1
+        self.agent_metrics['tokens'] += tokens
 
     def stop_execution(self, success: bool = True, final_message: str = None):
         """Stop execution and show final result."""

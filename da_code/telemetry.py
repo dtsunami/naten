@@ -16,14 +16,12 @@ class TelemetryManager:
     def __init__(self, session: CodeSession):
         """Initialize telemetry manager."""
         self.session = session
-        self.framework_metrics: Dict[str, Dict[str, Any]] = {
-            'langchain': {'calls': 0, 'tokens': 0, 'total_time_ms': 0},
-            'agno': {'calls': 0, 'tokens': 0, 'total_time_ms': 0}
+        self.agent_metrics: Dict[str, Any] = {
+            'calls': 0, 'tokens': 0, 'total_time_ms': 0
         }
 
-    async def track_framework_call(
+    async def track_agent_call(
         self,
-        framework: str,
         prompt: str,
         response: str,
         tokens_used: int = 0,
@@ -31,12 +29,12 @@ class TelemetryManager:
         success: bool = True,
         error_message: Optional[str] = None
     ) -> str:
-        """Track a framework call with unified metrics."""
+        """Track an agent call with unified metrics."""
 
         # Create LLM call record
         llm_call = LLMCall(
             model_name=self.session.agent_model,
-            provider=f"{framework}_provider",
+            provider="langgraph_provider",
             prompt=prompt,
             response=response if success else None,
             status=LLMCallStatus.SUCCESS if success else LLMCallStatus.FAILED,
@@ -48,11 +46,10 @@ class TelemetryManager:
         # Add to session
         self.session.add_llm_call(llm_call)
 
-        # Update framework metrics
-        if framework in self.framework_metrics:
-            self.framework_metrics[framework]['calls'] += 1
-            self.framework_metrics[framework]['tokens'] += tokens_used
-            self.framework_metrics[framework]['total_time_ms'] += execution_time_ms
+        # Update agent metrics
+        self.agent_metrics['calls'] += 1
+        self.agent_metrics['tokens'] += tokens_used
+        self.agent_metrics['total_time_ms'] += execution_time_ms
 
         # Save to MongoDB asynchronously
         try:
@@ -61,7 +58,7 @@ class TelemetryManager:
         except Exception as e:
             logger.debug(f"Failed to save telemetry to MongoDB: {e}")
 
-        logger.debug(f"Tracked {framework} call: {tokens_used} tokens, {execution_time_ms}ms")
+        logger.debug(f"Tracked agent call: {tokens_used} tokens, {execution_time_ms}ms")
         return llm_call.id
 
     async def track_tool_call(
@@ -101,40 +98,33 @@ class TelemetryManager:
         return tool_call.id
 
     def get_framework_metrics(self, framework: str) -> Dict[str, Any]:
-        """Get metrics for a specific framework."""
-        return self.framework_metrics.get(framework, {})
+        """Get metrics for the agent (framework parameter kept for compatibility)."""
+        return self.agent_metrics
 
     def get_all_framework_metrics(self) -> Dict[str, Dict[str, Any]]:
-        """Get metrics for all frameworks."""
-        return self.framework_metrics.copy()
+        """Get metrics for the agent (simplified from multi-framework)."""
+        return {"langgraph": self.agent_metrics}
 
     def get_session_summary(self) -> Dict[str, Any]:
-        """Get comprehensive session summary with framework breakdown."""
+        """Get comprehensive session summary with agent metrics."""
         summary = self.session.get_session_summary()
         summary['framework_breakdown'] = self.get_all_framework_metrics()
 
-        # Calculate framework efficiency metrics
-        for framework, metrics in self.framework_metrics.items():
-            if metrics['calls'] > 0:
-                avg_time = metrics['total_time_ms'] / metrics['calls']
-                avg_tokens = metrics['tokens'] / metrics['calls'] if metrics['tokens'] > 0 else 0
-                summary['framework_breakdown'][framework].update({
-                    'avg_time_ms': avg_time,
-                    'avg_tokens_per_call': avg_tokens
-                })
+        # Calculate agent efficiency metrics
+        if self.agent_metrics['calls'] > 0:
+            avg_time = self.agent_metrics['total_time_ms'] / self.agent_metrics['calls']
+            avg_tokens = self.agent_metrics['tokens'] / self.agent_metrics['calls'] if self.agent_metrics['tokens'] > 0 else 0
+            summary['framework_breakdown']['langgraph'].update({
+                'avg_time_ms': avg_time,
+                'avg_tokens_per_call': avg_tokens
+            })
 
         return summary
 
     def reset_framework_metrics(self, framework: Optional[str] = None) -> None:
-        """Reset metrics for a specific framework or all frameworks."""
-        if framework:
-            if framework in self.framework_metrics:
-                self.framework_metrics[framework] = {'calls': 0, 'tokens': 0, 'total_time_ms': 0}
-        else:
-            for fw in self.framework_metrics:
-                self.framework_metrics[fw] = {'calls': 0, 'tokens': 0, 'total_time_ms': 0}
-
-        logger.debug(f"Reset metrics for: {framework or 'all frameworks'}")
+        """Reset agent metrics (framework parameter kept for compatibility)."""
+        self.agent_metrics = {'calls': 0, 'tokens': 0, 'total_time_ms': 0}
+        logger.debug(f"Reset agent metrics")
 
 
 class PerformanceTracker:

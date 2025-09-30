@@ -16,21 +16,27 @@
 - **Session-Scoped**: Clean integration without persistent config pollution
 - **One Command Setup**: `add_mcp {"name":"clipboard",...}` → Instant new capabilities
 
-### ⚡ **13-Tool Ecosystem** - *Production Ready*
-**Local + MCP hybrid architecture** balancing simplicity with extensibility:
+### ⚡ **Modern Multi-Framework Architecture** - *Production Ready*
+**LangGraph + LangChain dual-framework with dynamic MCP expansion:**
+
+#### **Agent Frameworks**
+- 🤖 **LangGraph Agent**: Production-ready with proper HIL patterns and PostgreSQL persistence
+- 🔄 **LangChain Legacy**: Stable backup implementation for compatibility
+- 📊 **Unified Interface**: Seamless switching between frameworks
 
 #### **Local Tools** (Zero Setup)
-- 🔧 **Git Operations**: Full git workflow (status, commit, diff, branch, log)
+- 🔧 **Git Operations**: Full git workflow (status, commit, diff, branch, log) - *async fixed*
 - 📝 **TODO Management**: Structured markdown task tracking
 - 🐍 **Python Execution**: Sandboxed code execution with timeout
 - 🔍 **File Search**: Async glob patterns and content search
 - ⏰ **Time Utilities**: Multiple format support with timezone handling
+- ⚙️ **Command Execution**: System command execution with confirmation
 
 #### **MCP Tools** (Dynamic Expansion)
-- 📋 **Clipboard**: Cross-platform text/image clipboard access
+- 📋 **Clipboard**: Cross-platform text/image clipboard access (clippy/clipjs)
 - 🌐 **Web Search**: DuckDuckGo integration with content extraction
 - 📁 **File Operations**: Remote file system operations
-- 🐍 **Interactive Python**: Persistent Python sessions
+- 🐍 **Interactive Python**: Persistent Python sessions (toolsession)
 - 🗄️ **Database**: MongoDB operations and queries
 
 ### 🏗️ **Production Architecture**
@@ -256,10 +262,11 @@ await agent.add_mcp_server({
 
 ## 🔮 Future Roadmap
 
-### **Phase 1: Performance Revolution** (Next 4 weeks)
-- **Agno Integration**: 20x faster execution for simple tasks
-- **Parallel Agent Execution**: Multiple specialists working simultaneously
-- **Smart Task Routing**: Automatic framework selection
+### **Phase 1: Production Optimization** (Next 4 weeks)
+- **Performance Monitoring**: Add memory/CPU usage tracking and alerts
+- **Enhanced Testing**: Comprehensive test suite for all components
+- **Documentation Expansion**: API documentation and advanced usage guides
+- **Framework Consolidation**: Focus on LangGraph as primary framework
 
 ### **Phase 2: Ecosystem Expansion** (Next 8 weeks)
 - **Package Management Tools**: npm, pip, cargo, docker operations

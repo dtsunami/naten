@@ -1,18 +1,10 @@
-"""Agent interface abstraction for multi-framework support."""
+"""Agent interface abstraction - now LangGraph only for simplicity."""
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, AsyncGenerator
-from enum import Enum
 
 from .models import CodeSession, AgentConfig
 from .execution_events import ExecutionEvent, ConfirmationResponse
-
-
-class AgentFramework(str, Enum):
-    """Supported agent frameworks."""
-    LANGCHAIN = "langchain"  # Legacy custom async agent
-    LANGGRAPH = "langgraph"  # Modern LangGraph agent
-    AGNO = "agno"
 
 
 class AgentInterface(ABC):

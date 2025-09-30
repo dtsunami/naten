@@ -826,8 +826,7 @@ The tool will request user confirmation before executing any command.""",
 
 
                 # Track successful execution
-                await self.telemetry.track_framework_call(
-                    framework="langgraph",
+                await self.telemetry.track_agent_call(
                     prompt=task,
                     response=final_response,
                     tokens_used=0,
@@ -847,8 +846,7 @@ The tool will request user confirmation before executing any command.""",
                 logger.info(f"❌ EXEC: Exception caught: {type(e).__name__}: {str(e)}")
                 logger.info(f"🔍 EXEC: Full exception details: {e}", exc_info=True)
 
-                await self.telemetry.track_framework_call(
-                    framework="langgraph",
+                await self.telemetry.track_agent_call(
                     prompt=task,
                     response="",
                     tokens_used=0,
