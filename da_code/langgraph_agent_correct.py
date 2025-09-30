@@ -33,6 +33,10 @@ class CorrectLangGraphAgent(AgentInterface):
         """Initialize the correct LangGraph agent."""
         super().__init__(config, session)
 
+        # Initialize connection pool for PostgreSQL (if used)
+        self.connection_pool = None
+        self.checkpointer_setup_complete = False
+
         # Initialize telemetry manager
         self.telemetry = TelemetryManager(session)
 
@@ -102,23 +106,78 @@ The tool will request user confirmation before executing any command.""",
         """Create checkpointer with fallback strategy: PostgreSQL -> Memory."""
         import os
 
-        # TEMPORARY: Force MemorySaver until PostgreSQL context manager issues are resolved
-        logger.info("🔍 CHECKPOINTER: Temporarily forcing MemorySaver (PostgreSQL disabled)")
+        postgres_url = os.getenv("POSTGRES_CHAT_URL", None)
+        logger.info(f"🔍 CHECKPOINTER: POSTGRES_CHAT_URL configured: {postgres_url is not None}")
+
+        if postgres_url:
+            try:
+                logger.info("🔍 CHECKPOINTER: Attempting to create PostgreSQL checkpointer...")
+
+                # Import PostgreSQL dependencies
+                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+                from psycopg_pool import AsyncConnectionPool
+
+                # Create connection pool directly - this works better for non-context scenarios
+                logger.info("🔍 CHECKPOINTER: Creating AsyncConnectionPool...")
+                pool = AsyncConnectionPool(
+                    conninfo=postgres_url,
+                    max_size=10,
+                    min_size=1,
+                    open=False,  # We'll open it later
+                    kwargs={
+                        "autocommit": True  # Required for CREATE INDEX CONCURRENTLY
+                    }
+                )
+
+                # Create checkpointer with the pool
+                checkpointer = AsyncPostgresSaver(pool)
+
+                # Store pool for lifecycle management
+                self.connection_pool = pool
+
+                logger.info("✅ CHECKPOINTER: PostgreSQL checkpointer created successfully")
+                return checkpointer
+
+            except ImportError as e:
+                logger.warning(f"🔍 CHECKPOINTER: PostgreSQL dependencies not installed: {e}")
+                logger.info("🔍 CHECKPOINTER: Install with: pip install langgraph-checkpoint-postgres")
+            except Exception as e:
+                logger.warning(f"❌ CHECKPOINTER: PostgreSQL setup failed: {type(e).__name__}: {e}")
+
+        logger.info("🔍 CHECKPOINTER: Using in-memory checkpointer (no persistence)")
         return MemorySaver()
 
-        # TODO: Re-enable PostgreSQL checkpointer once async context manager compatibility is fixed
-        # postgres_url = os.getenv("POSTGRES_CHAT_URL", None)
-        # logger.info(f"🔍 CHECKPOINTER: POSTGRES_CHAT_URL configured: {postgres_url is not None}")
-        #
-        # if postgres_url:
-        #     try:
-        #         logger.info("🔍 CHECKPOINTER: Attempting to create PostgreSQL checkpointer...")
-        #         # ... PostgreSQL code ...
-        #     except Exception as e:
-        #         logger.info(f"❌ CHECKPOINTER: PostgreSQL failed: {type(e).__name__}: {e}")
-        #
-        # logger.info("🔍 CHECKPOINTER: Using in-memory checkpointer (no persistence)")
-        # return MemorySaver()
+    async def _setup_checkpointer(self):
+        """Setup the checkpointer (open pool and create tables if using PostgreSQL)."""
+        # Skip if already set up
+        if self.checkpointer_setup_complete:
+            return
+
+        # Open connection pool if we have one
+        if self.connection_pool:
+            try:
+                # Try to open the pool - this is idempotent, won't fail if already open
+                logger.info("🔍 CHECKPOINTER: Opening connection pool...")
+                await self.connection_pool.open(wait=True)
+                logger.info("✅ CHECKPOINTER: Connection pool opened successfully")
+            except Exception as e:
+                logger.warning(f"❌ CHECKPOINTER: Failed to open connection pool: {e}")
+                # Don't return here - still try to setup in case it's just a duplicate open
+
+        # Setup tables if checkpointer supports it
+        if hasattr(self.checkpointer, 'setup'):
+            try:
+                logger.info("🔍 CHECKPOINTER: Setting up PostgreSQL tables...")
+                await self.checkpointer.setup()
+                logger.info("✅ CHECKPOINTER: PostgreSQL tables created successfully")
+                self.checkpointer_setup_complete = True
+            except Exception as e:
+                logger.warning(f"❌ CHECKPOINTER: Setup failed: {e}")
+                logger.info("🔍 CHECKPOINTER: Continuing with checkpointer anyway")
+                # Don't mark as complete if it failed
+        else:
+            # If no setup method, mark as complete anyway
+            self.checkpointer_setup_complete = True
 
     def _execute_command_sync_wrapper(self, tool_input: str) -> str:
         """Sync wrapper for execute_command tool - used by LangGraph's sync tool interface."""
@@ -650,6 +709,9 @@ The tool will request user confirmation before executing any command.""",
         self.confirmation_handler = confirmation_handler
         logger.info(f"🔍 EXEC: Starting task execution: '{task[:50]}...'")
 
+        # Setup checkpointer if needed (first time only)
+        await self._setup_checkpointer()
+
         with PerformanceTracker(self.telemetry, "langgraph", "execute_task_stream") as tracker:
             yield ExecutionEvent(
                 event_type=EventType.EXECUTION_START,
@@ -734,7 +796,12 @@ The tool will request user confirmation before executing any command.""",
                 final_response = "Task completed"
 
                 # Extract from the graph state which contains all messages
-                graph_state = self.graph.get_state(config)
+                # Try async first (for AsyncPostgresSaver), fall back to sync (for MemorySaver compatibility)
+                try:
+                    graph_state = await self.graph.aget_state(config)
+                except AttributeError:
+                    # Fallback for checkpointers that don't support async state access
+                    graph_state = self.graph.get_state(config)
                 if hasattr(graph_state, 'values') and 'messages' in graph_state.values:
                     messages = graph_state.values['messages']
                     logger.info(f"🔍 EXEC: Found {len(messages)} messages in final graph state")
