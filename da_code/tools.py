@@ -516,27 +516,60 @@ def _parse_tool_input(tool_input: Union[str, dict], model_class: type) -> Union[
         if isinstance(tool_input, str):
             try:
                 params = json.loads(tool_input)
-                return model_class(**params)
+
+                # Handle LangChain's __arg1 format
+                if "__arg1" in params:
+                    arg1_value = params["__arg1"]
+                    if isinstance(arg1_value, str):
+                        try:
+                            # Try to parse __arg1 as JSON
+                            actual_params = json.loads(arg1_value)
+                            return model_class(**actual_params)
+                        except json.JSONDecodeError:
+                            # __arg1 is a simple string, handle by model type
+                            return _handle_simple_string(arg1_value, model_class)
+                    else:
+                        # __arg1 is already a dict
+                        return model_class(**arg1_value)
+                else:
+                    # Normal JSON params
+                    return model_class(**params)
             except json.JSONDecodeError:
                 # Handle simple string inputs
-                if model_class == TodoOperation:
-                    return TodoOperation(operation="create", content=tool_input)
-                elif model_class == WebSearchParams:
-                    return WebSearchParams(query=tool_input)
-                elif model_class == FileSearchParams:
-                    return FileSearchParams(pattern=tool_input)
-                elif model_class == TimeParams:
-                    return TimeParams(format=tool_input)
-                elif model_class == PythonCodeParams:
-                    return PythonCodeParams(code=tool_input)
-                elif model_class == GitParams:
-                    return GitParams(operation="status")
-                else:
-                    return f"Invalid input format for {model_class.__name__}"
+                return _handle_simple_string(tool_input, model_class)
         else:
-            return model_class(**tool_input)
+            # Handle dict input (already parsed)
+            if "__arg1" in tool_input:
+                arg1_value = tool_input["__arg1"]
+                if isinstance(arg1_value, str):
+                    try:
+                        actual_params = json.loads(arg1_value)
+                        return model_class(**actual_params)
+                    except json.JSONDecodeError:
+                        return _handle_simple_string(arg1_value, model_class)
+                else:
+                    return model_class(**arg1_value)
+            else:
+                return model_class(**tool_input)
     except Exception as e:
         return f"Parameter validation error: {str(e)}"
+
+def _handle_simple_string(value: str, model_class: type) -> Union[BaseModel, str]:
+    """Handle simple string inputs for different model classes."""
+    if model_class == TodoOperation:
+        return TodoOperation(operation="create", content=value)
+    elif model_class == WebSearchParams:
+        return WebSearchParams(query=value)
+    elif model_class == FileSearchParams:
+        return FileSearchParams(pattern=value)
+    elif model_class == TimeParams:
+        return TimeParams(format=value)
+    elif model_class == PythonCodeParams:
+        return PythonCodeParams(code=value)
+    elif model_class == GitParams:
+        return GitParams(operation="status")
+    else:
+        return f"Invalid input format for {model_class.__name__}"
 
 
 def create_todo_tool(working_directory: str = None) -> Tool:
@@ -782,24 +815,36 @@ def create_git_tool(working_directory: str = None) -> Tool:
             return params
 
         try:
-            # Create async wrapper since LangChain tools are sync
+            # Handle async operations safely when already in an event loop
             import asyncio
-            loop = asyncio.get_event_loop()
+            import concurrent.futures
 
-            if params.operation == "status":
-                return loop.run_until_complete(git_manager.git_status())
-            elif params.operation == "commit":
-                if not params.message:
-                    return "❌ Commit message is required for commit operation"
-                return loop.run_until_complete(git_manager.git_commit(params.message, params.files))
-            elif params.operation == "diff":
-                return loop.run_until_complete(git_manager.git_diff(params.files))
-            elif params.operation == "branch":
-                return loop.run_until_complete(git_manager.git_branch(params.branch_name))
-            elif params.operation == "log":
-                return loop.run_until_complete(git_manager.git_log(params.limit))
-            else:
-                return f"❌ Unknown git operation: {params.operation}"
+            async def run_git_operation():
+                if params.operation == "status":
+                    return await git_manager.git_status()
+                elif params.operation == "commit":
+                    if not params.message:
+                        return "❌ Commit message is required for commit operation"
+                    return await git_manager.git_commit(params.message, params.files)
+                elif params.operation == "diff":
+                    return await git_manager.git_diff(params.files)
+                elif params.operation == "branch":
+                    return await git_manager.git_branch(params.branch_name)
+                elif params.operation == "log":
+                    return await git_manager.git_log(params.limit)
+                else:
+                    return f"❌ Unknown git operation: {params.operation}"
+
+            # Try to get the current event loop
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an async context - use ThreadPoolExecutor to run async code
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, run_git_operation())
+                    return future.result()
+            except RuntimeError:
+                # No event loop running - safe to use asyncio.run
+                return asyncio.run(run_git_operation())
 
         except Exception as e:
             return f"Git tool error: {str(e)}"

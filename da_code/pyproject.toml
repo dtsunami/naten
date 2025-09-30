@@ -35,6 +35,7 @@ dependencies = [
     "rich>=13.7.0",
     "langchain_postgres",
     "psycopg[binary]>=3.1.0",
+    "langgraph-checkpoint-postgres",
 ]
 
 [project.optional-dependencies]

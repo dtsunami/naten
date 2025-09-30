@@ -11,6 +11,8 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Tool
 from langchain_core.tools import Tool
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.types import interrupt, Command
 
 from .agent_interface import AgentInterface
 from .models import (
@@ -18,7 +20,6 @@ from .models import (
     LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, UserResponse, da_mongo
 )
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
-from .chat_memory import create_chat_memory_manager
 from .telemetry import TelemetryManager, PerformanceTracker
 from .tools import create_all_tools
 
@@ -47,8 +48,6 @@ class CorrectLangGraphAgent(AgentInterface):
             max_retries=config.max_retries
         )
 
-        # Initialize chat memory manager
-        self.memory_manager = create_chat_memory_manager(session.session_id)
 
         # Confirmation handler callback
         self.confirmation_handler = None
@@ -56,10 +55,14 @@ class CorrectLangGraphAgent(AgentInterface):
         # Initialize tools
         self.tools = self._create_tools()
 
+        # Create checkpointer with fallback strategy
+        self.checkpointer = self._create_checkpointer()
+
         # Create the graph with correct HIL pattern
         self.graph = self._create_graph()
 
         logger.info("Correct LangGraph agent initialized successfully")
+
 
     def _create_tools(self) -> Dict[str, Tool]:
         """Create tools for the agent."""
@@ -94,6 +97,28 @@ The tool will request user confirmation before executing any command.""",
         agent_tools.update(mcp_tools)
 
         return agent_tools
+
+    def _create_checkpointer(self):
+        """Create checkpointer with fallback strategy: PostgreSQL -> Memory."""
+        import os
+
+        # TEMPORARY: Force MemorySaver until PostgreSQL context manager issues are resolved
+        logger.info("🔍 CHECKPOINTER: Temporarily forcing MemorySaver (PostgreSQL disabled)")
+        return MemorySaver()
+
+        # TODO: Re-enable PostgreSQL checkpointer once async context manager compatibility is fixed
+        # postgres_url = os.getenv("POSTGRES_CHAT_URL", None)
+        # logger.info(f"🔍 CHECKPOINTER: POSTGRES_CHAT_URL configured: {postgres_url is not None}")
+        #
+        # if postgres_url:
+        #     try:
+        #         logger.info("🔍 CHECKPOINTER: Attempting to create PostgreSQL checkpointer...")
+        #         # ... PostgreSQL code ...
+        #     except Exception as e:
+        #         logger.info(f"❌ CHECKPOINTER: PostgreSQL failed: {type(e).__name__}: {e}")
+        #
+        # logger.info("🔍 CHECKPOINTER: Using in-memory checkpointer (no persistence)")
+        # return MemorySaver()
 
     def _execute_command_sync_wrapper(self, tool_input: str) -> str:
         """Sync wrapper for execute_command tool - used by LangGraph's sync tool interface."""
@@ -282,10 +307,9 @@ The tool will request user confirmation before executing any command.""",
         # After tools, go back to agent
         workflow.add_edge("tools", "agent")
 
-        # Compile with interrupt before tools for confirmation
+        # Compile without interrupt_before since we handle interrupts in the tools node
         return workflow.compile(
-            checkpointer=MemorySaver(),
-            interrupt_before=["tools"]
+            checkpointer=self.checkpointer
         )
 
     async def _agent_node(self, state: MessagesState):
@@ -293,13 +317,38 @@ The tool will request user confirmation before executing any command.""",
         system_prompt = self._build_system_prompt()
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
 
+        # Debug: Log message sequence
+        logger.info(f"🔍 AGENT: Processing {len(messages)} messages")
+        for i, msg in enumerate(messages[-5:]):  # Log last 5 messages
+            msg_type = type(msg).__name__
+            has_tool_calls = hasattr(msg, 'tool_calls') and msg.tool_calls
+            tool_call_id = getattr(msg, 'tool_call_id', None)
+            content_preview = str(msg.content)[:100] if hasattr(msg, 'content') and msg.content else 'No content'
+            logger.info(f"🔍 AGENT: Msg {i}: {msg_type} | Tool calls: {has_tool_calls} | Tool call ID: {tool_call_id} | Content: {content_preview}")
+
         # Bind tools to LLM
-        llm_with_tools = self.llm.bind_tools(list(self.tools.values()))
+        logger.info(f"🔍 AGENT: Available tools: {list(self.tools.keys())}")
+        logger.info(f"🔍 AGENT: Binding {len(self.tools)} tools to LLM")
+
+        tools_list = list(self.tools.values())
+        for i, tool in enumerate(tools_list[:3]):  # Log first 3 tools
+            logger.info(f"🔍 AGENT: Tool {i}: {tool.name} - {type(tool).__name__}")
+
+        llm_with_tools = self.llm.bind_tools(tools_list)
 
         # Get response from LLM
         start_time = time.time()
         try:
             response = await llm_with_tools.ainvoke(messages)
+
+            # Debug: Log response details
+            logger.info(f"🔍 AGENT: LLM response type: {type(response).__name__}")
+            logger.info(f"🔍 AGENT: Response content: {response.content[:200] if hasattr(response, 'content') and response.content else 'No content'}...")
+            logger.info(f"🔍 AGENT: Has tool_calls: {hasattr(response, 'tool_calls')}")
+            if hasattr(response, 'tool_calls') and response.tool_calls:
+                logger.info(f"🔍 AGENT: Number of tool calls: {len(response.tool_calls)}")
+                for i, tool_call in enumerate(response.tool_calls[:2]):  # Log first 2
+                    logger.info(f"🔍 AGENT: Tool call {i}: {tool_call.get('name', 'Unknown')} (ID: {tool_call.get('id', 'No ID')})")
 
             # Track LLM call
             llm_call = LLMCall(
@@ -328,69 +377,140 @@ The tool will request user confirmation before executing any command.""",
             raise
 
     async def _tools_node(self, state: MessagesState):
-        """Execute tools - called after interrupt/confirmation."""
+        """Execute tools with proper interrupt pattern for dangerous tools."""
+        logger.info("🔍 TOOLS: Starting tools node execution")
         messages = state["messages"]
         last_message = messages[-1]
 
+        logger.info(f"🔍 TOOLS: Processing state with {len(messages)} messages")
+        logger.info(f"🔍 TOOLS: Last message type: {type(last_message).__name__}")
+
         if not hasattr(last_message, 'tool_calls') or not last_message.tool_calls:
+            logger.info("🔍 TOOLS: No tool calls found, returning empty")
             return {"messages": []}
 
-        tool_messages = []
+        logger.info(f"🔍 TOOLS: Found {len(last_message.tool_calls)} tool calls to execute")
 
+        # Define dangerous tools that require confirmation
+        dangerous_tools = {"execute_command"}
+        tool_messages = []
+        dangerous_tool_calls = []
+
+        # Separate safe and dangerous tool calls
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
-
-            if tool_name in self.tools:
-                tool = self.tools[tool_name]
-
-                # Track tool call
-                tool_call_record = ToolCall(
-                    server_name="internal",
-                    tool_name=tool_name,
-                    arguments=tool_call["args"],
-                    status=ToolCallStatus.PENDING
-                )
-
-                try:
-                    # Handle execute_command specially
-                    if tool_name == "execute_command":
-                        result = await self._execute_command_tool(tool_call)
-                    else:
-                        # Execute other tools normally
-                        if hasattr(tool, 'func'):
-                            tool_input = json.dumps(tool_call["args"]) if isinstance(tool_call["args"], dict) else str(tool_call["args"])
-                            result = tool.func(tool_input)
-                        elif hasattr(tool, 'execute'):
-                            result = await tool.execute(json.dumps(tool_call["args"]))
-                        else:
-                            result = f"Error: Tool {tool_name} has no callable method"
-
-                    tool_call_record.result = {"output": result}
-                    tool_call_record.status = ToolCallStatus.SUCCESS
-
-                except Exception as e:
-                    result = f"Error executing {tool_name}: {str(e)}"
-                    tool_call_record.status = ToolCallStatus.FAILED
-                    tool_call_record.result = {"error": str(e)}
-
-                finally:
-                    self.session.add_tool_call(tool_call_record)
-
-                tool_messages.append(
-                    ToolMessage(
-                        content=str(result),
-                        tool_call_id=tool_call["id"]
-                    )
-                )
+            if tool_name in dangerous_tools:
+                dangerous_tool_calls.append(tool_call)
             else:
-                tool_messages.append(
-                    ToolMessage(
-                        content=f"Error: Unknown tool {tool_name}",
+                # Execute safe tools immediately
+                logger.info(f"🔍 TOOLS: Auto-executing safe tool: {tool_name}")
+                result = await self._execute_single_tool(tool_call)
+                tool_messages.append(result)
+
+        # If we have dangerous tools, interrupt for confirmation
+        if dangerous_tool_calls:
+            logger.info(f"🔍 TOOLS: Found {len(dangerous_tool_calls)} dangerous tools requiring confirmation")
+
+            # Prepare confirmation data
+            confirmations_needed = []
+            for tool_call in dangerous_tool_calls:
+                args = tool_call["args"]
+                # Handle LangChain's tool argument format
+                if "__arg1" in args:
+                    try:
+                        args = json.loads(args["__arg1"])
+                    except json.JSONDecodeError:
+                        pass
+
+                confirmations_needed.append({
+                    "tool_call": tool_call,
+                    "tool_name": tool_call["name"],
+                    "args": args
+                })
+
+            # Use interrupt to pause and get user confirmation
+            user_response = interrupt({
+                "type": "tool_confirmation",
+                "tools_needing_confirmation": confirmations_needed,
+                "message": f"The following {len(dangerous_tool_calls)} dangerous tool(s) require your confirmation:"
+            })
+
+            logger.info(f"🔍 TOOLS: Received user response: {user_response}")
+
+            # Process user response and execute confirmed tools
+            if isinstance(user_response, dict) and user_response.get("confirmed_tools"):
+                for tool_call in user_response["confirmed_tools"]:
+                    logger.info(f"🔍 TOOLS: Executing confirmed dangerous tool: {tool_call['name']}")
+                    result = await self._execute_single_tool(tool_call)
+                    tool_messages.append(result)
+            else:
+                # User cancelled - create cancellation messages
+                for tool_call in dangerous_tool_calls:
+                    tool_messages.append(ToolMessage(
+                        content="Command execution was cancelled by user.",
                         tool_call_id=tool_call["id"]
-                    )
-                )
+                    ))
 
         return {"messages": tool_messages}
+
+    async def _execute_single_tool(self, tool_call: dict):
+        """Execute a single tool call and return the result message."""
+        tool_name = tool_call["name"]
+        tool_id = tool_call["id"]
+        logger.info(f"🔍 TOOLS: Executing tool: {tool_name} (ID: {tool_id})")
+
+        if tool_name in self.tools:
+            tool = self.tools[tool_name]
+
+            # Track tool call
+            tool_call_record = ToolCall(
+                server_name="internal",
+                tool_name=tool_name,
+                arguments=tool_call["args"],
+                status=ToolCallStatus.PENDING
+            )
+
+            try:
+                logger.info(f"🔍 TOOLS: Starting execution of {tool_name}")
+                # Handle execute_command specially
+                if tool_name == "execute_command":
+                    result = await self._execute_command_tool(tool_call)
+                else:
+                    # Execute other tools normally
+                    if hasattr(tool, 'func'):
+                        tool_input = json.dumps(tool_call["args"]) if isinstance(tool_call["args"], dict) else str(tool_call["args"])
+                        logger.info(f"🔍 TOOLS: Calling {tool_name}.func() with input: {tool_input[:100]}...")
+                        result = tool.func(tool_input)
+                    elif hasattr(tool, 'execute'):
+                        result = await tool.execute(json.dumps(tool_call["args"]))
+                    else:
+                        result = f"Error: Tool {tool_name} has no callable method"
+
+                logger.info(f"🔍 TOOLS: Tool {tool_name} completed successfully")
+                logger.info(f"🔍 TOOLS: Tool {tool_name} result preview: {str(result)[:200]}...")
+
+                tool_call_record.result = {"output": result}
+                tool_call_record.status = ToolCallStatus.SUCCESS
+
+            except Exception as e:
+                logger.info(f"🔍 TOOLS: Tool {tool_name} failed with error: {str(e)}")
+                result = f"Error executing {tool_name}: {str(e)}"
+                tool_call_record.status = ToolCallStatus.FAILED
+                tool_call_record.result = {"error": str(e)}
+
+            finally:
+                self.session.add_tool_call(tool_call_record)
+
+            return ToolMessage(
+                content=str(result),
+                tool_call_id=tool_call["id"]
+            )
+        else:
+            logger.info(f"🔍 TOOLS: Unknown tool: {tool_name}")
+            return ToolMessage(
+                content=f"Error: Unknown tool {tool_name}",
+                tool_call_id=tool_call["id"]
+            )
 
     async def _execute_command_tool(self, tool_call: Dict[str, Any]) -> str:
         """Execute command with confirmation handling."""
@@ -528,6 +648,7 @@ The tool will request user confirmation before executing any command.""",
         """Execute a task with streaming events and confirmation support."""
 
         self.confirmation_handler = confirmation_handler
+        logger.info(f"🔍 EXEC: Starting task execution: '{task[:50]}...'")
 
         with PerformanceTracker(self.telemetry, "langgraph", "execute_task_stream") as tracker:
             yield ExecutionEvent(
@@ -539,174 +660,103 @@ The tool will request user confirmation before executing any command.""",
             try:
                 # Create config with thread ID for checkpointing
                 config = {"configurable": {"thread_id": self.session.session_id}}
+                logger.info(f"🔍 EXEC: Created config with thread_id: {self.session.session_id}")
 
                 # Initial state with user message
                 initial_state = {"messages": [HumanMessage(content=task)]}
+                logger.info(f"🔍 EXEC: Created initial state with {len(initial_state['messages'])} messages")
 
-                # Execute the graph and handle interrupts
-                final_state = None
-                interrupted_state = None
+                # Execute the graph using proper interrupt/resume pattern
+                logger.info("🔍 EXEC: Starting graph execution with proper interrupt/resume pattern...")
 
-                # First execution - may hit interrupt
-                async for event in self.graph.astream(initial_state, config=config):
-                    logger.debug(f"Graph event: {event}")
-                    final_state = event
+                # Start execution using async API since our nodes are async
+                result = await self.graph.ainvoke(initial_state, config=config)
 
-                    # Check if we hit an interrupt (before tools node)
-                    if "__interrupt__" in event:
-                        logger.info("Graph interrupted before tools - confirmation needed")
-                        interrupted_state = event
-                        break  # Stop streaming, handle interrupt
+                # Check if we hit an interrupt
+                while "__interrupt__" in result:
+                    logger.info("🔍 EXEC: Hit interrupt, checking for tool confirmation needs...")
 
-                # If we hit an interrupt, we need to get the current state to find tool calls
-                if interrupted_state:
-                    logger.info(f"Processing interrupt state: {interrupted_state.keys()}")
+                    # Extract interrupt data
+                    interrupt_data = result["__interrupt__"][0]
+                    interrupt_value = interrupt_data.value if hasattr(interrupt_data, 'value') else interrupt_data.get('value', {})
 
-                    # Get the current state of the graph to find tool calls
-                    current_state = self.graph.get_state(config)
-                    logger.info(f"Current graph state values: {list(current_state.values.keys()) if hasattr(current_state, 'values') else 'No values'}")
+                    logger.info(f"🔍 EXEC: Interrupt data: {interrupt_value}")
 
-                    # Extract tool calls from the current state
-                    tool_calls_to_confirm = []
-                    safe_tool_calls = []
+                    if interrupt_value.get("type") == "tool_confirmation":
+                        # This is a tool confirmation interrupt
+                        tools_needing_confirmation = interrupt_value.get("tools_needing_confirmation", [])
 
-                    # Define dangerous tools that require confirmation
-                    dangerous_tools = {"execute_command"}
-
-                    # Check if current_state has values (messages)
-                    if hasattr(current_state, 'values') and 'messages' in current_state.values:
-                        messages = current_state.values['messages']
-                        logger.info(f"Checking {len(messages)} messages from current state")
-
-                        for msg in messages:
-                            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                                logger.info(f"Found {len(msg.tool_calls)} tool calls in message")
-                                for tool_call in msg.tool_calls:
-                                    tool_name = tool_call['name']
-                                    logger.info(f"Tool call: {tool_name}")
-
-                                    if tool_name in dangerous_tools:
-                                        logger.info(f"Found dangerous tool requiring confirmation: {tool_name}")
-                                        tool_calls_to_confirm.append(tool_call)
-                                    else:
-                                        logger.info(f"Found safe tool (auto-approved): {tool_name}")
-                                        safe_tool_calls.append(tool_call)
-
-                    logger.info(f"Found {len(tool_calls_to_confirm)} dangerous tools requiring confirmation")
-                    logger.info(f"Found {len(safe_tool_calls)} safe tools (auto-approved)")
-                    logger.info(f"Confirmation handler available: {self.confirmation_handler is not None}")
-
-                    # Process confirmations for execute_command tools
-                    confirmed_calls = []
-                    for tool_call in tool_calls_to_confirm:
+                        # Use the existing confirmation handler pattern instead of generator yield
                         if self.confirmation_handler:
-                            # Create CommandExecution for confirmation
-                            args = tool_call["args"]
+                            confirmed_tools = []
 
-                            # Handle LangChain's tool argument format
-                            if "__arg1" in args:
-                                # Parse the JSON string in __arg1
-                                try:
-                                    args = json.loads(args["__arg1"])
-                                except json.JSONDecodeError:
-                                    # Fallback to treating as plain command
-                                    args = {"command": args["__arg1"]}
+                            for tool_data in tools_needing_confirmation:
+                                # Create CommandExecution for the confirmation handler
+                                args = tool_data["args"]
+                                execution = CommandExecution(
+                                    command=args.get("command", ""),
+                                    explanation=args.get("explanation", ""),
+                                    working_directory=args.get("working_directory", self.session.working_directory),
+                                    agent_reasoning=args.get("reasoning", ""),
+                                    related_files=args.get("related_files", [])
+                                )
 
-                            execution = CommandExecution(
-                                command=args.get("command", ""),
-                                explanation=args.get("explanation", ""),
-                                working_directory=args.get("working_directory", self.session.working_directory),
-                                agent_reasoning=args.get("reasoning", ""),
-                                related_files=args.get("related_files", [])
-                            )
+                                # Get user confirmation using the callback
+                                logger.info(f"🔍 EXEC: Requesting confirmation for: {execution.command}")
+                                confirmation_response = await self.confirmation_handler(execution)
 
-                            # Get user confirmation
-                            confirmation_response = await self.confirmation_handler(execution)
+                                if confirmation_response and confirmation_response.choice.lower() == "yes":
+                                    confirmed_tools.append(tool_data["tool_call"])
+                                    logger.info(f"🔍 EXEC: User confirmed: {execution.command}")
+                                else:
+                                    logger.info(f"🔍 EXEC: User declined: {execution.command}")
 
-                            if confirmation_response and confirmation_response.choice.lower() == UserResponse.YES.value:
-                                if (confirmation_response.choice.lower() == UserResponse.MODIFY.value and
-                                    confirmation_response.modified_command):
-                                    # Update the tool call with modified command
-                                    tool_call["args"]["command"] = confirmation_response.modified_command
-                                confirmed_calls.append(tool_call)
-                            else:
-                                # User denied, don't execute
-                                logger.info(f"Command execution denied: {execution.command}")
-
-                    # Resume execution if we have safe tools OR confirmed dangerous tools
-                    should_resume = len(safe_tool_calls) > 0 or len(confirmed_calls) > 0
-
-                    if should_resume:
-                        logger.info(f"Resuming execution: {len(safe_tool_calls)} safe tools + {len(confirmed_calls)} confirmed dangerous tools")
-                        # Resume the graph from the interrupt
-                        async for event in self.graph.astream(None, config=config):
-                            logger.debug(f"Resumed graph event: {event}")
-                            final_state = event
-                    else:
-                        # No safe tools and no confirmed dangerous tools - create cancellation response
-                        logger.info("No tools to execute - user cancelled dangerous tools and no safe tools present")
-                        final_state = {
-                            "agent": {
-                                "messages": [AIMessage(content="Command execution was cancelled by user.")]
+                            resume_data = {
+                                "confirmed_tools": confirmed_tools
                             }
-                        }
+                        else:
+                            # No confirmation handler - reject all dangerous tools
+                            logger.warning("🔍 EXEC: No confirmation handler available, rejecting dangerous tools")
+                            resume_data = {
+                                "confirmed_tools": []
+                            }
 
-                # Extract final response from the last state
+                        # Resume execution with user response
+                        logger.info(f"🔍 EXEC: Resuming with data: {resume_data}")
+                        result = await self.graph.ainvoke(Command(resume=resume_data), config=config)
+                    else:
+                        # Unknown interrupt type - break out
+                        logger.warning(f"🔍 EXEC: Unknown interrupt type: {interrupt_value.get('type')}")
+                        break
+
+                # Extract final response from the completed execution
+                logger.info("🔍 EXEC: Extracting final response...")
                 final_response = "Task completed"
 
-                # If final_state only contains __interrupt__, get the actual graph state
-                if final_state and "__interrupt__" in final_state and len(final_state) == 1:
-                    logger.debug("Final state is interrupt only, getting graph state directly")
-                    graph_state = self.graph.get_state(config)
-                    if hasattr(graph_state, 'values') and 'messages' in graph_state.values:
-                        messages = graph_state.values['messages']
-                        logger.debug(f"Found {len(messages)} messages in graph state")
-                        # Get the last AI message
-                        for i, msg in enumerate(reversed(messages)):
-                            logger.debug(f"Graph message {i}: {type(msg).__name__}: {msg.content[:100] if hasattr(msg, 'content') and msg.content else 'No content'}...")
-                            if isinstance(msg, AIMessage) and msg.content:
+                # Extract from the graph state which contains all messages
+                graph_state = self.graph.get_state(config)
+                if hasattr(graph_state, 'values') and 'messages' in graph_state.values:
+                    messages = graph_state.values['messages']
+                    logger.info(f"🔍 EXEC: Found {len(messages)} messages in final graph state")
+
+                    # Get the last AI message that has content
+                    for i, msg in enumerate(reversed(messages)):
+                        logger.debug(f"Message {i}: {type(msg).__name__}: {msg.content[:100] if hasattr(msg, 'content') and msg.content else 'No content'}...")
+                        if isinstance(msg, AIMessage) and msg.content and not hasattr(msg, 'tool_calls'):
+                            # This is a final AI response without tool calls
+                            final_response = msg.content
+                            logger.info(f"🔍 EXEC: Found final AI response: {final_response[:100]}...")
+                            break
+                        elif isinstance(msg, AIMessage) and msg.content:
+                            # This might be an AI message with tool calls, but if it has content, use it as fallback
+                            if not final_response or final_response == "Task completed":
                                 final_response = msg.content
-                                logger.info(f"Found final AI response from graph state: {final_response[:100]}...")
-                                break
-                elif final_state:
-                    logger.debug(f"Final state keys: {list(final_state.keys())}")
-                    logger.debug(f"Final state structure: {final_state}")
-
-                    for node_name, node_state in final_state.items():
-                        logger.debug(f"Processing node: {node_name}")
-                        if node_name != "__interrupt__" and "messages" in node_state:
-                            messages = node_state["messages"]
-                            logger.debug(f"Found {len(messages)} messages in node {node_name}")
-                            # Get the last AI message
-                            for i, msg in enumerate(reversed(messages)):
-                                logger.debug(f"Message {i}: {type(msg).__name__}: {msg.content[:100] if hasattr(msg, 'content') and msg.content else 'No content'}...")
-                                if isinstance(msg, AIMessage) and msg.content:
-                                    final_response = msg.content
-                                    logger.info(f"Found final AI response: {final_response[:100]}...")
-                                    break
-
-                # Add conversation to chat history
-                chat_history = self.memory_manager.get_chat_history()
-
-                # Add the user message first
-                chat_history.add_message(HumanMessage(content=task))
-
-                # Add all relevant messages from the conversation (except system messages)
-                if final_state:
-                    all_conversation_messages = []
-                    for node_name, node_state in final_state.items():
-                        if node_name != "__interrupt__" and "messages" in node_state:
-                            for msg in node_state["messages"]:
-                                # Skip the initial system message and user message (already added)
-                                if not isinstance(msg, (SystemMessage, HumanMessage)):
-                                    all_conversation_messages.append(msg)
-
-                    # Add all AI and tool messages to maintain proper sequence
-                    for msg in all_conversation_messages:
-                        chat_history.add_message(msg)
+                                logger.info(f"🔍 EXEC: Using AI message with tool calls as response: {final_response[:100]}...")
                 else:
-                    # Fallback: just add the final response as AI message
-                    chat_history.add_message(AIMessage(content=final_response))
+                    logger.warning("🔍 EXEC: No messages found in graph state")
+
+                logger.info(f"🔍 EXEC: Final response length: {len(final_response)} characters")
+
 
                 # Track successful execution
                 await self.telemetry.track_framework_call(
@@ -727,6 +777,9 @@ The tool will request user confirmation before executing any command.""",
                 )
 
             except Exception as e:
+                logger.info(f"❌ EXEC: Exception caught: {type(e).__name__}: {str(e)}")
+                logger.info(f"🔍 EXEC: Full exception details: {e}", exc_info=True)
+
                 await self.telemetry.track_framework_call(
                     framework="langgraph",
                     prompt=task,
@@ -808,8 +861,20 @@ You have access to advanced tools for file operations, web search, and system co
             "failed_commands": self.session.failed_commands,
         }
 
-        if self.memory_manager:
-            info["memory_info"] = self.memory_manager.get_memory_info()
+        # Map checkpointer type to memory_type for CLI status display
+        checkpointer_name = type(self.checkpointer).__name__
+        if "PostgresSaver" in checkpointer_name or "AsyncPostgresSaver" in checkpointer_name:
+            memory_type = "postgres"
+        elif "MemorySaver" in checkpointer_name:
+            memory_type = "memory"
+        else:
+            memory_type = "unknown"
+
+        info["memory_info"] = {
+            "memory_type": memory_type,
+            "persistent": memory_type == "postgres",
+            "message_count": 0
+        }
 
         framework_metrics = self.telemetry.get_framework_metrics("langgraph")
         if framework_metrics:
@@ -819,12 +884,32 @@ You have access to advanced tools for file operations, web search, and system co
 
     def clear_memory(self) -> None:
         try:
-            if self.memory_manager:
-                chat_history = self.memory_manager.get_chat_history()
-                chat_history.clear()
-            logger.info("Correct LangGraph agent memory cleared")
+            # Clear checkpointer state for this session's thread
+            config = {"configurable": {"thread_id": self.session.session_id}}
+
+            # Delete the thread (async for AsyncPostgresSaver)
+            if hasattr(self.checkpointer, 'adelete_thread'):
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # We're in an async context, create a task
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, self.checkpointer.adelete_thread(config))
+                            future.result()
+                    else:
+                        loop.run_until_complete(self.checkpointer.adelete_thread(config))
+                    logger.info(f"Checkpointer thread {self.session.session_id} cleared")
+                except Exception as async_error:
+                    logger.error(f"Failed to delete thread asynchronously: {async_error}")
+            elif hasattr(self.checkpointer, 'delete_thread'):
+                self.checkpointer.delete_thread(config)
+                logger.info(f"Checkpointer thread {self.session.session_id} cleared")
+            else:
+                logger.warning("Checkpointer doesn't support thread deletion - memory not cleared")
         except Exception as e:
-            logger.error(f"Failed to clear memory: {e}")
+            logger.error(f"Failed to clear checkpointer state: {e}")
             raise
 
     async def get_metrics(self) -> Dict[str, Any]:
@@ -832,7 +917,7 @@ You have access to advanced tools for file operations, web search, and system co
         langgraph_metrics = self.telemetry.get_framework_metrics("langgraph")
         base_metrics.update({
             "langgraph_metrics": langgraph_metrics,
-            "memory_info": self.memory_manager.get_memory_info() if self.memory_manager else None,
+            "checkpointer_type": type(self.checkpointer).__name__,
             "model_name": self.config.deployment_name,
             "temperature": self.config.temperature
         })

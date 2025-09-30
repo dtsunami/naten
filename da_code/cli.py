@@ -279,9 +279,17 @@ async def execute_with_streaming_confirmations(
 
     try:
         async for event in event_generator:
+            # Skip None events (these happen during generator pauses for user input)
+            if event is None:
+                continue
+
             # Simplified event handling - only process events that are actually emitted
             if event.event_type == EventType.EXECUTION_START:
                 status_interface.update_status("Starting execution...")
+
+            elif event.event_type == EventType.COMMAND_CONFIRMATION_NEEDED:
+                # This event is handled by the confirmation_handler, just update status
+                status_interface.update_status("Waiting for user confirmation...")
 
             elif event.event_type == EventType.FINAL_RESPONSE:
                 final_response = event.content
