@@ -156,6 +156,8 @@ TODO MANAGEMENT:
 
                 if run_event.event in [RunEvent.tool_call_completed]:
                     await status_queue.put(f"Tool Result: {run_event.tool.tool_name} -> {run_event.tool.result}")
+                    # Also send tool result to output queue for user display (consistent with confirmation flow)
+                    await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
                     #print(f"\nEVENT: {run_event.event}")
                     #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
                     #print(f"TOOL CALL RESULT: {run_event.tool.result}")  # type: ignore
@@ -197,6 +199,8 @@ TODO MANAGEMENT:
                             if resp.event in [RunEvent.tool_call_completed]:
                                 logger.info(f"Tool completed after confirmation: {resp.tool.tool_name} -> {resp.tool.result}")
                                 await status_queue.put(f"Tool Result: {resp.tool.tool_name} -> {resp.tool.result}")
+                                # CRITICAL: Also send tool result to output queue for user display
+                                await output_queue.put(f"\n🔧 Tool Result:\n{resp.tool.result}\n")
                             elif resp.event in [RunEvent.run_content]:
                                 logger.debug(f"Continue run content: {resp.content}")
                                 await output_queue.put(resp.content)

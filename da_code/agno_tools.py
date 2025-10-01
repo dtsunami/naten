@@ -262,6 +262,10 @@ The tool will request user confirmation before executing any command.
 )
 def execute_command(tool_input: str) -> str:
     """Execute shell commands with user confirmation."""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"🔧 SHELL_COMMAND TOOL CALLED with input: {tool_input}")
+
     try:
         # Parse command input
         if isinstance(tool_input, str):
@@ -279,6 +283,7 @@ def execute_command(tool_input: str) -> str:
 
         working_dir = params.get("working_directory", os.getcwd())
 
+        logger.warning(f"🔧 EXECUTING COMMAND: {command} in {working_dir}")
         start_time = time.time()
         result = subprocess.run(
             command,
@@ -288,6 +293,8 @@ def execute_command(tool_input: str) -> str:
             text=True,
             timeout=300
         )
+
+        logger.warning(f"🔧 COMMAND RESULT: returncode={result.returncode}, stdout_len={len(result.stdout) if result.stdout else 0}")
 
         exec_time = time.time() - start_time
 
