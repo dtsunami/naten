@@ -318,7 +318,8 @@ def execute_command(tool_input: str) -> str:
 
 @tool(
     name="web_search",
-    description="Search the web for current information using DuckDuckGo",
+    description="Search the web for current information using DuckDuckGo with user confirmation",
+    requires_confirmation=True,
     instructions="""
 SUPPORTED FORMATS:
 - JSON: {"query": "search terms", "num_results": 5}
@@ -818,3 +819,114 @@ def git_operations(tool_input: str) -> str:
 
     except Exception as e:
         return f"Git operations error: {str(e)}"
+
+
+#====================================================================================================
+# HTTP Fetch Tool
+#====================================================================================================
+
+@tool(
+    name="http_fetch",
+    description="Fetch content from HTTP/HTTPS URLs",
+    instructions="""
+SUPPORTED FORMATS:
+- JSON: {"url": "https://example.com", "method": "GET", "timeout": 10}
+- Simple text: "https://example.com" (GET request)
+
+METHODS:
+- GET: Fetch content from URL (default)
+- HEAD: Get headers only
+
+EXAMPLE INPUTS:
+- {"url": "https://api.github.com/repos/python/cpython"}
+- "https://httpbin.org/json"
+- {"url": "https://api.example.com", "method": "HEAD"}
+
+Returns: HTTP status, headers, and content (formatted JSON or text).
+"""
+)
+def http_fetch(tool_input: str) -> str:
+    """Fetch content from HTTP/HTTPS URLs."""
+    try:
+        # Parse fetch input
+        if isinstance(tool_input, str):
+            try:
+                params = json.loads(tool_input)
+                url = params.get("url", "")
+                method = params.get("method", "GET").upper()
+                timeout = params.get("timeout", 10)
+            except json.JSONDecodeError:
+                # Simple string URL
+                url = tool_input
+                method = "GET"
+                timeout = 10
+        else:
+            url = tool_input.get("url", "")
+            method = tool_input.get("method", "GET").upper()
+            timeout = tool_input.get("timeout", 10)
+
+        if not url:
+            return "Error: No URL specified"
+
+        # Validate URL
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return "Error: URL must start with http:// or https://"
+
+        # Set safe headers
+        headers = {
+            "User-Agent": "da_code/1.0 (AI Assistant)",
+            "Accept": "text/html,application/json,text/plain,*/*"
+        }
+
+        import httpx
+
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            if method == "GET":
+                response = client.get(url, headers=headers)
+            elif method == "HEAD":
+                response = client.head(url, headers=headers)
+            else:
+                return f"Error: Unsupported HTTP method: {method} (only GET, HEAD allowed)"
+
+        result = f"🌐 HTTP {method} {url}\n"
+        result += f"Status: {response.status_code} {response.reason_phrase}\n\n"
+
+        # Add key response headers
+        if response.headers:
+            result += "📋 Headers:\n"
+            key_headers = ["content-type", "content-length", "server", "last-modified"]
+            for header in key_headers:
+                if header in response.headers:
+                    result += f"  {header}: {response.headers[header]}\n"
+            result += "\n"
+
+        # Add content (for GET only, not HEAD)
+        if method == "GET" and response.content:
+            content_type = response.headers.get("content-type", "").lower()
+
+            if "json" in content_type:
+                try:
+                    # Pretty print JSON
+                    json_data = response.json()
+                    formatted_json = json.dumps(json_data, indent=2)
+                    result += f"📄 Content (JSON):\n{formatted_json[:1500]}"
+                    if len(formatted_json) > 1500:
+                        result += "...\n(truncated)"
+                except:
+                    result += f"📄 Content:\n{response.text[:1500]}"
+                    if len(response.text) > 1500:
+                        result += "...\n(truncated)"
+            else:
+                # Plain text or HTML
+                result += f"📄 Content:\n{response.text[:1500]}"
+                if len(response.text) > 1500:
+                    result += "...\n(truncated)"
+
+        return result
+
+    except httpx.TimeoutException:
+        return f"⏰ HTTP request timed out after {timeout} seconds"
+    except httpx.RequestError as e:
+        return f"❌ HTTP request failed: {str(e)}"
+    except Exception as e:
+        return f"❌ HTTP fetch error: {str(e)}"

@@ -26,7 +26,7 @@ from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .telemetry import TelemetryManager, PerformanceTracker
 from .agno_tools import (
     handle_todo_operation, execute_command, web_search,
-    file_search, current_time, python_executor, git_operations
+    file_search, current_time, python_executor, git_operations, http_fetch
 )
 
 agno_agent_tools = [
@@ -36,7 +36,8 @@ agno_agent_tools = [
     file_search,
     current_time,
     python_executor,
-    git_operations
+    git_operations,
+    http_fetch
 ]
 
 
@@ -191,10 +192,13 @@ TODO MANAGEMENT:
 
                     async for resp in self.agent.acontinue_run(run_id=run_event.run_id, updated_tools=run_event.tools, stream=True):
                         # Handle continuing run events the same way as the main loop
+                        logger.debug(f"Continue run event: {resp.event}, paused: {resp.is_paused}")
                         if not resp.is_paused:
                             if resp.event in [RunEvent.tool_call_completed]:
+                                logger.info(f"Tool completed after confirmation: {resp.tool.tool_name} -> {resp.tool.result}")
                                 await status_queue.put(f"Tool Result: {resp.tool.tool_name} -> {resp.tool.result}")
                             elif resp.event in [RunEvent.run_content]:
+                                logger.debug(f"Continue run content: {resp.content}")
                                 await output_queue.put(resp.content)
                             else:
                                 await status_queue.put(f"Continue: {resp.event}")
