@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "da_code"
 version = "0.1.0"
-description = "Agentic CLI tool with LangChain and Azure OpenAI"
+description = "Agentic CLI tool with Agno and Azure OpenAI"
 authors = [
     {name = "da_code", email = "daniel.tsunami@intel.com"}
 ]
@@ -18,26 +18,17 @@ classifiers = [
 ]
 
 dependencies = [
-    "langchain>=0.1.0",
-    "langchain-openai>=0.1.0",
-    "langchain-community>=0.1.0",
-    "langgraph>=0.1.0",
+    "agno",
     "pydantic>=2.0.0",
     "aiohttp>=3.9.0",
     "httpx>=0.25.0",
-    "beautifulsoup4>=4.12.0",
-    "pillow>=10.0.0",
-    "pyperclip>=1.8.0",
     "azure-identity>=1.15.0",
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
     "motor>=3.1.0",
     "rich>=13.7.0",
-    "langchain_postgres",
     "psycopg[binary]>=3.1.0",
-    "langgraph-checkpoint-postgres",
-    "prompt_toolkit",
-    "agno"
+    "prompt_toolkit"
 ]
 
 [project.optional-dependencies]
@@ -52,8 +43,8 @@ all = [
 ]
 
 [project.scripts]
-da_code = "da_code.cli:main"
-code_agent = "da_code.cli:main"
+da_code = "da_code.agno_cli:main"
+code_agent = "da_code.agno_cli:main"
 
 [project.urls]
 Repository = "https://github.com/dtsunami/naten/da_code"

@@ -12,7 +12,6 @@ from agno.db.sqlite import SqliteDb
 import logging
 logger = logging.getLogger(__name__)
 
-from .agent_interface import AgentInterface
 from .models import (
     AgentConfig, CodeSession, CommandExecution, CommandStatus,
     LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, UserResponse, da_mongo
@@ -25,9 +24,20 @@ from .config import ConfigManager, setup_logging
 from .context import ContextLoader
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .telemetry import TelemetryManager, PerformanceTracker
-from .agno_tools import handle_todo_operation, execute_command
+from .agno_tools import (
+    handle_todo_operation, execute_command, web_search,
+    file_search, current_time, python_executor, git_operations
+)
 
-agno_agent_tools = [handle_todo_operation, execute_command]
+agno_agent_tools = [
+    handle_todo_operation,
+    execute_command,
+    web_search,
+    file_search,
+    current_time,
+    python_executor,
+    git_operations
+]
 
 
 class AgnoAgent():
@@ -156,30 +166,43 @@ TODO MANAGEMENT:
                         await output_queue.put(run_event.content)
 
             else:
-                logger.warning(f"paused run event: {run_event}")
-                for tool in run_event.tools_requiring_confirmation:  # type: ignore
-                    logger.info(f"Tool {tool} asking for confirmation")
-                    
-                    confirm_arg = f"Confirm Tool [bold blue]{tool.tool_name}({tool.tool_args})[/] requires confirmation."
-                    # Ask for confirmation
-                    execution = CommandExecution(
-                        command=confirm_arg,
-                        explanation=tool.tool_args.get("explanation", ""),
-                        working_directory=tool.tool_args.get("working_directory", self.session.working_directory),
-                        agent_reasoning=tool.tool_args.get("reasoning", ""),
-                        related_files=tool.tool_args.get("related_files", [])
-                    )
+                #logger.warning(f"paused run event: {run_event}")
+                try:
+                    for tool in run_event.tools_requiring_confirmation:  # type: ignore
+                        logger.info(f"Tool {tool} asking for confirmation")
 
-                    # Get user confirmation using the callback
-                    logger.warning(f"🔍 EXEC: Requesting confirmation for: {execution.command}")
-                    confirmation_response = await self.confirmation_handler(execution)
+                        confirm_arg = f"Confirm Tool [bold blue]{tool.tool_name}({tool.tool_args})[/] requires confirmation."
+                        # Ask for confirmation
+                        execution = CommandExecution(
+                            command=confirm_arg,
+                            explanation=tool.tool_args.get("explanation", ""),
+                            working_directory=tool.tool_args.get("working_directory", self.code_session.working_directory),
+                            agent_reasoning=tool.tool_args.get("reasoning", ""),
+                            related_files=tool.tool_args.get("related_files", [])
+                        )
 
-                    tool.confirmed = False
-                    if confirmation_response == ConfirmationResponse.YES:
-                        tool.confirmed = True
+                        # Get user confirmation using the callback
+                        logger.warning(f"🔍 EXEC: Requesting confirmation for: {execution.command}")
+                        confirmation_response = await self.confirmation_handler(execution)
 
-                async for resp in self.agent.acontinue_run(run_id=run_event.run_id, updated_tools=run_event.tools, stream=True):
-                    await status_queue.put(resp.content)
+                        tool.confirmed = False
+                        if confirmation_response.choice.lower() == "yes":
+                            tool.confirmed = True
+
+                    async for resp in self.agent.acontinue_run(run_id=run_event.run_id, updated_tools=run_event.tools, stream=True):
+                        # Handle continuing run events the same way as the main loop
+                        if not resp.is_paused:
+                            if resp.event in [RunEvent.tool_call_completed]:
+                                await status_queue.put(f"Tool Result: {resp.tool.tool_name} -> {resp.tool.result}")
+                            elif resp.event in [RunEvent.run_content]:
+                                await output_queue.put(resp.content)
+                            else:
+                                await status_queue.put(f"Continue: {resp.event}")
+
+                except Exception as e:
+                    logger.error(f"Confirmation handling error: {type(e).__name__}: {str(e)}", exc_info=True)
+                    # Re-raise to let TaskGroup handle it properly
+                    raise
 
     def get_session_info(self) -> Dict[str, Any]:
         """Get current session information."""

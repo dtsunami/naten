@@ -668,13 +668,20 @@ async def async_main():
                         console(f"ERROR: wait_for_input is done!! {wait_for_input.result()}")
                     user_input = await input_queue.get()
                 elif running_agent.done():
-                    final_response = running_agent.result()
-                    status_message = None
-                    running_agent = None
-                    status_interface.stop_execution(True)
-                    console.print()
-                    console.print(output_message)
-                    output_message = None
+                    try:
+                        final_response = running_agent.result()
+                        status_message = None
+                        running_agent = None
+                        status_interface.stop_execution(True)
+                        console.print()
+                        console.print(output_message)
+                        output_message = None
+                    except Exception as e:
+                        # Handle agent execution errors
+                        running_agent = None
+                        status_interface.stop_execution(False, str(e))
+                        console.print(f"[red]Agent error: {str(e)}[/red]")
+                        logger.error(f"Agent execution error: {type(e).__name__}: {str(e)}", exc_info=True)
                 else:
                     while output_queue.qsize() > 0:
                         output_message += await output_queue.get()
