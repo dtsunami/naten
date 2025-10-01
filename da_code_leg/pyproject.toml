@@ -36,8 +36,6 @@ dependencies = [
     "langchain_postgres",
     "psycopg[binary]>=3.1.0",
     "langgraph-checkpoint-postgres",
-    "prompt_toolkit",
-    "agno"
 ]
 
 [project.optional-dependencies]

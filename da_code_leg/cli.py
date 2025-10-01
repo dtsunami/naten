@@ -10,8 +10,8 @@ import time
 import random
 from typing import List, Optional
 from pathlib import Path
-#import termios
-#import tty
+import termios
+import tty
 
 from rich.console import Console
 from rich.status import Status
@@ -97,11 +97,11 @@ async def async_prompt_user_silent(choices: List[str], default: str = None, comm
 
     def get_keypress_choice() -> str:
         fd = sys.stdin.fileno()
-        #old_settings = termios.tcgetattr(fd)
+        old_settings = termios.tcgetattr(fd)
         selected_index = 0  # Initialize locally
 
         try:
-            #tty.setraw(sys.stdin.fileno())
+            tty.setraw(sys.stdin.fileno())
 
             # Display confirmation panel once
             display_static_confirmation()
@@ -144,8 +144,7 @@ async def async_prompt_user_silent(choices: List[str], default: str = None, comm
                     raise KeyboardInterrupt()
 
         finally:
-            pass
-            #termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     # Get choice asynchronously
     loop = asyncio.get_event_loop()

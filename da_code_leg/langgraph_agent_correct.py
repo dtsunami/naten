@@ -14,13 +14,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import interrupt, Command
 
-import sys
-
-if sys.platform == "win32":
-    # Windows-specific code here
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-
 from .agent_interface import AgentInterface
 from .models import (
     AgentConfig, CodeSession, CommandExecution, CommandStatus,
@@ -116,7 +109,7 @@ The tool will request user confirmation before executing any command.""",
         postgres_url = os.getenv("POSTGRES_CHAT_URL", None)
         logger.info(f"🔍 CHECKPOINTER: POSTGRES_CHAT_URL configured: {postgres_url is not None}")
 
-        if postgres_url and False:
+        if postgres_url:
             try:
                 logger.info("🔍 CHECKPOINTER: Attempting to create PostgreSQL checkpointer...")
 
@@ -699,6 +692,7 @@ The tool will request user confirmation before executing any command.""",
 
         # No tool calls, end the conversation
         return "end"
+
 
     async def execute_task(self, task: str) -> str:
         """Execute a task and return the response (legacy method)."""

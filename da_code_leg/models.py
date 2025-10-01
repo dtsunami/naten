@@ -123,22 +123,6 @@ class CommandExecution(BaseModel):
         self.updated_at = datetime.now(timezone.utc)
 
 
-class ConfirmationRequest(BaseModel):
-    """Request for user confirmation during execution."""
-
-    execution: CommandExecution
-    choices: list[str] = Field(default=["yes", "no", "modify", "explain"])
-    default_choice: str = "no"
-
-
-class ConfirmationResponse(BaseModel):
-    """User response to confirmation request."""
-
-    choice: str
-    modified_command: Optional[str] = None
-
-
-
 class MCPServerInfo(BaseModel):
     """Information about an MCP server."""
     model_config = ConfigDict(

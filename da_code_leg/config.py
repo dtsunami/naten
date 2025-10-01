@@ -86,13 +86,12 @@ class ConfigManager:
                 with open(example_file, 'r') as f:
                     sample_content = f.read()
 
-                if not os.path.exists(env_path):
-                    with open(env_path, 'w') as f:
-                        f.write(sample_content)
+                with open(env_path, 'w') as f:
+                    f.write(sample_content)
 
-                    logger.info(f"Created sample environment file at {env_path} from .env.example")
-                    print(f"Sample environment file created at {env_path}")
-                    print("Please update the configuration with your actual values.")
+                logger.info(f"Created sample environment file at {env_path} from .env.example")
+                print(f"Sample environment file created at {env_path}")
+                print("Please update the configuration with your actual values.")
             else:
                 raise FileNotFoundError(f".env.example not found at {example_file}")
 
