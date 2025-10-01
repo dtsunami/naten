@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+import subprocess
 
 import random
 from typing import List, Optional
@@ -22,6 +23,9 @@ from rich.panel import Panel
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.completion import PathCompleter, WordCompleter, Completer, Completion
 
 from .config import ConfigManager, setup_logging
 from .context import ContextLoader
@@ -419,6 +423,144 @@ def show_status(config_mgr: ConfigManager, context_ldr: ContextLoader) -> int:
 
 
 
+class ShellCompleter(Completer):
+    """Custom completer for shell commands with file/directory completion."""
+
+    def __init__(self):
+        # Common shell commands
+        self.shell_commands = [
+            'ls', 'cd', 'pwd', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'cat', 'less', 'more',
+            'grep', 'find', 'which', 'whereis', 'locate', 'chmod', 'chown', 'touch',
+            'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'awk', 'sed', 'tar', 'gzip',
+            'gunzip', 'zip', 'unzip', 'ps', 'top', 'htop', 'kill', 'killall', 'jobs',
+            'bg', 'fg', 'nohup', 'screen', 'tmux', 'ssh', 'scp', 'rsync', 'curl', 'wget',
+            'git', 'python', 'python3', 'pip', 'pip3', 'node', 'npm', 'yarn', 'docker',
+            'docker-compose', 'make', 'cmake', 'gcc', 'g++', 'javac', 'java', 'go',
+            'cargo', 'rustc', 'echo', 'printf', 'date', 'cal', 'uptime', 'df', 'du',
+            'free', 'uname', 'whoami', 'id', 'groups', 'su', 'sudo', 'history', 'alias',
+            'export', 'env', 'printenv', 'source', 'bash', 'sh', 'zsh', 'fish'
+        ]
+        self.path_completer = PathCompleter()
+        self.command_completer = WordCompleter(self.shell_commands)
+
+    def get_completions(self, document, complete_event):
+        text = document.text
+
+        # If empty, complete commands
+        if not text.strip():
+            yield from self.command_completer.get_completions(document, complete_event)
+            return
+
+        words = text.split()
+
+        # If we have multiple words OR the text ends with space, complete file paths
+        if len(words) > 1 or (len(words) == 1 and text.endswith(' ')):
+            yield from self.path_completer.get_completions(document, complete_event)
+        else:
+            # Single word without trailing space - could be command or path
+            # Try both command completion and path completion
+            command_completions = list(self.command_completer.get_completions(document, complete_event))
+            path_completions = list(self.path_completer.get_completions(document, complete_event))
+
+            # Yield command completions first, then path completions
+            yield from command_completions
+            yield from path_completions
+
+
+class ShellModeManager:
+    """Manages shell mode and captures command output for agent context."""
+
+    def __init__(self):
+        self.is_shell_mode = False
+        self.shell_history = []
+        self.max_history_entries = 50
+        self.shell_command_history = []  # Separate history for shell commands only
+
+    def toggle_shell_mode(self):
+        """Toggle between shell mode and agent mode."""
+        self.is_shell_mode = not self.is_shell_mode
+        mode_name = "shell" if self.is_shell_mode else "agent"
+        console.print(f"[cyan]🔧 Switched to {mode_name} mode[/cyan]")
+
+    def execute_shell_command(self, command: str) -> str:
+        """Execute shell command and capture output."""
+        # Add command to shell command history for up/down arrow navigation
+        if command.strip() and (not self.shell_command_history or command != self.shell_command_history[-1]):
+            self.shell_command_history.append(command)
+            # Keep shell command history manageable
+            if len(self.shell_command_history) > 1000:
+                self.shell_command_history = self.shell_command_history[-1000:]
+
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            # Combine stdout and stderr
+            output = ""
+            if result.stdout:
+                output += result.stdout
+            if result.stderr:
+                output += f"\nSTDERR:\n{result.stderr}"
+
+            # Add to history for agent context
+            self.shell_history.append({
+                'command': command,
+                'output': output,
+                'return_code': result.returncode,
+                'timestamp': time.time()
+            })
+
+            # Keep only recent entries
+            if len(self.shell_history) > self.max_history_entries:
+                self.shell_history = self.shell_history[-self.max_history_entries:]
+
+            return output
+
+        except subprocess.TimeoutExpired:
+            error_msg = f"Command timed out after 30 seconds: {command}"
+            self.shell_history.append({
+                'command': command,
+                'output': error_msg,
+                'return_code': -1,
+                'timestamp': time.time()
+            })
+            return error_msg
+
+        except Exception as e:
+            error_msg = f"Shell execution error: {str(e)}"
+            self.shell_history.append({
+                'command': command,
+                'output': error_msg,
+                'return_code': -1,
+                'timestamp': time.time()
+            })
+            return error_msg
+
+    def get_shell_context_for_agent(self) -> str:
+        """Get recent shell commands and output as context for the agent."""
+        if not self.shell_history:
+            return ""
+
+        context_lines = ["Recent shell commands and their output:"]
+
+        # Get last 5 commands for context
+        recent_commands = self.shell_history[-5:]
+
+        for entry in recent_commands:
+            context_lines.append(f"\n$ {entry['command']}")
+            if entry['return_code'] == 0:
+                context_lines.append(f"Output:\n{entry['output'][:1000]}")  # Limit output length
+            else:
+                context_lines.append(f"Error (code {entry['return_code']}):\n{entry['output'][:1000]}")
+
+        return "\n".join(context_lines)
+
+
 class SimpleStatusInterface:
     """Simple status interface with Rich spinner and agent insights."""
 
@@ -524,13 +666,14 @@ async def async_prompt_text(message: str, default: str = None) -> str:
 
 
 # Available commands
-commands = ['help', 'setup', 'status', 'add_mcp', 'exit', 'quit', 'q']
+commands = ['help', 'setup', 'status', 'add_mcp', 'shell', 'exit', 'quit', 'q']
 
 async def async_main():
     """Async main with simple status interface."""
     status_interface = SimpleStatusInterface()
+    shell_manager = ShellModeManager()
 
-    
+
     async def confirmation_handler(execution: CommandExecution, status_interface=status_interface) -> ConfirmationResponse:
         """Handle command confirmation directly."""
         # Stop status to show confirmation dialog cleanly
@@ -630,20 +773,49 @@ async def async_main():
             # Combined status line
             status_interface.stop_execution(True, f"🤖 {deployment_name} | 💾 {memory_status} | 🍃 {mongo_status_str}")
 
-    history = FileHistory(agent.config.history_file_path)
+    # Set up history files
+    agent_history = FileHistory(agent.config.history_file_path)
+    shell_history_path = os.getenv('SHELL_HISTORY_FILE', os.path.expanduser('~/.da_code_shell_history'))
+    shell_history = FileHistory(shell_history_path)
 
-    # Create PromptSession for async usage
+    # Set up completers
+    shell_completer = ShellCompleter()
+    # No completer for agent mode (or could add custom agent completer later)
+
+    # Create key bindings for shell mode toggle
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Escape)  # Escape key
+    def _(event):
+        """Toggle shell mode with Escape key."""
+        shell_manager.toggle_shell_mode()
+
+    # Create PromptSession for async usage - will switch history and completer dynamically
     session = PromptSession(
-        history=history,
+        history=agent_history,
         multiline=False,
         complete_style='column',
+        key_bindings=bindings,
+        completer=None,  # Will be set dynamically
     )
 
     async def get_user_input_with_history(queue):
         """Get user input with file-based history and arrow key support."""
         while True:
             try:
-                user_input = await session.prompt_async(HTML('<cyan>>></cyan> '))
+                # Dynamic prompt, history, and completer based on mode
+                if shell_manager.is_shell_mode:
+                    prompt_text = HTML('<yellow>shell$</yellow> ')
+                    # Switch to shell history and completer
+                    session.history = shell_history
+                    session.completer = shell_completer
+                else:
+                    prompt_text = HTML('<cyan>agent!</cyan> ')
+                    # Switch to agent history and no completer
+                    session.history = agent_history
+                    session.completer = None
+
+                user_input = await session.prompt_async(prompt_text)
                 await queue.put(user_input)
             except (EOFError, KeyboardInterrupt):
                 return None
@@ -702,32 +874,52 @@ async def async_main():
                     console.print("[bold]Available commands:[/bold]")
                     for cmd in commands:
                         console.print(f"  • {cmd}")
+                    console.print("\n[bold]Shell Mode:[/bold]")
+                    console.print("  • Type [cyan]shell[/cyan] or press [cyan]Escape[/cyan] to toggle between modes")
+                    console.print("  • In shell mode, commands are executed directly")
+                    console.print("  • [cyan]Tab[/cyan] completion for commands and file paths")
+                    console.print("  • Shell output is automatically included in next agent prompt")
                 elif user_input.lower() == 'setup':
                     create_example_configuration(config_mgr=ConfigManager(), context_ldr=ContextLoader())
                     console.print("[green]Edit files and reload to update agent context[/green]")
                 elif user_input.lower() == 'status':
                     show_status(config_mgr=ConfigManager(), context_ldr=ContextLoader())
+                elif user_input.lower() == 'shell':
+                    shell_manager.toggle_shell_mode()
+                    continue
                 elif user_input.strip() == '':
                     continue
+                elif shell_manager.is_shell_mode:
+                    # Shell mode: execute command and capture output
+                    console.print(f"[dim]$ {user_input}[/dim]")
+                    output = shell_manager.execute_shell_command(user_input)
+                    console.print(output)
+                    continue
                 else:
+                    # Agent mode
                     if agent is None:
                         console.print("[yellow]Agent not initialized. Run 'setup' first.[/yellow]")
                         continue
 
-                # Beautiful unified streaming execution 🚀
+                    # Beautiful unified streaming execution 🚀
+                    try:
+                        # Add shell context to the user input if available
+                        shell_context = shell_manager.get_shell_context_for_agent()
+                        enhanced_input = user_input
+                        if shell_context:
+                            enhanced_input = f"{shell_context}\n\nUser request: {user_input}"
 
-                try:
-                    status_message = f"Calculating: {user_input[:40]}..."
-                    status_interface.start_execution(status_message)
-                    output_message = ""
-                    running_agent = tg.create_task(
-                        agent.arun(user_input, confirmation_handler, tg, status_queue, output_queue)
-                    )
-                    user_input = None
-                except Exception as e:
-                    status_interface.stop_execution(False, str(e))
-                    console.print(f"[red]Sorry, I encountered an error: {str(e)}[/red]")
-                    logger.error(f"Agent chat error: {type(e).__name__}: {str(e)}", exc_info=True)
+                        status_message = f"Calculating: {user_input[:40]}..."
+                        status_interface.start_execution(status_message)
+                        output_message = ""
+                        running_agent = tg.create_task(
+                            agent.arun(enhanced_input, confirmation_handler, tg, status_queue, output_queue)
+                        )
+                        user_input = None
+                    except Exception as e:
+                        status_interface.stop_execution(False, str(e))
+                        console.print(f"[red]Sorry, I encountered an error: {str(e)}[/red]")
+                        logger.error(f"Agent chat error: {type(e).__name__}: {str(e)}", exc_info=True)
 
             except KeyboardInterrupt:
                 if status_interface.current_status:
