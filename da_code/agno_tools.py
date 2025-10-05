@@ -14,6 +14,9 @@ from .models import (
 import subprocess
 import os
 
+import logging
+logger = logging.getLogger(__name__)
+
 #====================================================================================================
 # Pydantics
 #====================================================================================================
@@ -425,6 +428,140 @@ def web_search(tool_input: str) -> str:
 #====================================================================================================
 # File Search Tool
 #====================================================================================================
+
+import os
+import re
+import glob
+import shutil
+import json
+
+WORKSPACE_ROOT = "/nfs/site/disks/xpg_cwf_0062/naten/naten/work/dac"
+
+def within_workspace(path: str) -> bool:
+    """Ensure the given path is within the allowed workspace."""
+    abs_path = os.path.abspath(path)
+    return abs_path.startswith(WORKSPACE_ROOT)
+
+def safe_path(path: str) -> str:
+    """Resolve and validate a path inside the workspace."""
+    abs_path = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
+    if not within_workspace(abs_path):
+        raise ValueError(f"Path {abs_path} is outside workspace")
+    return abs_path
+
+@tool(
+    name="file_tool",
+    description="Perform file operations like search, read, copy, move, and replace within the workspace",
+    instructions="""
+SUPPORTED FORMATS:
+- JSON: {"operation": "search", "pattern": "*.py", "content": "async def", "max_results": 10}
+- JSON: {"operation": "read", "path": "file.py", "start_line": 1, "end_line": 20}
+- JSON: {"operation": "copy", "source_path": "file.py", "destination_path": "copy.py"}
+- JSON: {"operation": "move", "source_path": "old.py", "destination_path": "new.py"}
+- JSON: {"operation": "replace", "path": "file.py", "search_text": "foo", "replace_text": "bar", "use_regex": false, 
+"case_sensitive": true}
+
+SEARCH TYPES:
+1. Pattern only: Find files matching glob pattern
+2. Content only: Find files containing text
+3. Combined: Both pattern and content filters
+
+EXAMPLE SEARCH:
+- {"operation": "search", "pattern": "**/*.py", "max_results": 15}
+- {"operation": "search", "content": "AsyncAgent", "max_results": 5}
+- {"operation": "search", "pattern": "*.md", "content": "TODO"}
+
+Returns:
+- For search: JSON array of matching paths and optional line matches.
+- For read: Raw text content from requested lines.
+- For copy/move/replace: Confirmation string.
+"""
+)
+def file_tool(tool_input: str) -> str:
+    """Unified file operations tool for searching, reading, copying, moving, and replacing content."""
+    logger.debug(f" file_tool input {tool_input}")
+    try:
+        # Detect JSON input or plain string
+        params = json.loads(tool_input) if tool_input.strip().startswith("{") else {"operation": "search", "pattern": tool_input}
+    except Exception:
+        return json.dumps({"error": "Invalid JSON input"})
+
+   
+    operation = params.get("operation", "search")
+
+    if operation == "search":
+        pattern = params.get("pattern") or "**/*"
+        content = params.get("content")
+        max_results = params.get("max_results", 50)
+        results = []
+
+        for path in glob.glob(safe_path(pattern), recursive=True):
+            if os.path.isfile(path):
+                if content:
+                    try:
+                        with open(path, "r", errors="ignore") as f:
+                            for i, line in enumerate(f, start=1):
+                                if content in line:
+                                    results.append({"file": path, "line": i, "text": line.strip()})
+                                    if len(results) >= max_results:
+                                        return json.dumps(results)
+                    except Exception as e:
+                        results.append({"file": path, "error": str(e)})
+                else:
+                    results.append({"file": path, "size": os.path.getsize(path)})
+                    if len(results) >= max_results:
+                        return json.dumps(results)
+        return json.dumps(results)
+
+    elif operation == "read":
+        path = safe_path(params["path"])
+        start = params.get("start_line", 1)
+        end = params.get("end_line")
+        with open(path, "r", errors="ignore") as f:
+            lines = f.readlines()
+        return "".join(lines[start:end]) if end else "".join(lines)
+
+    elif operation == "copy":
+        src = safe_path(params["source_path"])
+        dst = safe_path(params["destination_path"])
+        shutil.copy2(src, dst)
+        return f"Copied {src} to {dst}"
+
+    elif operation == "move":
+        src = safe_path(params["source_path"])
+        dst = safe_path(params["destination_path"])
+        shutil.move(src, dst)
+        return f"Moved {src} to {dst}"
+
+    elif operation == "replace":
+        path = safe_path(params["path"])
+        search_text = params["search_text"]
+        replace_text = params["replace_text"]
+        use_regex = params.get("use_regex", False)
+        case_sensitive = params.get("case_sensitive", True)
+
+        with open(path, "r", errors="ignore") as f:
+            content = f.read()
+
+        if use_regex:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            new_content, count = re.subn(search_text, replace_text, content, flags=flags)
+        else:
+            if not case_sensitive:
+                pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+                new_content, count = pattern.subn(replace_text, content)
+            else:
+                new_content = content.replace(search_text, replace_text)
+                count = content.count(search_text)
+
+        with open(path, "w") as f:
+            f.write(new_content)
+
+        return f"Replaced {count} occurrence(s) in {path}"
+
+    else:
+        return json.dumps({"error": f"Unknown operation: {operation}"})
+
 
 @tool(
     name="file_search",

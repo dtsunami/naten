@@ -13,18 +13,51 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Annotated, Dict, List, Optional, Union
 
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, ConfigDict
 
+
+from bson import ObjectId
+from pydantic import (
+    BaseModel,
+    Field,
+    ConfigDict,
+    PlainSerializer,
+    AfterValidator,
+    WithJsonSchema,
+    field_validator
+)
 logger = logging.getLogger(__name__)
 
 
 # Removed CommandConfirmationNeeded - using pure generator pattern now
 
 
+def validate_object_id(v: Any) -> ObjectId:
+    if isinstance(v, ObjectId):
+        return v
+    if ObjectId.is_valid(v):
+        return ObjectId(v)
+    raise ValueError("Invalid ObjectId")
+
+PyObjectId = Annotated[
+    Union[str, ObjectId],
+    AfterValidator(validate_object_id),
+    PlainSerializer(lambda x: str(x), return_type=str),
+    WithJsonSchema({"type": "string"}, mode="serialization"),
+]
+
+'''
+class UPM(BaseModel):
+    
+    # created at timestamp
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    # unique id
+    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
+'''
 # Agent framework removed - da_code now uses LangGraph exclusively
 
 
@@ -224,10 +257,16 @@ class ProjectContext(BaseModel):
 
 class CodeSession(BaseModel):
     """Main session model containing all command executions and context."""
+    
+    # unique id
+    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
+
     model_config = ConfigDict(
         validate_assignment=True,
         extra='allow',
-        populate_by_name=True
+        populate_by_name=True,
+        arbitrary_types_allowed = True,
+        json_encoders = {ObjectId: str}
     )
 
     # Session identification

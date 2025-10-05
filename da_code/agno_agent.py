@@ -3,10 +3,14 @@ from dotenv import load_dotenv
 load_dotenv(".env")
 
 import asyncio
+import httpx
 from agno.agent import Agent, RunEvent
 from agno.models.azure import AzureOpenAI
+from agno.models.azure import AzureAIFoundry
 from agno.db.postgres import PostgresDb
 from agno.db.sqlite import SqliteDb
+from agno.tools.reasoning import ReasoningTools
+from agno.tools.duckduckgo import DuckDuckGoTools
 #from agno.tools.duckduckgo import DuckDuckGoTools
 
 import logging
@@ -25,19 +29,25 @@ from .context import ContextLoader
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .telemetry import TelemetryManager, PerformanceTracker
 from .agno_tools import (
-    handle_todo_operation, execute_command, web_search,
+    handle_todo_operation, execute_command, web_search, file_tool,
     file_search, current_time, python_executor, git_operations, http_fetch
 )
 
 agno_agent_tools = [
     handle_todo_operation,
     execute_command,
-    web_search,
-    file_search,
+    file_tool,
     current_time,
     python_executor,
     git_operations,
-    http_fetch
+    http_fetch,
+    DuckDuckGoTools(),
+    ReasoningTools(
+            enable_think=True,
+            enable_analyze=True,
+            add_instructions=True,
+            add_few_shot=True,
+    ),
 ]
 
 
@@ -61,18 +71,33 @@ class AgnoAgent():
         logging.debug("Initialized Agent config")
 
         # 1. Configure the Azure OpenAI model
+        
+        SSL_CA_CERTS = "/etc/ca-certificates"
+        self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
         # Agno uses the AzureOpenAI class to interface with Azure's service
+        #self.llm = AzureAIFoundry(
         self.llm = AzureOpenAI(
-            id=self.config.deployment_name,
+            #id=self.config.deployment_name,
+            id="gpt-5-mini",
             api_key=self.config.api_key,
             api_version=self.config.api_version,
             azure_endpoint=self.config.azure_endpoint,
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
             timeout=self.config.agent_timeout,
-            max_retries=self.config.max_retries
+            max_retries=self.config.max_retries,
+            #http_client=self.http,
         )
         
+        self.reasoning = AzureAIFoundry(
+            id="gpt-5-mini", #TODO, add reasoning model to agent config
+            api_key=self.config.api_key,
+            azure_endpoint=self.config.azure_endpoint,
+            timeout=self.config.agent_timeout,
+            max_retries=self.config.max_retries,
+            http_client=self.http,
+            
+        )
         # try to connect to postgre, fallback to sqllite
         try:
             db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
@@ -82,9 +107,12 @@ class AgnoAgent():
 
         self.agent = Agent(
             model=self.llm,
+            #reasoning_model=self.reasoning,
             db=db,
+            session_id=str(code_session.id),
             description=self._build_system_prompt(),
             markdown=True,
+            #reasoning=True,
             add_history_to_context=True,
             add_datetime_to_context=True,
             tools=agno_agent_tools,
@@ -148,25 +176,29 @@ TODO MANAGEMENT:
                     await status_queue.put(f"Run: {run_event.event})")
                     #print(f"\nEVENT: {run_event.event}")
 
-                if run_event.event in [RunEvent.tool_call_started]:
+                elif run_event.event in [RunEvent.tool_call_started]:
                     await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
+                    logger.debug(f"Tool Call started {run_event}")
                     #print(f"\nEVENT: {run_event.event}")
                     #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
                     #print(f"TOOL CALL ARGS: {run_event.tool.tool_args}")  # type: ignore
 
-                if run_event.event in [RunEvent.tool_call_completed]:
+                elif run_event.event in [RunEvent.tool_call_completed]:
+                    logger.debug(f"Tool Call ended {run_event}")
                     await status_queue.put(f"Tool Result: {run_event.tool.tool_name} -> {run_event.tool.result}")
                     # Also send tool result to output queue for user display (consistent with confirmation flow)
-                    await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
+                    #await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
                     #print(f"\nEVENT: {run_event.event}")
                     #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
                     #print(f"TOOL CALL RESULT: {run_event.tool.result}")  # type: ignore
 
-                if run_event.event in [RunEvent.run_content]:
+                elif run_event.event in [RunEvent.run_content]:
                     if not content_started:
                         content_started = True
                     else:
                         await output_queue.put(run_event.content)
+                else:
+                    logger.error(f"Unhandled run event!!! {run_event}")
 
             else:
                 #logger.warning(f"paused run event: {run_event}")
