@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv(".env")
 
 import asyncio
+from datetime import timedelta
 import httpx
 from agno.agent import Agent, RunEvent
 from agno.models.azure import AzureOpenAI
@@ -11,7 +12,9 @@ from agno.db.postgres import PostgresDb
 from agno.db.sqlite import SqliteDb
 from agno.tools.reasoning import ReasoningTools
 from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.tools.mcp import MCPTools
+from agno.tools.mcp import MCPTools, StreamableHTTPClientParams
+from mcp.client.streamable_http import streamablehttp_client
+
 #from agno.tools.duckduckgo import DuckDuckGoTools
 
 import logging
@@ -76,13 +79,13 @@ class AgnoAgent():
 
         # 1. Configure the Azure OpenAI model
         
-        SSL_CA_CERTS = "/etc/ca-certificates"
-        self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
+        #SSL_CA_CERTS = "/etc/ca-certificates"
+        #self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
         # Agno uses the AzureOpenAI class to interface with Azure's service
         #self.llm = AzureAIFoundry(
         self.llm = AzureOpenAI(
-            #id=self.config.deployment_name,
-            id="gpt-5-mini",
+            id=self.config.deployment_name,
+            #id="gpt-5-mini",
             api_key=self.config.api_key,
             api_version=self.config.api_version,
             azure_endpoint=self.config.azure_endpoint,
@@ -99,66 +102,76 @@ class AgnoAgent():
             azure_endpoint=self.config.azure_endpoint,
             timeout=self.config.agent_timeout,
             max_retries=self.config.max_retries,
-            http_client=self.http,
-            
+            #http_client=self.http,
         )
         # try to connect to postgre, fallback to sqllite
         try:
-            db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
+            self.db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
         except:
             logging.warning("Postgre init failed, failing back to sqlite :-(")
-            db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
+            self.db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
 
         # Create MCP tools from loaded servers
-        logging.warning(f"🔧 MCP: Creating MCP tools for {len(self.mcp_servers)} servers...")
-        mcp_tools = self._create_mcp_tools()
-        logging.warning(f"🔧 MCP: Successfully created {len(mcp_tools)} MCP tools")
-        all_tools = agno_agent_tools + mcp_tools
-        logging.warning(f"🔧 MCP: Agent will have {len(all_tools)} total tools ({len(agno_agent_tools)} built-in + {len(mcp_tools)} MCP)")
-
-        self.agent = Agent(
-            model=self.llm,
-            #reasoning_model=self.reasoning,
-            db=db,
-            session_id=str(code_session.id),
-            description=self._build_system_prompt(),
-            markdown=True,
-            #reasoning=True,
-            add_history_to_context=True,
-            add_datetime_to_context=True,
-            tools=all_tools,
-            debug_mode=False, # Display the agent's thought process
-        )
+        self.mcps_json = []
+        for server_info in self.mcp_servers:
+            try:
+                client_ctx = streamablehttp_client(
+                    url=server_info.url,
+                    timeout=timedelta(seconds=300),
+                    terminate_on_close=False,
+                )
+                server_params = StreamableHTTPClientParams(
+                    url=server_info.url,
+                    #headers=...,
+                    timeout=300,
+                    terminate_on_close=False,
+                )
+                self.mcps_json.append(MCPTools(client=client_ctx, url=server_info.url, transport="streamable-http"))
+            except Exception as e:
+                logging.error(f"❌ MCP: Failed to create MCP tool for {server_info.name}: {e}")
+                continue
+        self.mcp_tools = self.mcps_json
 
         # Confirmation handler callback
         self.confirmation_handler = None
 
-        logger.info("Agno agent initialized successfully")
+    async def init_agent(self, add_mcps: list[MCPTools]=[]):
 
-    def _create_mcp_tools(self) -> list[MCPTools]:
-        """Create MCPTools instances from loaded MCP server configurations."""
-        mcp_tools = []
-
-        logging.warning(f"🛠️  MCP: _create_mcp_tools() called with {len(self.mcp_servers)} servers")
-
-        for server_info in self.mcp_servers:
+        self.mcp_tools = []
+        for mcp_tool in self.mcps_json + add_mcps:
             try:
-                logging.warning(f"🛠️  MCP: Creating tool for server '{server_info.name}' at {server_info.url}")
+                await mcp_tool.connect()
+                self.mcp_tools.append(mcp_tool)
+                logger.warning(f"Connect success for mcp {mcp_tool}")
+            except:
+                logger.warning(f"encountered and error for connect tomcp tool {mcp_tool}")
 
-                # Create HTTP-based MCP server
-                mcp_tool = MCPTools(transport="streamable-http", url=server_info.url)
-                logging.warning(f"🛠️  MCP: MCPTools instance created for {server_info.name}")
+        self.agent_tools = agno_agent_tools + self.mcp_tools
+        
+        try:
+            self.agent = Agent(
+                model=self.llm,
+                #reasoning_model=self.reasoning,
+                db=self.db,
+                session_id=str(self.code_session.id),
+                system_message=self._build_system_prompt(),
+                markdown=True,
+                #reasoning=True,
+                structured_outputs=False,
+                add_history_to_context=True,
+                add_datetime_to_context=True,
+                tools=self.agent_tools,
+                debug_mode=False, # Display the agent's thought process
+            )
+            logger.info("Agno agent initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error, failed to create agno agent! {e}")
+            for mcp_tool in self.mcp_tools:
+                await mcp_tool.close()
+                logger.warning(f"closed connection for mcp tool {mcp_tool}")
+            return False
 
-                mcp_tools.append(mcp_tool)
-                logging.warning(f"✅ MCP: Successfully created MCP tool for {server_info.name}")
-
-            except Exception as e:
-                logging.error(f"❌ MCP: Failed to create MCP tool for {server_info.name}: {e}")
-                # Continue with other servers even if one fails
-                continue
-
-        logging.warning(f"🛠️  MCP: _create_mcp_tools() returning {len(mcp_tools)} tools")
-        return mcp_tools
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt for the agent."""
@@ -178,11 +191,11 @@ CONTEXT:
 {context}
 
 INSTRUCTIONS:
-1. Use the available tools to help users with their coding tasks
+1. Use the available tools to help users with their coding tasks, ALWAYS properly **invoke** the tool do not give the tool inputs back to user.
 2. For command execution, use the execute_command tool - user confirmation is handled automatically
-4. Be thorough but efficient in your approach
-5. Provide clear explanations for your actions
-6. Always use proper tool arguments as specified in the tool descriptions
+3. Invoke tools as needed WITHOUT prompting user, tools that need confirmation will ask for it themselves.  
+4. Provide clear explanations for your actions
+5. Always use proper tool arguments as specified in the tool descriptions
 
 TODO MANAGEMENT:
 - Use the todo_file_manager tool to track work items for complex multi-step tasks
@@ -202,83 +215,98 @@ TODO MANAGEMENT:
 
         content_started = False
 
-        async for run_event in self.agent.arun(task, stream=True):
+        for mcp_tool in self.mcp_tools:
+            try:
+                await mcp_tool.connect()
+                logger.warning(f"Connect success for mcp {mcp_tool}")
+            except:
+                logger.warning(f"encountered and error for connect to mcp tool {mcp_tool}")
+        try:
+            async for run_event in self.agent.arun(task, stream=True):
 
-            
-            if not run_event.is_paused:
+                
+                if not run_event.is_paused:
 
-                if run_event.event in [RunEvent.run_started, RunEvent.run_completed]:
-                    logger.warning(f"start/stop run event: {run_event}")
-                    await status_queue.put(f"Run: {run_event.event})")
-                    #print(f"\nEVENT: {run_event.event}")
+                    if run_event.event in [RunEvent.run_started, RunEvent.run_completed]:
+                        logger.warning(f"start/stop run event: {run_event}")
+                        await status_queue.put(f"Run: {run_event.event})")
+                        #print(f"\nEVENT: {run_event.event}")
 
-                elif run_event.event in [RunEvent.tool_call_started]:
-                    await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
-                    logger.debug(f"Tool Call started {run_event}")
-                    #print(f"\nEVENT: {run_event.event}")
-                    #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
-                    #print(f"TOOL CALL ARGS: {run_event.tool.tool_args}")  # type: ignore
+                    elif run_event.event in [RunEvent.tool_call_started]:
+                        await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
+                        logger.debug(f"Tool Call started {run_event}")
+                        #print(f"\nEVENT: {run_event.event}")
+                        #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
+                        #print(f"TOOL CALL ARGS: {run_event.tool.tool_args}")  # type: ignore
 
-                elif run_event.event in [RunEvent.tool_call_completed]:
-                    logger.debug(f"Tool Call ended {run_event}")
-                    await status_queue.put(f"Tool Result: {run_event.tool.tool_name} -> {run_event.tool.result}")
-                    # Also send tool result to output queue for user display (consistent with confirmation flow)
-                    #await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
-                    #print(f"\nEVENT: {run_event.event}")
-                    #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
-                    #print(f"TOOL CALL RESULT: {run_event.tool.result}")  # type: ignore
+                    elif run_event.event in [RunEvent.tool_call_completed]:
+                        logger.debug(f"Tool Call ended {run_event}")
+                        await status_queue.put(f"Tool Result: {run_event.tool.tool_name} -> {run_event.tool.result}")
+                        # Also send tool result to output queue for user display (consistent with confirmation flow)
+                        #await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
+                        #print(f"\nEVENT: {run_event.event}")
+                        #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
+                        #print(f"TOOL CALL RESULT: {run_event.tool.result}")  # type: ignore
 
-                elif run_event.event in [RunEvent.run_content]:
-                    if not content_started:
-                        content_started = True
+                    elif run_event.event in [RunEvent.run_content]:
+                        if not content_started:
+                            content_started = True
+                        else:
+                            await output_queue.put(run_event.content)
                     else:
-                        await output_queue.put(run_event.content)
+                        logger.error(f"Unhandled run event!!! {run_event}")
+
                 else:
-                    logger.error(f"Unhandled run event!!! {run_event}")
+                    #logger.warning(f"paused run event: {run_event}")
+                    try:
+                        for tool in run_event.tools_requiring_confirmation:  # type: ignore
+                            logger.info(f"Tool {tool} asking for confirmation")
 
-            else:
-                #logger.warning(f"paused run event: {run_event}")
-                try:
-                    for tool in run_event.tools_requiring_confirmation:  # type: ignore
-                        logger.info(f"Tool {tool} asking for confirmation")
+                            confirm_arg = f"Confirm Tool [bold blue]{tool.tool_name}({tool.tool_args})[/] requires confirmation."
+                            # Ask for confirmation
+                            execution = CommandExecution(
+                                command=confirm_arg,
+                                explanation=tool.tool_args.get("explanation", ""),
+                                working_directory=tool.tool_args.get("working_directory", self.code_session.working_directory),
+                                agent_reasoning=tool.tool_args.get("reasoning", ""),
+                                related_files=tool.tool_args.get("related_files", [])
+                            )
 
-                        confirm_arg = f"Confirm Tool [bold blue]{tool.tool_name}({tool.tool_args})[/] requires confirmation."
-                        # Ask for confirmation
-                        execution = CommandExecution(
-                            command=confirm_arg,
-                            explanation=tool.tool_args.get("explanation", ""),
-                            working_directory=tool.tool_args.get("working_directory", self.code_session.working_directory),
-                            agent_reasoning=tool.tool_args.get("reasoning", ""),
-                            related_files=tool.tool_args.get("related_files", [])
-                        )
+                            # Get user confirmation using the callback
+                            logger.warning(f"🔍 EXEC: Requesting confirmation for: {execution.command}")
+                            confirmation_response = await self.confirmation_handler(execution)
 
-                        # Get user confirmation using the callback
-                        logger.warning(f"🔍 EXEC: Requesting confirmation for: {execution.command}")
-                        confirmation_response = await self.confirmation_handler(execution)
+                            tool.confirmed = False
+                            if confirmation_response.choice.lower() == "yes":
+                                tool.confirmed = True
 
-                        tool.confirmed = False
-                        if confirmation_response.choice.lower() == "yes":
-                            tool.confirmed = True
+                        async for resp in self.agent.acontinue_run(run_id=run_event.run_id, updated_tools=run_event.tools, stream=True):
+                            # Handle continuing run events the same way as the main loop
+                            logger.debug(f"Continue run event: {resp.event}, paused: {resp.is_paused}")
+                            if not resp.is_paused:
+                                if resp.event in [RunEvent.tool_call_completed]:
+                                    logger.info(f"Tool completed after confirmation: {resp.tool.tool_name} -> {resp.tool.result}")
+                                    await status_queue.put(f"Tool Result: {resp.tool.tool_name} -> {resp.tool.result}")
+                                    # CRITICAL: Also send tool result to output queue for user display
+                                    await output_queue.put(f"\n🔧 Tool Result:\n{resp.tool.result}\n")
+                                elif resp.event in [RunEvent.run_content]:
+                                    logger.debug(f"Continue run content: {resp.content}")
+                                    await output_queue.put(resp.content)
+                                else:
+                                    await status_queue.put(f"Continue: {resp.event}")
 
-                    async for resp in self.agent.acontinue_run(run_id=run_event.run_id, updated_tools=run_event.tools, stream=True):
-                        # Handle continuing run events the same way as the main loop
-                        logger.debug(f"Continue run event: {resp.event}, paused: {resp.is_paused}")
-                        if not resp.is_paused:
-                            if resp.event in [RunEvent.tool_call_completed]:
-                                logger.info(f"Tool completed after confirmation: {resp.tool.tool_name} -> {resp.tool.result}")
-                                await status_queue.put(f"Tool Result: {resp.tool.tool_name} -> {resp.tool.result}")
-                                # CRITICAL: Also send tool result to output queue for user display
-                                await output_queue.put(f"\n🔧 Tool Result:\n{resp.tool.result}\n")
-                            elif resp.event in [RunEvent.run_content]:
-                                logger.debug(f"Continue run content: {resp.content}")
-                                await output_queue.put(resp.content)
-                            else:
-                                await status_queue.put(f"Continue: {resp.event}")
-
-                except Exception as e:
-                    logger.error(f"Confirmation handling error: {type(e).__name__}: {str(e)}", exc_info=True)
-                    # Re-raise to let TaskGroup handle it properly
-                    raise
+                    except Exception as e:
+                        logger.error(f"Confirmation handling error: {type(e).__name__}: {str(e)}", exc_info=True)
+                        # Re-raise to let TaskGroup handle it properly
+                        raise
+        finally:
+            pass         
+            #for mcp_tool in self.mcp_tools:
+            #    try:
+            #        await mcp_tool.close()
+            #        logger.warning(f"Close success for mcp {mcp_tool}")
+            #    except:
+            #        logger.warning(f"encountered and error for close mcp tool {mcp_tool}")
 
     def get_session_info(self) -> Dict[str, Any]:
         """Get current session information."""

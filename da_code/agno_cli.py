@@ -731,7 +731,9 @@ async def async_main():
 
         status_interface.update_status("Initializing Agno agent...")
         agent = AgnoAgent(code_session)
-        if agent is None:
+        agent_initialized = await agent.init_agent() # need await for mcp servers
+
+        if not agent_initialized:
             status_interface.stop_execution(False, "Agent initialization failed")
             console.print("[red]Agent initialization failed. Run 'setup' to regenerate.[/red]")
         else:
@@ -928,6 +930,13 @@ async def async_main():
                 continue
             except EOFError:
                 break
+        
+            finally:
+                if agent is not None:
+                    for mcp_server in agent.mcp_tools:
+                        await mcp_server.close()
+            
+
 
 
 def main():

@@ -435,7 +435,7 @@ import glob
 import shutil
 import json
 
-WORKSPACE_ROOT = "/nfs/site/disks/xpg_cwf_0062/naten/naten/work/dac"
+WORKSPACE_ROOT = "/nfs/site/disks/xpg_cwf_0062/naten/naten"
 
 def within_workspace(path: str) -> bool:
     """Ensure the given path is within the allowed workspace."""
