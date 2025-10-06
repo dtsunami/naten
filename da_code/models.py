@@ -182,7 +182,6 @@ class MCPServerInfo(BaseModel):
 
     name: str = Field(..., description="MCP server name")
     url: str = Field(..., description="MCP server URL")
-    port: Optional[int] = Field(None, description="MCP server port")
     description: Optional[str] = Field(None, description="Server description")
     status: str = Field("unknown", description="Server status")
     tools: List[str] = Field(default_factory=list, description="Available tools")
@@ -241,7 +240,7 @@ class ToolCall(BaseModel):
 
 
 class ProjectContext(BaseModel):
-    """Project context loaded from DA.md."""
+    """Project context loaded from AGENTS.md."""
     model_config = ConfigDict(
         validate_assignment=True,
         extra='allow',
@@ -251,7 +250,7 @@ class ProjectContext(BaseModel):
     project_name: Optional[str] = Field(None, description="Project name")
     description: Optional[str] = Field(None, description="Project description")
     instructions: Optional[str] = Field(None, description="Project instructions")
-    file_content: str = Field(..., description="Full DA.md content")
+    file_content: str = Field(..., description="Full AGENTS.md content")
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

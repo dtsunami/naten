@@ -1,4 +1,4 @@
-"""Context loading for DA.md and DA.json files."""
+"""Context loading for AGENTS.md and DA.json files."""
 
 import json
 import logging
@@ -12,26 +12,26 @@ logger = logging.getLogger(__name__)
 
 
 class ContextLoader:
-    """Loads project context from DA.md and MCP server info from DA.json."""
+    """Loads project context from AGENTS.md and MCP server info from DA.json."""
 
     def __init__(self, project_root: Optional[str] = None):
         """Initialize context loader with project root directory."""
         self.project_root = Path(project_root) if project_root else Path.cwd()
-        self.da_md_path = self.project_root / "DA.md"
+        self.agents_md_path = self.project_root / "AGENTS.md"
         self.da_json_path = self.project_root / "DA.json"
 
     def load_project_context(self) -> Optional[ProjectContext]:
-        """Load project context from DA.md file."""
+        """Load project context from AGENTS.md file."""
         try:
-            if not self.da_md_path.exists():
-                logger.warning(f"DA.md not found at {self.da_md_path}")
+            if not self.agents_md_path.exists():
+                logger.warning(f"AGENTS.md not found at {self.agents_md_path}")
                 return None
 
-            with open(self.da_md_path, 'r', encoding='utf-8') as f:
+            with open(self.agents_md_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             if not content.strip():
-                logger.warning("DA.md is empty")
+                logger.warning("AGENTS.md is empty")
                 return None
 
             # Extract project name and description from markdown
@@ -46,11 +46,11 @@ class ContextLoader:
                 file_content=content
             )
 
-            logger.info(f"Loaded project context from {self.da_md_path}")
+            logger.info(f"Loaded project context from {self.agents_md_path}")
             return context
 
         except Exception as e:
-            logger.error(f"Failed to load DA.md: {e}")
+            logger.error(f"Failed to load AGENTS.md: {e}")
             return None
 
     def load_mcp_servers(self) -> List[MCPServerInfo]:
@@ -182,48 +182,80 @@ class ContextLoader:
         except Exception as e:
             logger.error(f"Failed to create sample DA.json: {e}")
 
-    def create_sample_da_md(self) -> None:
-        """Create a sample DA.md file."""
+    def create_sample_agents_md(self) -> None:
+        """Create a sample AGENTS.md file."""
         sample_content = """# Project Name
 
 Brief description of your project goes here.
 
-## Instructions
+## Agent Instructions
 
-Instructions for the AI agent on how to work with this project:
+Instructions for the da_code AI agent on how to work with this project:
 
-- Key guidelines
-- Important files and directories
-- Coding standards
-- Testing procedures
-- Deployment notes
+### Development Workflow
+- Preferred coding patterns and conventions
+- Testing approach (unit tests, integration tests, etc.)
+- Git workflow and commit message style
+- Code review process
 
-## Architecture
+### Project Structure
+- Key directories and their purposes
+- Important configuration files
+- Entry points and main modules
+- Documentation locations
 
-Description of the project architecture, key components, and how they interact.
+### Tools and Technologies
+- Programming languages and frameworks
+- Build tools and package managers
+- Development dependencies
+- Deployment tools
 
-## Development Guidelines
+## Coding Standards
 
-- Code style preferences
-- File organization
-- Dependencies management
-- Environment setup
+### Style Guidelines
+- Code formatting preferences
+- Naming conventions
+- Comment and documentation style
+- Error handling patterns
+
+### Best Practices
+- Performance considerations
+- Security guidelines
+- Accessibility requirements
+- Browser/platform compatibility
+
+## Agent Behavior
+
+### Preferred Actions
+- Always run tests after code changes
+- Use specific linting/formatting tools
+- Follow specific commit patterns
+- Ask for confirmation before major changes
+
+### Project Context
+- Domain-specific knowledge the agent should know
+- Business logic and requirements
+- Integration points with external systems
+- Known issues or technical debt
 
 ## Important Files
 
-- List key files and their purposes
-- Configuration files
-- Entry points
-- Documentation
+- `src/main.py` - Application entry point
+- `tests/` - Test suite location
+- `requirements.txt` - Python dependencies
+- `README.md` - Project documentation
+- `.env.example` - Environment configuration template
 """
 
         try:
-            with open(self.da_md_path, 'w', encoding='utf-8') as f:
+            with open(self.agents_md_path, 'w', encoding='utf-8') as f:
                 f.write(sample_content)
 
-            logger.info(f"Created sample DA.md at {self.da_md_path}")
+            logger.info(f"Created sample AGENTS.md at {self.agents_md_path}")
+            print(f"\n📝 Created sample AGENTS.md file at {self.agents_md_path}")
+            print("💡 Edit this file to provide context and instructions for the AI agent")
         except Exception as e:
-            logger.error(f"Failed to create sample DA.md: {e}")
+            logger.error(f"Failed to create sample AGENTS.md: {e}")
 
 
 async def check_mcp_server_health(server: MCPServerInfo) -> bool:

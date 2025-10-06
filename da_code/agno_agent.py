@@ -11,6 +11,7 @@ from agno.db.postgres import PostgresDb
 from agno.db.sqlite import SqliteDb
 from agno.tools.reasoning import ReasoningTools
 from agno.tools.duckduckgo import DuckDuckGoTools
+from agno.tools.mcp import MCPTools
 #from agno.tools.duckduckgo import DuckDuckGoTools
 
 import logging
@@ -56,14 +57,17 @@ class AgnoAgent():
 
     def __init__(self, code_session: CodeSession):
         """Initialize the Agno agent."""
-        
+
         self.code_session = code_session
 
         logging.debug("Creating context loader")
         self.working_dir = os.getcwd()
         self.context_ldr = ContextLoader()
         self.context = self.context_ldr.load_project_context()
-        mcp_servers = self.context_ldr.load_mcp_servers()
+        self.mcp_servers = self.context_ldr.load_mcp_servers()
+        logging.warning(f"🔌 MCP: Loaded {len(self.mcp_servers)} MCP servers from DA.json")
+        for server in self.mcp_servers:
+            logging.warning(f"🔌 MCP: Found server '{server.name}' at {server.url}")
         logging.debug("Initialized context loader")
 
         logging.debug("Creating agent config")
@@ -105,6 +109,13 @@ class AgnoAgent():
             logging.warning("Postgre init failed, failing back to sqlite :-(")
             db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
 
+        # Create MCP tools from loaded servers
+        logging.warning(f"🔧 MCP: Creating MCP tools for {len(self.mcp_servers)} servers...")
+        mcp_tools = self._create_mcp_tools()
+        logging.warning(f"🔧 MCP: Successfully created {len(mcp_tools)} MCP tools")
+        all_tools = agno_agent_tools + mcp_tools
+        logging.warning(f"🔧 MCP: Agent will have {len(all_tools)} total tools ({len(agno_agent_tools)} built-in + {len(mcp_tools)} MCP)")
+
         self.agent = Agent(
             model=self.llm,
             #reasoning_model=self.reasoning,
@@ -115,7 +126,7 @@ class AgnoAgent():
             #reasoning=True,
             add_history_to_context=True,
             add_datetime_to_context=True,
-            tools=agno_agent_tools,
+            tools=all_tools,
             debug_mode=False, # Display the agent's thought process
         )
 
@@ -123,6 +134,31 @@ class AgnoAgent():
         self.confirmation_handler = None
 
         logger.info("Agno agent initialized successfully")
+
+    def _create_mcp_tools(self) -> list[MCPTools]:
+        """Create MCPTools instances from loaded MCP server configurations."""
+        mcp_tools = []
+
+        logging.warning(f"🛠️  MCP: _create_mcp_tools() called with {len(self.mcp_servers)} servers")
+
+        for server_info in self.mcp_servers:
+            try:
+                logging.warning(f"🛠️  MCP: Creating tool for server '{server_info.name}' at {server_info.url}")
+
+                # Create HTTP-based MCP server
+                mcp_tool = MCPTools(transport="streamable-http", url=server_info.url)
+                logging.warning(f"🛠️  MCP: MCPTools instance created for {server_info.name}")
+
+                mcp_tools.append(mcp_tool)
+                logging.warning(f"✅ MCP: Successfully created MCP tool for {server_info.name}")
+
+            except Exception as e:
+                logging.error(f"❌ MCP: Failed to create MCP tool for {server_info.name}: {e}")
+                # Continue with other servers even if one fails
+                continue
+
+        logging.warning(f"🛠️  MCP: _create_mcp_tools() returning {len(mcp_tools)} tools")
+        return mcp_tools
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt for the agent."""

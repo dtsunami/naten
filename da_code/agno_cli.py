@@ -369,9 +369,9 @@ def create_example_configuration(config_mgr: ConfigManager, context_ldr: Context
         # Create sample environment file
         config_mgr.create_sample_env()
 
-        # Create sample DA files if they don't exist
-        if not Path('DA.md').exists():
-            context_ldr.create_sample_da_md()
+        # Create sample context files if they don't exist
+        if not Path('AGENTS.md').exists():
+            context_ldr.create_sample_agents_md()
 
         if not Path('DA.json').exists():
             context_ldr.create_sample_da_json()
@@ -379,7 +379,7 @@ def create_example_configuration(config_mgr: ConfigManager, context_ldr: Context
         print("\n✅ Setup complete!")
         print("\nNext steps:")
         print("1. Edit .env with your Azure OpenAI credentials")
-        print("2. Edit DA.md with your project information")
+        print("2. Edit AGENTS.md with your project information")
         print("3. Edit DA.json with your MCP server configuration")
         print("4. Run 'da_code status' to verify configuration")
         print("5. Run 'da_code' to start interactive session")
@@ -401,9 +401,9 @@ def show_status(config_mgr: ConfigManager, context_ldr: ContextLoader) -> int:
         print("\n=== Project Context ===")
         project_context = context_ldr.load_project_context()
         if project_context:
-            print(f"✓ DA.md loaded: {project_context.project_name or 'Unnamed project'}")
+            print(f"✓ AGENTS.md loaded: {project_context.project_name or 'Unnamed project'}")
         else:
-            print("✗ DA.md not found or empty")
+            print("✗ AGENTS.md not found or empty")
 
         # Check MCP servers
         mcp_servers = context_ldr.load_mcp_servers()

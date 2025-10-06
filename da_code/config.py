@@ -133,12 +133,12 @@ class ConfigManager:
 
         # Check file existence
         env_file = Path('.env')
-        da_md = Path('DA.md')
+        agents_md = Path('AGENTS.md')
         da_json = Path('DA.json')
 
         print(f"\\n=== Project Files ===")
         print(f".env file: {'✓' if env_file.exists() else '✗'} {env_file.absolute()}")
-        print(f"DA.md file: {'✓' if da_md.exists() else '✗'} {da_md.absolute()}")
+        print(f"AGENTS.md file: {'✓' if agents_md.exists() else '✗'} {agents_md.absolute()}")
         print(f"DA.json file: {'✓' if da_json.exists() else '✗'} {da_json.absolute()}")
 
         if not azure_endpoint or not api_key:
