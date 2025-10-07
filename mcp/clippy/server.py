@@ -125,7 +125,7 @@ class ClippyServer:
         }
 
     def setup_routes(self):
-        """Setup FastAPI routes for MCP protocol."""
+        """Setup FastAPI routes for MCP JSON-RPC protocol."""
 
         @self.app.get("/")
         async def root():
@@ -137,46 +137,103 @@ class ClippyServer:
                 "connection_prompt": self.generate_connection_prompt()
             }
 
-        @self.app.get("/mcp/tools")
-        async def list_tools():
-            """List available MCP tools."""
-            return {"tools": list(self.tools.values())}
-
-        @self.app.post("/mcp/call/{tool_name}")
-        async def call_tool(tool_name: str, request: MCPRequest):
-            """Execute an MCP tool."""
-            if tool_name not in self.tools:
-                raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
-
+        @self.app.post("/")
+        async def handle_jsonrpc(request: dict):
+            """Handle MCP JSON-RPC requests."""
             try:
-                if tool_name == "read_text":
-                    result = self._read_clipboard_text()
-                elif tool_name == "read_image":
-                    image_format = request.arguments.get("format", "PNG")
-                    result = self._read_clipboard_image(image_format)
-                elif tool_name == "write_text":
-                    text = request.arguments.get("text")
-                    if not text:
-                        result = "❌ Error: 'text' parameter is required"
-                    else:
-                        result = self._write_clipboard_text(text)
-                elif tool_name == "write_image":
-                    image_data = request.arguments.get("image_data")
-                    image_format = request.arguments.get("format", "PNG")
-                    if not image_data:
-                        result = "❌ Error: 'image_data' parameter is required"
-                    else:
-                        result = self._write_clipboard_image(image_data, image_format)
-                else:
-                    raise HTTPException(status_code=400, detail=f"Unknown tool: {tool_name}")
+                # Extract JSON-RPC fields
+                jsonrpc = request.get("jsonrpc")
+                method = request.get("method")
+                params = request.get("params", {})
+                request_id = request.get("id")
 
-                return MCPResponse(content=[{"type": "text", "text": result}])
+                if jsonrpc != "2.0":
+                    return {
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                        "id": request_id
+                    }
+
+                # Handle tools/list method
+                if method == "tools/list":
+                    return {
+                        "jsonrpc": "2.0",
+                        "result": {"tools": list(self.tools.values())},
+                        "id": request_id
+                    }
+
+                # Handle tools/call method
+                elif method == "tools/call":
+                    tool_name = params.get("name")
+                    arguments = params.get("arguments", {})
+
+                    if not tool_name:
+                        return {
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32602, "message": "Missing tool name"},
+                            "id": request_id
+                        }
+
+                    if tool_name not in self.tools:
+                        return {
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32602, "message": f"Tool '{tool_name}' not found"},
+                            "id": request_id
+                        }
+
+                    try:
+                        # Execute the tool
+                        if tool_name == "read_text":
+                            result = self._read_clipboard_text()
+                        elif tool_name == "read_image":
+                            image_format = arguments.get("format", "PNG")
+                            result = self._read_clipboard_image(image_format)
+                        elif tool_name == "write_text":
+                            text = arguments.get("text")
+                            if not text:
+                                result = "❌ Error: 'text' parameter is required"
+                            else:
+                                result = self._write_clipboard_text(text)
+                        elif tool_name == "write_image":
+                            image_data = arguments.get("image_data")
+                            image_format = arguments.get("format", "PNG")
+                            if not image_data:
+                                result = "❌ Error: 'image_data' parameter is required"
+                            else:
+                                result = self._write_clipboard_image(image_data, image_format)
+                        else:
+                            return {
+                                "jsonrpc": "2.0",
+                                "error": {"code": -32602, "message": f"Unknown tool: {tool_name}"},
+                                "id": request_id
+                            }
+
+                        return {
+                            "jsonrpc": "2.0",
+                            "result": result,
+                            "id": request_id
+                        }
+
+                    except Exception as e:
+                        return {
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32000, "message": f"Tool execution error: {str(e)}"},
+                            "id": request_id
+                        }
+
+                else:
+                    return {
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32601, "message": "Method not found"},
+                        "id": request_id
+                    }
 
             except Exception as e:
-                return MCPResponse(
-                    content=[{"type": "text", "text": f"Error: {str(e)}"}],
-                    isError=True
-                )
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32700, "message": f"Parse error: {str(e)}"},
+                    "id": None
+                }
 
         @self.app.get("/mcp/connect")
         async def get_connection_prompt():
