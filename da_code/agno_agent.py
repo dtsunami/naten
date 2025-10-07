@@ -82,14 +82,16 @@ class AgnoAgent():
         logging.debug("Initialized Agent config")
 
         # 1. Configure the Azure OpenAI model
+        logging.warning(f"Deployment Name {self.config.deployment_name}")
+
         
         #SSL_CA_CERTS = "/etc/ca-certificates"
         #self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
         # Agno uses the AzureOpenAI class to interface with Azure's service
-        #self.llm = AzureAIFoundry(
-        self.llm = AzureOpenAI(
-            id=self.config.deployment_name,
-            #id="gpt-5-mini",
+        self.llm = AzureAIFoundry(
+        #self.llm = AzureOpenAI(
+            #id=self.config.deployment_name,
+            id="gpt-5-mini",
             api_key=self.config.api_key,
             api_version=self.config.api_version,
             azure_endpoint=self.config.azure_endpoint,
@@ -100,7 +102,7 @@ class AgnoAgent():
             #http_client=self.http,
         )
         
-        self.reasoning = AzureAIFoundry(
+        self.reasoning = AzureOpenAI(
             id="gpt-5-mini", #TODO, add reasoning model to agent config
             api_key=self.config.api_key,
             azure_endpoint=self.config.azure_endpoint,
@@ -139,7 +141,7 @@ class AgnoAgent():
         logging.info(f"🔧 Agent: Loaded {len(agno_agent_tools)} built-in tools + {len(mcp_tools)} MCP tools")
 
         self.system_message = self._build_system_prompt()
-        logging.warning(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
+        logging.info(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
 
         self.agent = Agent(
             model=self.llm,
@@ -148,7 +150,7 @@ class AgnoAgent():
             session_id=str(self.code_session.id),
             system_message=self.system_message,
             markdown=True,
-            #reasoning=True,
+            reasoning=True,
             structured_outputs=False,
             add_history_to_context=True,
             add_datetime_to_context=True,

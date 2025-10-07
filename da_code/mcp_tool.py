@@ -142,7 +142,7 @@ The tool_input is a JSON string that gets parsed and forwarded to the Tool insta
 Any tool arguments(query, command, search, ...) should be supplied in the args portion of the JSON!
 """
         )
-        def mcp_server_tool(tool_input: str, url=server_url, capabilities=capabilities_text) -> str:
+        def mcp_server_tool(tool_input: str, url: str=server_url, capabilities: str=capabilities_text) -> str:
             """Single tool representing all MCP server capabilities."""
             try:
                 # Parse input
