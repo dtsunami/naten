@@ -437,46 +437,61 @@ import glob
 import shutil
 import json
 
-WORKSPACE_ROOT = "/nfs/site/disks/xpg_cwf_0062/naten/naten"
+def get_workspace_root() -> str:
+    """Get workspace root from environment variable or current directory."""
+    return os.getenv('DA_CODE_WORKSPACE_ROOT', os.getcwd())
 
 def within_workspace(path: str) -> bool:
     """Ensure the given path is within the allowed workspace."""
+    workspace_root = get_workspace_root()
     abs_path = os.path.abspath(path)
-    return abs_path.startswith(WORKSPACE_ROOT)
+    abs_workspace = os.path.abspath(workspace_root)
+    return abs_path.startswith(abs_workspace)
 
 def safe_path(path: str) -> str:
     """Resolve and validate a path inside the workspace."""
-    abs_path = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
+    workspace_root = get_workspace_root()
+    abs_path = os.path.abspath(os.path.join(workspace_root, path))
     if not within_workspace(abs_path):
-        raise ValueError(f"Path {abs_path} is outside workspace")
+        raise ValueError(f"Path {abs_path} is outside workspace {workspace_root}")
     return abs_path
 
 @tool(
     name="file_tool",
-    description="Perform file operations like search, read, copy, move, and replace within the workspace",
+    description="Perform file operations: search, read, list directories, copy, move, and replace within the workspace",
     instructions="""
-SUPPORTED FORMATS:
+SUPPORTED OPERATIONS:
+• search - Find files by pattern/content
+• read - Read file contents
+• list - List directory contents with emoji file types
+• copy - Copy files
+• move - Move/rename files
+• replace - Find and replace text in files
+
+FORMATS:
 - JSON: {"operation": "search", "pattern": "*.py", "content": "async def", "max_results": 10}
 - JSON: {"operation": "read", "path": "file.py", "start_line": 1, "end_line": 20}
+- JSON: {"operation": "list", "path": "subdir", "max_depth": 2, "show_hidden": false}
 - JSON: {"operation": "copy", "source_path": "file.py", "destination_path": "copy.py"}
 - JSON: {"operation": "move", "source_path": "old.py", "destination_path": "new.py"}
-- JSON: {"operation": "replace", "path": "file.py", "search_text": "foo", "replace_text": "bar", "use_regex": false, 
-"case_sensitive": true}
+- JSON: {"operation": "replace", "path": "file.py", "search_text": "foo", "replace_text": "bar"}
 
-SEARCH TYPES:
-1. Pattern only: Find files matching glob pattern
-2. Content only: Find files containing text
-3. Combined: Both pattern and content filters
+LIST DIRECTORY:
+- Default: Current directory, depth 1, no hidden files
+- Emoji file types: 🐍 Python, 🟨 JS/TS, 📖 Markdown, ⚙️ Config, 📁 Directories
+- Returns JSON with structured file/directory info
 
-EXAMPLE SEARCH:
-- {"operation": "search", "pattern": "**/*.py", "max_results": 15}
-- {"operation": "search", "content": "AsyncAgent", "max_results": 5}
-- {"operation": "search", "pattern": "*.md", "content": "TODO"}
+EXAMPLES:
+- {"operation": "list", "path": "da_code"}
+- {"operation": "list", "path": ".", "max_depth": 2}
+- {"operation": "search", "pattern": "**/*.py"}
+- {"operation": "read", "path": "README.md"}
 
 Returns:
-- For search: JSON array of matching paths and optional line matches.
-- For read: Raw text content from requested lines.
-- For copy/move/replace: Confirmation string.
+- search: JSON array of file paths and line matches
+- read: Raw text content
+- list: JSON object with directory structure and emoji file types
+- copy/move/replace: Confirmation string
 """
 )
 def file_tool(tool_input: str) -> str:
@@ -560,6 +575,99 @@ def file_tool(tool_input: str) -> str:
             f.write(new_content)
 
         return f"Replaced {count} occurrence(s) in {path}"
+
+    elif operation == "list":
+        # Enhanced directory listing with emoji file types
+        path = safe_path(params.get("path", "."))
+        show_hidden = params.get("show_hidden", False)
+        max_depth = params.get("max_depth", 1)
+
+        def get_file_emoji(filename):
+            """Get emoji for file type"""
+            name_lower = filename.lower()
+            if name_lower.endswith(('.py', '.pyw')):
+                return "🐍"
+            elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
+                return "🟨"
+            elif name_lower.endswith(('.md', '.markdown')):
+                return "📖"
+            elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
+                return "⚙️"
+            elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
+                return "🔧"
+            elif name_lower.endswith(('.txt', '.log')):
+                return "📝"
+            elif name_lower.endswith(('.sh', '.bash', '.zsh')):
+                return "🔸"
+            elif name_lower.endswith(('.html', '.htm', '.css')):
+                return "🌐"
+            elif name_lower.endswith(('.sql', '.db', '.sqlite')):
+                return "🗄️"
+            elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
+                return "🖼️"
+            else:
+                return "📄"
+
+        def list_directory(dir_path, current_depth=0):
+            """Recursively list directory contents"""
+            items = []
+            if current_depth >= max_depth:
+                return items
+
+            try:
+                for item in sorted(Path(dir_path).iterdir()):
+                    # Skip hidden files unless requested
+                    if not show_hidden and item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
+                        continue
+
+                    # Skip common ignored directories
+                    if item.name in {'.git', '__pycache__', '.vscode', 'node_modules'}:
+                        continue
+
+                    rel_path = os.path.relpath(item, path)
+                    if item.is_dir():
+                        items.append({
+                            "name": rel_path + "/",
+                            "type": "directory",
+                            "emoji": "📁",
+                            "size": None
+                        })
+                        # Recursively list subdirectories if depth allows
+                        if current_depth + 1 < max_depth:
+                            subitems = list_directory(item, current_depth + 1)
+                            items.extend(subitems)
+                    else:
+                        size = item.stat().st_size
+                        if size < 1024:
+                            size_str = f"{size}B"
+                        elif size < 1024*1024:
+                            size_str = f"{size//1024}KB"
+                        else:
+                            size_str = f"{size//(1024*1024)}MB"
+
+                        items.append({
+                            "name": rel_path,
+                            "type": "file",
+                            "emoji": get_file_emoji(item.name),
+                            "size": size_str
+                        })
+            except (OSError, PermissionError) as e:
+                return [{"error": f"Cannot access {dir_path}: {str(e)}"}]
+
+            return items
+
+        if not os.path.exists(path):
+            return json.dumps({"error": f"Path does not exist: {path}"})
+
+        if not os.path.isdir(path):
+            return json.dumps({"error": f"Path is not a directory: {path}"})
+
+        results = list_directory(path)
+        return json.dumps({
+            "path": path,
+            "items": results,
+            "total_items": len(results)
+        })
 
     else:
         return json.dumps({"error": f"Unknown operation: {operation}"})

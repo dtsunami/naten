@@ -21,6 +21,7 @@ from agno.tools.duckduckgo import DuckDuckGoTools
 import logging
 logger = logging.getLogger(__name__)
 
+
 from .models import (
     AgentConfig, CodeSession, CommandExecution, CommandStatus,
     LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, UserResponse, da_mongo
@@ -60,19 +61,20 @@ agno_agent_tools = [
 class AgnoAgent():
     """Agno agent with correct async HIL pattern."""
 
-    def __init__(self, code_session: CodeSession):
+    def __init__(self, code_session: CodeSession, cwd_context: str = None):
         """Initialize the Agno agent."""
 
         self.code_session = code_session
+        self.cwd_context = cwd_context
 
         logging.debug("Creating context loader")
         self.working_dir = os.getcwd()
         self.context_ldr = ContextLoader()
         self.context = self.context_ldr.load_project_context()
         self.mcp_servers = self.context_ldr.load_mcp_servers()
-        logging.warning(f"🔌 MCP: Loaded {len(self.mcp_servers)} MCP servers from DA.json")
+        logging.info(f"🔌 MCP: Loaded {len(self.mcp_servers)} MCP servers from DA.json")
         for server in self.mcp_servers:
-            logging.warning(f"🔌 MCP: Found server '{server.name}' at {server.url}")
+            logging.info(f"🔌 MCP: Found server '{server.name}' at {server.url}")
         logging.debug("Initialized context loader")
 
         logging.debug("Creating agent config")
@@ -120,7 +122,7 @@ class AgnoAgent():
         for server in self.mcp_servers:
             url = server.url
             tool_name = getattr(server, 'name', None)
-            logging.warning(f"🔌 MCP: Loading {url} as '{tool_name or 'auto-named'}'")
+            logging.info(f"🔌 MCP: Loading {url} as '{tool_name or 'auto-named'}'")
             try:
                 mcp_tool = mcp2tool(url, tool_name)
                 if mcp_tool:
@@ -134,14 +136,17 @@ class AgnoAgent():
 
         # Set up tools list with MCP tools
         self.agent_tools = agno_agent_tools + mcp_tools
-        logging.warning(f"🔧 Agent: Loaded {len(agno_agent_tools)} built-in tools + {len(mcp_tools)} MCP tools")
+        logging.info(f"🔧 Agent: Loaded {len(agno_agent_tools)} built-in tools + {len(mcp_tools)} MCP tools")
+
+        self.system_message = self._build_system_prompt()
+        logging.warning(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
 
         self.agent = Agent(
             model=self.llm,
             #reasoning_model=self.reasoning,
             db=self.db,
             session_id=str(self.code_session.id),
-            system_message=self._build_system_prompt(),
+            system_message=self.system_message,
             markdown=True,
             #reasoning=True,
             structured_outputs=False,
@@ -160,31 +165,37 @@ class AgnoAgent():
         context_parts = []
 
         if self.code_session.project_context:
-            context_parts.append(f"Project: {self.code_session.project_context.project_name}")
+            context_parts.append(f"  + Name: {self.code_session.project_context.project_name}")
             if self.code_session.project_context.description:
-                context_parts.append(f"Description: {self.code_session.project_context.description}")
+                context_parts.append(f"  + Description: {self.code_session.project_context.description}")
 
-        context_parts.append(f"Working Directory: {self.code_session.working_directory}")
+        context_parts.append(f"\n\n📂 Working Directory: {self.code_session.working_directory}")
+
+        # Add current directory listing if available
+        if self.cwd_context:
+            context_parts.append(f"{self.cwd_context}\n\n")
+
         context = "\n".join(context_parts) if context_parts else "No additional context available."
 
-        return f"""You are da_code, an AI coding assistant with access to tools for command execution and file operations.
+        return f"""🤖 You are da_code, an AI coding assistant with access to tools for command execution and file operations.
 
-CONTEXT:
+📋 PROJECT CONTEXT:
 {context}
 
-INSTRUCTIONS:
-1. Use the available tools to help users with their coding tasks, ALWAYS properly **invoke** the tool do not give the tool inputs back to user.
-2. For command execution, use the execute_command tool - user confirmation is handled automatically
-3. Invoke tools as needed WITHOUT prompting user, tools that need confirmation will ask for it themselves.  
-4. Provide clear explanations for your actions
-5. Always use proper tool arguments as specified in the tool descriptions
+⚡ CORE INSTRUCTIONS:
 
-TODO MANAGEMENT:
-- Use the todo_file_manager tool to track work items for complex multi-step tasks
-- Read existing todos at the start: {{"operation": "read"}}
-- Create/update todos when planning work: {{"operation": "create", "content": "markdown todo list"}}
-- Use proper markdown format with checkboxes: `- [ ] Task description`
-- Mark completed items: `- [x] Completed task`
+1. 🔧 Use available tools to help with coding tasks - ALWAYS properly **invoke** tools, never give tool inputs back to user
+2. 💻 For command execution, use execute_command tool - user confirmation is handled automatically
+3. 🚀 Invoke tools as needed WITHOUT prompting user - tools that need confirmation will ask for it themselves
+4. ✅ Always track and update todos to ensure you don't lose track of planned items
+5. 📝 Always use proper tool arguments as specified in tool descriptions
+
+📌 TODO MANAGEMENT:
+  • 📖 Use todo_file_manager tool to track work items for complex multi-step tasks
+  • 🔍 Read existing todos at start: {{"operation": "read"}}
+  • ✏️  Create/update todos when planning: {{"operation": "create", "content": "markdown todo list"}}
+  • ☐ Use proper markdown format with checkboxes: `- [ ] Task description`
+  • ✅ Mark completed items: `- [x] Completed task`
 
 """
 

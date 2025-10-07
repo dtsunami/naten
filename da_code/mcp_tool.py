@@ -1,10 +1,11 @@
 import json
-import logging
 import requests
 from typing import Callable
 from agno.tools import tool
 
+import logging
 logger = logging.getLogger(__name__)
+
 
 def mcp2tool(server_url: str, tool_name: str = None) -> Callable:
     """Convert MCP server to single Agno tool representing all capabilities.
@@ -68,7 +69,7 @@ def mcp2tool(server_url: str, tool_name: str = None) -> Callable:
 
         # Log the raw MCP server data for analysis
         logger.info(f"🔍 MCP: Raw server response:")
-        logger.warning(f"🔍 MCP: Full data: \n\n{json.dumps(data, indent=2)}\n\n")
+        logger.info(f"🔍 MCP: Full data: \n\n{json.dumps(data, indent=2)}\n\n")
         logger.info(f"🔍 MCP: Tools array: {json.dumps(tools_info, indent=2)}")
 
         # Log individual tool details
@@ -112,7 +113,7 @@ def mcp2tool(server_url: str, tool_name: str = None) -> Callable:
 
         capabilities_text = "".join(capabilities)
 
-        logger.warning(f"🔧 MCP: capabilities_text\n\n{capabilities_text}\n\n")
+        logger.info(f"🔧 MCP: capabilities_text\n\n{capabilities_text}\n\n")
 
         # Log tool creation details
         logger.info(f"🔧 MCP: Creating tool '{tool_name}' for {server_url}")

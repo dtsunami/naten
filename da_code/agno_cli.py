@@ -232,7 +232,7 @@ def get_splash_screen() -> str:
 ██████╔╝██║  ██║    ╚██████╗╚██████╔╝██████╔╝███████╗
 ╚═════╝ ╚═╝  ╚═╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 
-    🤖 Agentic CLI with LangChain & Azure OpenAI 🚀
+    🤖 Agentic CLI with Agno & Azure OpenAI 🚀
     """
 
     return ascii_art
@@ -240,7 +240,7 @@ def get_splash_screen() -> str:
 def get_random_taglines() -> List[str]:
     """Get random taglines for variety."""
     return [
-        "🤖 Agentic CLI with LangChain & Azure OpenAI 🚀",
+        "🤖 Agentic CLI with Agno & Azure OpenAI 🚀",
         "🧠 AI-Powered Command Line Assistant 🔧",
         "⚡ Smart Automation with Human Oversight 🛡️",
         "🎯 Precision Coding with AI Intelligence 💡",
@@ -317,7 +317,7 @@ def show_splash(style: str = "default", mini: bool = False) -> None:
         # Add random tagline
         taglines = get_random_taglines()
         random_tagline = random.choice(taglines)
-        splash = splash.replace("🤖 Agentic CLI with LangChain & Azure OpenAI 🚀", random_tagline)
+        splash = splash.replace("🤖 Agentic CLI with Agno & Azure OpenAI 🚀", random_tagline)
 
     # Apply styling
     if style == "gradient":
@@ -658,6 +658,243 @@ async def async_prompt_text(message: str, default: str = None) -> str:
     )
 
 
+def get_file_emoji(filename: str) -> str:
+    """Get emoji for file type"""
+    name_lower = filename.lower()
+    if name_lower.endswith(('.py', '.pyw')):
+        return "🐍"
+    elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
+        return "🟨"
+    elif name_lower.endswith(('.md', '.markdown')):
+        return "📖"
+    elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
+        return "⚙️"
+    elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
+        return "🔧"
+    elif name_lower.endswith(('.txt', '.log')):
+        return "📝"
+    elif name_lower.endswith(('.sh', '.bash', '.zsh')):
+        return "🔸"
+    elif name_lower.endswith(('.html', '.htm', '.css')):
+        return "🌐"
+    elif name_lower.endswith(('.sql', '.db', '.sqlite')):
+        return "🗄️"
+    elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
+        return "🖼️"
+    else:
+        return "📄"
+
+
+def calculate_directory_activity_score(dir_path: Path, current_time: float) -> float:
+    """Calculate activity score using max(avg_file_activity, directory_activity)"""
+    try:
+        dir_stat = dir_path.stat()
+        directory_update_delta = current_time - dir_stat.st_mtime
+
+        # Get all file update deltas
+        file_deltas = []
+        for file_path in dir_path.rglob('*'):
+            if (file_path.is_file() and
+                not file_path.name.startswith('.') and
+                file_path.name not in {'__pycache__', '.pyc', '.pyo'}):
+                file_delta = current_time - file_path.stat().st_mtime
+                file_deltas.append(file_delta)
+
+        if not file_deltas:
+            return directory_update_delta
+
+        avg_file_activity = sum(file_deltas) / len(file_deltas)
+
+        # Your scoring formula: max of average file activity vs directory activity
+        score = max(avg_file_activity, directory_update_delta)
+        return score
+
+    except (OSError, PermissionError):
+        return float('inf')  # Inaccessible = lowest priority
+
+
+def get_activity_ranked_directories(working_dir: str, top_n: int = 3) -> list:
+    """Get directories ranked by recent activity score"""
+    current_time = time.time()
+    scored_dirs = []
+    path = Path(working_dir)
+
+    ignored = {'.git', '__pycache__', '.vscode', 'node_modules', '.pytest_cache'}
+
+    for item in path.iterdir():
+        if (item.is_dir() and
+            not item.name.startswith('.') and
+            item.name not in ignored):
+            score = calculate_directory_activity_score(item, current_time)
+            scored_dirs.append((item.name, score))
+
+    # Sort by score (lower = more recent activity)
+    scored_dirs.sort(key=lambda x: x[1])
+    return scored_dirs[:top_n]
+
+
+def get_subdirectory_preview(working_dir: str, subdir_name: str, max_files: int = 4) -> str:
+    """Get preview of subdirectory contents with emoji file types"""
+    subdir_path = Path(working_dir) / subdir_name
+    if not subdir_path.exists() or not subdir_path.is_dir():
+        return ""
+
+    preview_lines = []
+    file_count = 0
+    total_files = 0
+
+    try:
+        # Get files sorted by size (larger files often more important)
+        files = []
+        for item in subdir_path.iterdir():
+            if item.is_file() and not item.name.startswith('.'):
+                try:
+                    size = item.stat().st_size
+                    files.append((item.name, size))
+                    total_files += 1
+                except (OSError, PermissionError):
+                    continue
+
+        # Sort by size descending, then by name
+        files.sort(key=lambda x: (-x[1], x[0]))
+
+        # Show top files with emojis
+        for filename, size in files[:max_files]:
+            if size < 1024:
+                size_str = f"{size}B"
+            elif size < 1024*1024:
+                size_str = f"{size//1024}KB"
+            else:
+                size_str = f"{size//(1024*1024)}MB"
+
+            emoji = get_file_emoji(filename)
+            preview_lines.append(f"  └── {emoji} {filename} ({size_str})")
+            file_count += 1
+
+        # Add summary if there are more files
+        if total_files > max_files:
+            remaining = total_files - max_files
+            preview_lines.append(f"  └── ... and {remaining} more files")
+
+    except (OSError, PermissionError):
+        preview_lines.append(f"  └── (unable to read {subdir_name})")
+
+    return "\n".join(preview_lines)
+
+
+def format_time_delta(seconds: float) -> str:
+    """Format time delta in human readable form"""
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    elif seconds < 3600:
+        return f"{int(seconds/60)}m ago"
+    elif seconds < 86400:
+        return f"{int(seconds/3600)}h ago"
+    else:
+        return f"{int(seconds/86400)}d ago"
+
+
+def get_directory_listing(working_dir: str) -> tuple[str, float]:
+    """Get integrated directory listing with subdirectory previews and time deltas."""
+    try:
+        path = Path(working_dir)
+        listing = []
+        current_time = time.time()
+
+        # Get files/dirs, skip ignored patterns
+        ignored = {'.git', '__pycache__', '.vscode', 'node_modules'}
+
+        # Get activity scores for directories
+        directory_scores = {}
+        for item in path.iterdir():
+            if (item.is_dir() and
+                not item.name.startswith('.') and
+                item.name not in ignored):
+                score = calculate_directory_activity_score(item, current_time)
+                directory_scores[item.name] = score
+
+        # Process all items with integrated subdirectory previews
+        for item in sorted(path.iterdir()):
+            if item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
+                continue
+            if item.name in ignored:
+                continue
+
+            try:
+                if item.is_dir():
+                    # Directory with activity score and time delta
+                    activity_score = directory_scores.get(item.name, float('inf'))
+                    time_delta = format_time_delta(activity_score)
+
+                    listing.append(f"📁 {item.name}/ ({time_delta})")
+
+                    # Add subdirectory preview if it's one of the active directories
+                    if activity_score < 7 * 86400:  # Only show preview for dirs active within 7 days
+                        preview = get_subdirectory_preview(working_dir, item.name, max_files=3)
+                        if preview:
+                            listing.append(preview)
+                else:
+                    # File with size and modification time
+                    stat = item.stat()
+                    mod_delta = current_time - stat.st_mtime
+                    time_str = format_time_delta(mod_delta)
+
+                    size = stat.st_size
+                    if size < 1024:
+                        size_str = f"{size}B"
+                    elif size < 1024*1024:
+                        size_str = f"{size//1024}KB"
+                    else:
+                        size_str = f"{size//(1024*1024)}MB"
+
+                    emoji = get_file_emoji(item.name)
+                    listing.append(f"{emoji} {item.name} ({size_str}, {time_str})")
+
+            except (OSError, PermissionError):
+                continue
+
+        if not listing:
+            listing.append("(empty directory)")
+
+        result = "\n".join(listing)
+        timestamp = time.time()
+        return result, timestamp
+
+    except Exception as e:
+        logger.error(f"Failed to get directory listing: {e}")
+        return f"📁 {working_dir} (unable to read)", time.time()
+
+
+def check_directory_changes(working_dir: str, cache_timestamp: float) -> Optional[str]:
+    """Check if directory changed since timestamp. Returns update message if changed."""
+    if not cache_timestamp:
+        return None
+
+    try:
+        path = Path(working_dir)
+
+        # Quick check: any file newer than cache?
+        for item in path.iterdir():
+            if item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
+                continue
+            if item.name in {'.git', '__pycache__', '.vscode', 'node_modules'}:
+                continue
+
+            try:
+                if item.stat().st_mtime > cache_timestamp:
+                    new_listing, _ = get_directory_listing(working_dir)
+                    return f"📁 Directory updated:\n{new_listing}\n\n"
+            except (OSError, PermissionError):
+                continue
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Failed to check directory changes: {e}")
+        return None
+
+
+
 
 #---------------------------------------------------------------
 # Setup
@@ -673,6 +910,7 @@ async def async_main():
     """Async main with simple status interface."""
     status_interface = SimpleStatusInterface()
     shell_manager = ShellModeManager()
+
 
 
     async def confirmation_handler(execution: CommandExecution, status_interface=status_interface) -> ConfirmationResponse:
@@ -731,7 +969,10 @@ async def async_main():
             raise ValueError("Failed to create code session!")
 
         status_interface.update_status("Initializing Agno agent...")
-        agent = AgnoAgent(code_session)
+            
+        # Directory cache for change detection
+        directory_cache, cache_timestamp = get_directory_listing(code_session.working_directory)
+        agent = AgnoAgent(code_session, directory_cache)
 
         # Track dynamic MCP tools
         dynamic_mcp_tools = []
@@ -946,11 +1187,26 @@ async def async_main():
 
                     # Beautiful unified streaming execution 🚀
                     try:
+                        # Check for directory changes and add to user input if needed
+                        dir_update = check_directory_changes(code_session.working_directory, cache_timestamp)
+                        if dir_update:
+                            # Update cache with fresh listing
+                            directory_cache, cache_timestamp = get_directory_listing(code_session.working_directory)
+
                         # Add shell context to the user input if available
                         shell_context = shell_manager.get_shell_context_for_agent()
                         enhanced_input = user_input
+
+                        # Prepend contexts in order: directory updates, then shell context
+                        context_parts = []
+                        if dir_update:
+                            context_parts.append(dir_update)
                         if shell_context:
-                            enhanced_input = f"{shell_context}\n\nUser request: {user_input}"
+                            context_parts.append(shell_context)
+
+                        if context_parts:
+                            context_str = "\n".join(context_parts)
+                            enhanced_input = f"{context_str}\n\nUser request: {user_input}"
 
                         status_message = f"Calculating: {user_input[:40]}..."
                         status_interface.start_execution(status_message)

@@ -103,9 +103,43 @@ class ConfigManager:
     def validate_config(self) -> bool:
         """Validate that all required configuration is present."""
         try:
-            self.create_agent_config()
+            config = self.create_agent_config()
+
+            # Additional validation checks
+            validation_errors = []
+
+            # Validate Azure endpoint format
+            if not config.azure_endpoint.startswith(('https://', 'http://')):
+                validation_errors.append("AZURE_OPENAI_ENDPOINT must start with https:// or http://")
+
+            # Validate temperature range
+            if not (0.0 <= config.temperature <= 2.0):
+                validation_errors.append("DA_CODE_TEMPERATURE must be between 0.0 and 2.0")
+
+            # Validate timeout values
+            if config.agent_timeout <= 0:
+                validation_errors.append("DA_CODE_AGENT_TIMEOUT must be positive")
+
+            if config.command_timeout <= 0:
+                validation_errors.append("DA_CODE_COMMAND_TIMEOUT must be positive")
+
+            # Validate max_retries
+            if config.max_retries < 0:
+                validation_errors.append("DA_CODE_MAX_RETRIES must be non-negative")
+
+            # Validate workspace root if set
+            workspace_root = os.getenv('DA_CODE_WORKSPACE_ROOT')
+            if workspace_root and not os.path.exists(workspace_root):
+                validation_errors.append(f"DA_CODE_WORKSPACE_ROOT directory does not exist: {workspace_root}")
+
+            if validation_errors:
+                for error in validation_errors:
+                    logger.error(f"Configuration validation: {error}")
+                return False
+
             logger.info("Configuration validation successful")
             return True
+
         except ValueError as e:
             logger.error(f"Configuration validation failed: {e}")
             return False
@@ -130,6 +164,11 @@ class ConfigManager:
         mongo_host = os.getenv('MONGO_HOST', 'localhost')
         mongo_port = os.getenv('MONGO_PORT', '8004')
         print(f"MongoDB Tracking: {mongo_host}:{mongo_port}")
+
+        # Check workspace configuration
+        workspace_root = os.getenv('DA_CODE_WORKSPACE_ROOT', os.getcwd())
+        workspace_exists = os.path.exists(workspace_root)
+        print(f"Workspace Root: {'✓' if workspace_exists else '✗'} {workspace_root}")
 
         # Check file existence
         env_file = Path('.env')
