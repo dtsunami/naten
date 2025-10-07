@@ -31,6 +31,7 @@ from .config import ConfigManager, setup_logging
 from .context import ContextLoader
 from .models import CodeSession, CommandExecution, UserResponse, ConfirmationResponse
 from .agno_agent import AgnoAgent
+from .mcp_tool import mcp2tool
 
 
 logger = logging.getLogger(__name__)
@@ -731,11 +732,12 @@ async def async_main():
 
         status_interface.update_status("Initializing Agno agent...")
         agent = AgnoAgent(code_session)
-        agent_initialized = await agent.init_agent() # need await for mcp servers
 
-        if not agent_initialized:
-            status_interface.stop_execution(False, "Agent initialization failed")
-            console.print("[red]Agent initialization failed. Run 'setup' to regenerate.[/red]")
+        # Track dynamic MCP tools
+        dynamic_mcp_tools = []
+
+        if agent is None:
+            logger.error("Agent init failed, rerun setup")
         else:
             # Get deployment name
             deployment_name = os.getenv('AZURE_OPENAI_DEPLOYMENT', 'gpt-4')
@@ -874,8 +876,12 @@ async def async_main():
                     break
                 elif user_input.lower() == 'help':
                     console.print("[bold]Available commands:[/bold]")
-                    for cmd in commands:
-                        console.print(f"  • {cmd}")
+                    console.print("  • help - Show this help message")
+                    console.print("  • setup - Create configuration files")
+                    console.print("  • status - Show current configuration status")
+                    console.print("  • add_mcp <url> [name] - Add MCP server dynamically")
+                    console.print("  • shell - Toggle shell mode")
+                    console.print("  • exit/quit/q - Exit the application")
                     console.print("\n[bold]Shell Mode:[/bold]")
                     console.print("  • Type [cyan]shell[/cyan] or press [cyan]Escape[/cyan] to toggle between modes")
                     console.print("  • In shell mode, commands are executed directly")
@@ -888,6 +894,41 @@ async def async_main():
                     show_status(config_mgr=ConfigManager(), context_ldr=ContextLoader())
                 elif user_input.lower() == 'shell':
                     shell_manager.toggle_shell_mode()
+                    continue
+                elif user_input.startswith('add_mcp '):
+                    # Handle dynamic MCP server addition
+                    try:
+                        mcp_arg = user_input[8:].strip()
+
+                        # Try JSON first (Clippy format)
+                        try:
+                            import json
+                            config = json.loads(mcp_arg)
+                            url = config.get('url')
+                            tool_name = config.get('name')
+                        except (json.JSONDecodeError, AttributeError):
+                            # Fall back to positional format
+                            parts = mcp_arg.split(' ', 1)
+                            url = parts[0] if parts else None
+                            tool_name = parts[1] if len(parts) > 1 else None
+
+                        if not url:
+                            console.print("[red]Usage: add_mcp <url> [name] OR add_mcp {\"url\":\"...\",\"name\":\"...\"}[/red]")
+                            continue
+
+                        console.print(f"[yellow]Adding MCP server: {url}[/yellow]")
+                        mcp_tool = mcp2tool(url, tool_name)
+
+                        if mcp_tool:
+                            agent.agent.add_tool(mcp_tool)
+                            dynamic_mcp_tools.append(mcp_tool)
+                            actual_name = getattr(mcp_tool, 'name', 'unknown')
+                            console.print(f"[green]✅ Added MCP tool '{actual_name}' from {url}[/green]")
+                        else:
+                            console.print(f"[red]❌ Failed to create MCP tool from {url}[/red]")
+                    except Exception as e:
+                        console.print(f"[red]❌ Error adding MCP server: {str(e)}[/red]")
+                        logger.error(f"MCP addition error: {e}")
                     continue
                 elif user_input.strip() == '':
                     continue
@@ -932,9 +973,8 @@ async def async_main():
                 break
         
             finally:
-                if agent is not None:
-                    for mcp_server in agent.mcp_tools:
-                        await mcp_server.close()
+                # No MCP cleanup needed - custom MCP implementation will handle this
+                pass
             
 
 

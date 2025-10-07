@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 load_dotenv(".env")
 
 import asyncio
+
+# Agno MCP infrastructure removed - using custom MCP implementation
 from datetime import timedelta
 import httpx
 from agno.agent import Agent, RunEvent
@@ -12,8 +14,7 @@ from agno.db.postgres import PostgresDb
 from agno.db.sqlite import SqliteDb
 from agno.tools.reasoning import ReasoningTools
 from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.tools.mcp import MCPTools, StreamableHTTPClientParams
-from mcp.client.streamable_http import streamablehttp_client
+# Agno MCPTools removed - will implement custom MCP solution
 
 #from agno.tools.duckduckgo import DuckDuckGoTools
 
@@ -36,6 +37,7 @@ from .agno_tools import (
     handle_todo_operation, execute_command, web_search, file_tool,
     file_search, current_time, python_executor, git_operations, http_fetch
 )
+from .mcp_tool import mcp2tool
 
 agno_agent_tools = [
     handle_todo_operation,
@@ -111,66 +113,46 @@ class AgnoAgent():
             logging.warning("Postgre init failed, failing back to sqlite :-(")
             self.db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
 
-        # Create MCP tools from loaded servers
-        self.mcps_json = []
-        for server_info in self.mcp_servers:
+
+        # Load MCP tools from DA.json servers
+        self.mcp_server_urls = [server.url for server in self.mcp_servers]
+        mcp_tools = []
+        for server in self.mcp_servers:
+            url = server.url
+            tool_name = getattr(server, 'name', None)
+            logging.warning(f"🔌 MCP: Loading {url} as '{tool_name or 'auto-named'}'")
             try:
-                client_ctx = streamablehttp_client(
-                    url=server_info.url,
-                    timeout=timedelta(seconds=300),
-                    terminate_on_close=False,
-                )
-                server_params = StreamableHTTPClientParams(
-                    url=server_info.url,
-                    #headers=...,
-                    timeout=300,
-                    terminate_on_close=False,
-                )
-                self.mcps_json.append(MCPTools(client=client_ctx, url=server_info.url, transport="streamable-http"))
+                mcp_tool = mcp2tool(url, tool_name)
+                if mcp_tool:
+                    mcp_tools.append(mcp_tool)
+                    actual_name = getattr(mcp_tool, 'name', 'unknown')
+                    logging.warning(f"✅ MCP: Successfully loaded {url} as '{actual_name}'")
+                else:
+                    logging.error(f"❌ MCP: Failed to load {url}")
             except Exception as e:
-                logging.error(f"❌ MCP: Failed to create MCP tool for {server_info.name}: {e}")
-                continue
-        self.mcp_tools = self.mcps_json
+                logging.error(f"❌ MCP: Error loading {url}: {e}")
+
+        # Set up tools list with MCP tools
+        self.agent_tools = agno_agent_tools + mcp_tools
+        logging.warning(f"🔧 Agent: Loaded {len(agno_agent_tools)} built-in tools + {len(mcp_tools)} MCP tools")
+
+        self.agent = Agent(
+            model=self.llm,
+            #reasoning_model=self.reasoning,
+            db=self.db,
+            session_id=str(self.code_session.id),
+            system_message=self._build_system_prompt(),
+            markdown=True,
+            #reasoning=True,
+            structured_outputs=False,
+            add_history_to_context=True,
+            add_datetime_to_context=True,
+            tools=self.agent_tools,
+            debug_mode=False, # Display the agent's thought process
+        )
 
         # Confirmation handler callback
         self.confirmation_handler = None
-
-    async def init_agent(self, add_mcps: list[MCPTools]=[]):
-
-        self.mcp_tools = []
-        for mcp_tool in self.mcps_json + add_mcps:
-            try:
-                await mcp_tool.connect()
-                self.mcp_tools.append(mcp_tool)
-                logger.warning(f"Connect success for mcp {mcp_tool}")
-            except:
-                logger.warning(f"encountered and error for connect tomcp tool {mcp_tool}")
-
-        self.agent_tools = agno_agent_tools + self.mcp_tools
-        
-        try:
-            self.agent = Agent(
-                model=self.llm,
-                #reasoning_model=self.reasoning,
-                db=self.db,
-                session_id=str(self.code_session.id),
-                system_message=self._build_system_prompt(),
-                markdown=True,
-                #reasoning=True,
-                structured_outputs=False,
-                add_history_to_context=True,
-                add_datetime_to_context=True,
-                tools=self.agent_tools,
-                debug_mode=False, # Display the agent's thought process
-            )
-            logger.info("Agno agent initialized successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error, failed to create agno agent! {e}")
-            for mcp_tool in self.mcp_tools:
-                await mcp_tool.close()
-                logger.warning(f"closed connection for mcp tool {mcp_tool}")
-            return False
 
 
     def _build_system_prompt(self) -> str:
@@ -206,6 +188,8 @@ TODO MANAGEMENT:
 
 """
 
+
+
     async def arun(self, task: str, confirmation_handler: callable, tg: asyncio.TaskGroup, status_queue: asyncio.Queue, output_queue: asyncio.Queue) -> str:
         """
         Execute a task with streaming events and confirmation support.
@@ -215,12 +199,7 @@ TODO MANAGEMENT:
 
         content_started = False
 
-        for mcp_tool in self.mcp_tools:
-            try:
-                await mcp_tool.connect()
-                logger.warning(f"Connect success for mcp {mcp_tool}")
-            except:
-                logger.warning(f"encountered and error for connect to mcp tool {mcp_tool}")
+
         try:
             async for run_event in self.agent.arun(task, stream=True):
 
@@ -300,14 +279,7 @@ TODO MANAGEMENT:
                         # Re-raise to let TaskGroup handle it properly
                         raise
         finally:
-            pass         
-            #for mcp_tool in self.mcp_tools:
-            #    try:
-            #        await mcp_tool.close()
-            #        logger.warning(f"Close success for mcp {mcp_tool}")
-            #    except:
-            #        logger.warning(f"encountered and error for close mcp tool {mcp_tool}")
-
+            pass
     def get_session_info(self) -> Dict[str, Any]:
         """Get current session information."""
         pass

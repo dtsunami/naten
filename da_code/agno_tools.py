@@ -282,6 +282,8 @@ def execute_command(tool_input: str) -> str:
 
         command = params.get("command")
         if not command:
+            command = params.get("cmd")
+        if not command:
             return "Error: No command specified"
 
         working_dir = params.get("working_directory", os.getcwd())
