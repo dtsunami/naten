@@ -30,6 +30,7 @@ class ConfigManager:
         azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
         api_key = os.getenv('AZURE_OPENAI_API_KEY')
         deployment_name = os.getenv('AZURE_OPENAI_DEPLOYMENT', 'gpt-4')
+        reasoning_deployment = os.getenv('DA_CODE_REASONING_DEPLOYMENT', None)
 
         if not azure_endpoint:
             raise ValueError(
@@ -64,6 +65,7 @@ class ConfigManager:
             api_key=api_key,
             api_version=api_version,
             deployment_name=deployment_name,
+            reasoning_deployment=reasoning_deployment,
             temperature=temperature,
             max_tokens=int(max_tokens) if max_tokens else None,
             agent_timeout=agent_timeout,

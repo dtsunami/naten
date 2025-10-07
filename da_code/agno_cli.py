@@ -981,26 +981,17 @@ async def async_main():
             logger.error("Agent init failed, rerun setup")
         else:
             # Get deployment name
-            deployment_name = os.getenv('AZURE_OPENAI_DEPLOYMENT', 'gpt-4')
-
+            deployment_name = agent.config.deployment_name
+            reasoning_deployment = agent.config.reasoning_deployment
+            
             # Get chat memory status from agent
             try:
-                session_info = agent.get_session_info()
-                memory_info = session_info.get('memory_info', {})
-                memory_type = memory_info.get('memory_type', 'unknown')
-                message_count = memory_info.get('message_count', 0)
-
-                if memory_type == 'postgres':
+                if agent.db_type == 'postgres':
                     memory_status = "[green]PostgreSQL[/green]"
-                elif memory_type == 'file':
+                elif agent.db_type == 'sqlite':
                     memory_status = "[yellow]File[/yellow]"
                 else:
                     memory_status = "[red]Memory[/red]"
-
-                # Add message count if exists
-                if message_count > 0:
-                    memory_status += f" ({message_count})"
-
             except Exception as e:
                 memory_status = "[red]Unknown[/red]"
 
@@ -1016,7 +1007,7 @@ async def async_main():
                 mongo_status_str = "[red]Unknown[/red]"
 
             # Combined status line
-            status_interface.stop_execution(True, f"🤖 {deployment_name} | 💾 {memory_status} | 🍃 {mongo_status_str}")
+            status_interface.stop_execution(True, f"🤖 {deployment_name} | 🤔 {reasoning_deployment} | 💾 {memory_status} | 🍃 {mongo_status_str}")
 
     # Set up history files
     agent_history = FileHistory(agent.config.history_file_path)

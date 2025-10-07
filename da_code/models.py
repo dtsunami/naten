@@ -364,6 +364,7 @@ class AgentConfig(BaseModel):
     api_key: str = Field(..., description="Azure OpenAI API key")
     api_version: str = Field("2023-12-01-preview", description="Azure OpenAI API version")
     deployment_name: str = Field("gpt-4", description="Azure OpenAI deployment name")
+    reasoning_deployment: str|None = Field(None, description="Azure OpenAi reasoning model for agent")
 
     # Agent behavior
     temperature: float = Field(0.7, ge=0.0, le=2.0, description="Model temperature")
@@ -392,17 +393,15 @@ class DaMongoTracker:
 
     def _init_mongo_client(self) -> None:
         """Initialize MongoDB client."""
+        self.mongo_enabled = False
         try:
-            mongo_host = os.getenv('MONGO_HOST', 'localhost')
-            mongo_port = int(os.getenv('MONGO_PORT', '8004'))  # MongoDB port for da_code telemetry
-            mongo_uri = f"mongodb://{mongo_host}:{mongo_port}"
-
+            mongo_uri = os.getenv('MONGO_URI', None)
             self.client = AsyncIOMotorClient(mongo_uri, serverSelectionTimeoutMS=3000)
             self.mongo_enabled = True
-            logger.debug(f"MongoDB client initialized: {mongo_uri}")
+            logger.info(f"MongoDB client initialized: {mongo_uri}")
         except Exception as e:
-            logger.debug(f"MongoDB not available: {e}")
-            self.mongo_enabled = False
+            logger.info(f"MongoDB not available: {e}")
+            
 
     async def _save_to_mongo(self, collection: str, document: Dict[str, Any]) -> bool:
         """Save document directly to MongoDB."""

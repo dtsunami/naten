@@ -81,41 +81,16 @@ class AgnoAgent():
         self.config = ConfigManager().create_agent_config()
         logging.debug("Initialized Agent config")
 
-        # 1. Configure the Azure OpenAI model
-        logging.warning(f"Deployment Name {self.config.deployment_name}")
-
-        
-        #SSL_CA_CERTS = "/etc/ca-certificates"
-        #self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
-        # Agno uses the AzureOpenAI class to interface with Azure's service
-        self.llm = AzureAIFoundry(
-        #self.llm = AzureOpenAI(
-            #id=self.config.deployment_name,
-            id="gpt-5-mini",
-            api_key=self.config.api_key,
-            api_version=self.config.api_version,
-            azure_endpoint=self.config.azure_endpoint,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens,
-            timeout=self.config.agent_timeout,
-            max_retries=self.config.max_retries,
-            #http_client=self.http,
-        )
-        
-        self.reasoning = AzureOpenAI(
-            id="gpt-5-mini", #TODO, add reasoning model to agent config
-            api_key=self.config.api_key,
-            azure_endpoint=self.config.azure_endpoint,
-            timeout=self.config.agent_timeout,
-            max_retries=self.config.max_retries,
-            #http_client=self.http,
-        )
         # try to connect to postgre, fallback to sqllite
+        self.db_type = None
         try:
             self.db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
+            self.db_type = "postgres"
         except:
             logging.warning("Postgre init failed, failing back to sqlite :-(")
             self.db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
+            self.db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
+            self.db_type = "sqlite"
 
 
         # Load MCP tools from DA.json servers
@@ -143,9 +118,45 @@ class AgnoAgent():
         self.system_message = self._build_system_prompt()
         logging.info(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
 
+
+
+        # 1. Configure the Azure OpenAI model
+        
+
+        
+        #SSL_CA_CERTS = "/etc/ca-certificates"
+        #self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
+        # Agno uses the AzureOpenAI class to interface with Azure's service
+        #self.llm = AzureAIFoundry(
+        logging.warning(f"Deployment Name {self.config.deployment_name}")
+        self.llm = AzureOpenAI(
+            id=self.config.deployment_name,
+            #id="gpt-5-mini",
+            api_key=self.config.api_key,
+            api_version=self.config.api_version,
+            azure_endpoint=self.config.azure_endpoint,
+            max_tokens=self.config.max_tokens,
+            timeout=self.config.agent_timeout,
+            max_retries=self.config.max_retries,
+            #http_client=self.http,
+        )
+        
+        self.reasoning = None
+        if self.config.reasoning_deployment is not None:
+            logging.warning(f"Reasoning Deployment {self.config.reasoning_deployment}")
+            self.reasoning = AzureOpenAI(
+                id=self.config.reasoning_deployment,
+                api_key=self.config.api_key,
+                api_version=self.config.api_version,
+                azure_endpoint=self.config.azure_endpoint,
+                timeout=self.config.agent_timeout,
+                max_tokens=self.config.max_tokens,
+                max_retries=self.config.max_retries,
+            )
+
         self.agent = Agent(
             model=self.llm,
-            #reasoning_model=self.reasoning,
+            reasoning_model=self.reasoning,
             db=self.db,
             session_id=str(self.code_session.id),
             system_message=self.system_message,
@@ -293,9 +304,6 @@ class AgnoAgent():
                         raise
         finally:
             pass
-    def get_session_info(self) -> Dict[str, Any]:
-        """Get current session information."""
-        pass
 
     def clear_memory(self) -> None:
         """Clear agent conversation memory."""
