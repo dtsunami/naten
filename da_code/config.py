@@ -54,10 +54,10 @@ class ConfigManager:
         require_confirmation = os.getenv('DA_CODE_REQUIRE_CONFIRMATION', 'true').lower() == 'true'
 
         # History file path configuration
-        history_file_path = os.getenv('DA_CODE_HISTORY_FILE')
+        history_file_path = os.getenv('DA_CODE_PROMPT_FILE')
         if not history_file_path:
             # Default to .prompt.history in current working directory
-            history_file_path = os.path.join(os.getcwd(), '.prompt.history')
+            history_file_path = os.path.join(os.getcwd(), f'.da{os.sep}prompt.history')
 
 
         return AgentConfig(

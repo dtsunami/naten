@@ -343,6 +343,10 @@ def show_status_splash() -> None:
 
 
 def create_session(context_ldr: ContextLoader):
+    
+    if not os.path.exists(".da"):
+        os.makedirs(".da")
+
     # Load project context
     project_context = context_ldr.load_project_context()
 
@@ -1014,7 +1018,7 @@ async def async_main():
 
     # Set up history files
     agent_history = FileHistory(agent.config.history_file_path)
-    shell_history_path = os.getenv('SHELL_HISTORY_FILE', os.path.expanduser('~/.da_code_shell_history'))
+    shell_history_path = os.getenv('DA_CODE_SHELL_HISTORY', f'.da{os.sep}shell_history')
     shell_history = FileHistory(shell_history_path)
 
     # Set up completers
@@ -1063,6 +1067,13 @@ async def async_main():
     input_queue = asyncio.Queue()
     status_queue = asyncio.Queue()
     output_queue = asyncio.Queue()
+
+    user_id = os.getenv('USER', None)
+    if user_id is None:
+        user_id = os.getenv('USERNAME', None)
+    if user_id is None:
+        user_id = "dang"
+    
     
     async with asyncio.TaskGroup() as tg:
         wait_for_input = tg.create_task(get_user_input_with_history(input_queue))
@@ -1206,7 +1217,7 @@ async def async_main():
                         status_interface.start_execution(status_message)
                         output_message = ""
                         running_agent = tg.create_task(
-                            agent.arun(enhanced_input, confirmation_handler, tg, status_queue, output_queue)
+                            agent.arun(enhanced_input, confirmation_handler, status_queue, output_queue, user_id)
                         )
                         user_input = None
                     except Exception as e:

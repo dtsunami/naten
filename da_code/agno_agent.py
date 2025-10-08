@@ -49,14 +49,15 @@ agno_agent_tools = [
     PythonTool(),
     GitTool(),
     HttpTool(),
-    ReasoningTools(
-            enable_think=True,
-            enable_analyze=True,
-            add_instructions=True,
-            add_few_shot=True,
-    ),
 ]
 
+# TODO: delete or add to tools
+ReasoningTools(
+        enable_think=True,
+        enable_analyze=True,
+        add_instructions=True,
+        add_few_shot=True,
+),
 
 class AgnoAgent():
     """Agno agent with correct async HIL pattern."""
@@ -89,7 +90,6 @@ class AgnoAgent():
         except:
             logging.warning("Postgre init failed, failing back to sqlite :-(")
             self.db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
-            self.db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
             self.db_type = "sqlite"
 
 
@@ -155,6 +155,7 @@ class AgnoAgent():
             )
 
         self.agent = Agent(
+            name="da_code",
             model=self.llm,
             reasoning_model=self.reasoning,
             db=self.db,
@@ -162,9 +163,14 @@ class AgnoAgent():
             system_message=self.system_message,
             markdown=True,
             reasoning=True,
+            enable_user_memories=True,
+            add_memories_to_context=True,
             structured_outputs=False,
             add_history_to_context=True,
+            num_history_runs=5,
             add_datetime_to_context=True,
+            read_chat_history=True,
+            read_tool_call_history=True,
             tools=self.agent_tools,
             debug_mode=False, # Display the agent's thought process
         )
@@ -213,8 +219,7 @@ class AgnoAgent():
 """
 
 
-
-    async def arun(self, task: str, confirmation_handler: callable, tg: asyncio.TaskGroup, status_queue: asyncio.Queue, output_queue: asyncio.Queue) -> str:
+    async def arun(self, task: str, confirmation_handler: callable, status_queue: asyncio.Queue, output_queue: asyncio.Queue, user_id: str="dang") -> str:
         """
         Execute a task with streaming events and confirmation support.
         """
@@ -223,11 +228,9 @@ class AgnoAgent():
 
         content_started = False
 
-
         try:
-            async for run_event in self.agent.arun(task, stream=True):
+            async for run_event in self.agent.arun(task, stream=True, user_id=user_id):
 
-                
                 if not run_event.is_paused:
 
                     if run_event.event in [RunEvent.run_started, RunEvent.run_completed]:
@@ -305,12 +308,14 @@ class AgnoAgent():
         finally:
             pass
 
-    def clear_memory(self) -> None:
-        """Clear agent conversation memory."""
-        pass
 
 def main():
-    agent = AgnoAgent()
+    code_session = CodeSession(
+        working_directory=".",
+        project_context="News project",
+        mcp_servers=[],
+    )
+    agent = AgnoAgent(code_session)
     print("Running the news reporter agent...")
     agent.agent.print_response("What is currently happening in the technology industry?")
 

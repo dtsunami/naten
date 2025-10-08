@@ -20,9 +20,11 @@ logger = logging.getLogger(__name__)
 # Utilities
 #====================================================================================================
 
+
 def get_workspace_root() -> str:
     """Get workspace root from environment variable or current directory."""
     return os.getenv('DA_CODE_WORKSPACE_ROOT', os.getcwd())
+
 
 def within_workspace(path: str) -> bool:
     """Ensure the given path is within the allowed workspace."""
@@ -30,6 +32,7 @@ def within_workspace(path: str) -> bool:
     abs_path = os.path.abspath(path)
     abs_workspace = os.path.abspath(workspace_root)
     return abs_path.startswith(abs_workspace)
+
 
 def safe_path(path: str) -> str:
     """Resolve and validate a path inside the workspace."""
@@ -45,6 +48,7 @@ def safe_path(path: str) -> str:
     if not within_workspace(abs_path) and False:
         raise ValueError(f"Path {abs_path} is outside workspace {workspace_root}")
     return abs_path
+
 
 def get_file_emoji(filename: str) -> str:
     """Get emoji for file type"""
@@ -74,8 +78,9 @@ def get_file_emoji(filename: str) -> str:
 
 
 #====================================================================================================
-# TODO Toolkit
+# TODO Tool
 #====================================================================================================
+
 
 class TodoTool(Toolkit):
     """Todo.md file management tool."""
@@ -165,8 +170,9 @@ class TodoTool(Toolkit):
 
 
 #====================================================================================================
-# Command Toolkit
+# Command Tool
 #====================================================================================================
+
 
 class CommandTool(Toolkit):
     """Ccommand execution tool."""
@@ -174,8 +180,8 @@ class CommandTool(Toolkit):
     def __init__(self, **kwargs):
         super().__init__(
             name="command_tool",
-            tools=[self.execute_command,
-            ],
+            tools=[self.execute_command],
+            requires_confirmation_tools=['execute_command'],
             **kwargs
         )
 
@@ -232,8 +238,9 @@ class CommandTool(Toolkit):
 
 
 #====================================================================================================
-# Web Search Toolkit
+# Web Search Tool
 #====================================================================================================
+
 
 class WebSearchTool(Toolkit):
     """Web search toolkit using DuckDuckGo."""
@@ -317,7 +324,7 @@ class WebSearchTool(Toolkit):
 
 
 #====================================================================================================
-# File Toolkit
+# File Tool
 #====================================================================================================
 
 class FileTool(Toolkit):
@@ -570,10 +577,14 @@ class FileTool(Toolkit):
                 new_content = content.replace(search_text, replace_text)
                 count = content.count(search_text)
 
-        with open(path, "w") as f:
-            f.write(new_content)
+        # safeguard: only overwrite if something was actually replaced
+        if count > 0:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            return f"Replaced {count} occurrence(s) in {path}"
+        else:
+            return f"No matches found — {path} left unchanged"
 
-        return f"Replaced {count} occurrence(s) in {path}"
 
     def copy_file(self, source_path: str, destination_path: str) -> str:
         """Copy a file to a new location.
