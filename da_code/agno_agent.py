@@ -49,14 +49,15 @@ agno_agent_tools = [
     PythonTool(),
     GitTool(),
     HttpTool(),
-    ReasoningTools(
-            enable_think=True,
-            enable_analyze=True,
-            add_instructions=True,
-            add_few_shot=True,
-    ),
 ]
 
+# TODO: delete or add to tools
+ReasoningTools(
+        enable_think=True,
+        enable_analyze=True,
+        add_instructions=True,
+        add_few_shot=True,
+),
 
 class AgnoAgent():
     """Agno agent with correct async HIL pattern."""
@@ -153,17 +154,33 @@ class AgnoAgent():
                 max_retries=self.config.max_retries,
             )
 
+        instructions = '''
+1. 🔧 Use available tools to help with coding tasks - ALWAYS properly **invoke** tools, never give tool inputs back to user
+2. 💻 For command execution, use execute_command tool - user confirmation is handled automatically
+3. 🚀 Invoke tools as needed WITHOUT reprompting user
+4. ✅ Always track and update todos to ensure you don't lose track of planned items
+5. 📝 Always use proper tool arguments as specified in tool descriptions
+6. ✍️ Always use the replace_text tool to update/edit files and re-read the file back after edit to ensure it worked properly!
+'''.split("\n")
+
         self.agent = Agent(
+            name="da_code",
             model=self.llm,
             reasoning_model=self.reasoning,
             db=self.db,
             session_id=str(self.code_session.id),
-            system_message=self.system_message,
+            description=self.system_message,
+            instructions=instructions,
             markdown=True,
-            reasoning=True,
+            reasoning=self.reasoning is not None,
+            enable_user_memories=True,
+            add_memories_to_context=True,
             structured_outputs=False,
             add_history_to_context=True,
+            num_history_runs=5,
             add_datetime_to_context=True,
+            read_chat_history=True,
+            read_tool_call_history=True,
             tools=self.agent_tools,
             debug_mode=False, # Display the agent's thought process
         )
@@ -194,130 +211,79 @@ class AgnoAgent():
 📋 PROJECT CONTEXT:
 {context}
 
-⚡ CORE INSTRUCTIONS:
+⚡ SYSTEM MESSAGE:
 
-1. 🔧 Use available tools to help with coding tasks - ALWAYS properly **invoke** tools, never give tool inputs back to user
-2. 💻 For command execution, use execute_command tool - user confirmation is handled automatically
-3. 🚀 Invoke tools as needed WITHOUT prompting user - tools that need confirmation will ask for it themselves
-4. ✅ Always track and update todos to ensure you don't lose track of planned items
-5. 📝 Always use proper tool arguments as specified in tool descriptions
-
-📁 FILE OPERATIONS:
-  • 📖 Use read_file to read file contents before modifying
-  • ✏️ Use write_file to create or overwrite entire files
-  • 🔄 Use replace_text to patch/fix specific code sections - finds exact text and replaces it
-  • 🔍 Use search_files to find files by pattern or content
-  • 📋 Use list_directory to explore directory structure
-  • **IMPORTANT**: When fixing bugs or making code changes, use replace_text or write_file tools immediately - don't just analyze!
-
-📌 TODO MANAGEMENT:
-  • 📖 Use todo_file_manager tool to track work items for complex multi-step tasks
-  • 🔍 Read existing todos at start: {{"operation": "read"}}
-  • ✏️  Create/update todos when planning: {{"operation": "create", "content": "markdown todo list"}}
-  • ☐ Use proper markdown format with checkboxes: `- [ ] Task description`
-  • ✅ Mark completed items: `- [x] Completed task`
+You are a semi-autonomous coding agent that helps users create coding projects, debug issues and edit files.
+Always use available tools and if you encounter an error show the input you supplied to the tool and the output you got.
+Don't prompt the user before running tools, tools will ask user for confirmation themselves if it is needed.
 
 """
 
 
-
-    async def arun(self, task: str, confirmation_handler: callable, tg: asyncio.TaskGroup, status_queue: asyncio.Queue, output_queue: asyncio.Queue) -> str:
-        """
-        Execute a task with streaming events and confirmation support.
-        """
+    async def arun(self, task: str, confirmation_handler: callable, status_queue: asyncio.Queue, output_queue: asyncio.Queue, user_id: str="dang") -> str:
+        """Execute a task with streaming events and persistent run until completion (handles multiple confirmations)."""
         logging.debug("Entering arun")
         self.confirmation_handler = confirmation_handler
-
         content_started = False
+        active_run_id = None
 
+        async def process_stream(stream):
+            nonlocal content_started, active_run_id
+            async for run_event in stream:
+                if active_run_id is None and hasattr(run_event, 'run_id'):
+                    active_run_id = run_event.run_id
 
-        try:
-            async for run_event in self.agent.arun(task, stream=True):
-
-                
                 if not run_event.is_paused:
-
                     if run_event.event in [RunEvent.run_started, RunEvent.run_completed]:
-                        logger.warning(f"start/stop run event: {run_event}")
                         await status_queue.put(f"Run: {run_event.event})")
-                        #print(f"\nEVENT: {run_event.event}")
-
+                        if run_event.event == RunEvent.run_completed:
+                            return True
                     elif run_event.event in [RunEvent.tool_call_started]:
                         await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
-                        logger.debug(f"Tool Call started {run_event}")
-                        #print(f"\nEVENT: {run_event.event}")
-                        #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
-                        #print(f"TOOL CALL ARGS: {run_event.tool.tool_args}")  # type: ignore
-
                     elif run_event.event in [RunEvent.tool_call_completed]:
-                        logger.debug(f"Tool Call ended {run_event}")
                         await status_queue.put(f"Tool Result: {run_event.tool.tool_name} -> {run_event.tool.result}")
-                        # Also send tool result to output queue for user display (consistent with confirmation flow)
-                        #await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
-                        #print(f"\nEVENT: {run_event.event}")
-                        #print(f"TOOL CALL: {run_event.tool.tool_name}")  # type: ignore
-                        #print(f"TOOL CALL RESULT: {run_event.tool.result}")  # type: ignore
-
+                        await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
                     elif run_event.event in [RunEvent.run_content]:
-                        if not content_started:
-                            content_started = True
-                        else:
+                        if content_started:
                             await output_queue.put(run_event.content)
+                        else:
+                            content_started = True
                     else:
                         logger.error(f"Unhandled run event!!! {run_event}")
-
                 else:
-                    #logger.warning(f"paused run event: {run_event}")
-                    try:
-                        for tool in run_event.tools_requiring_confirmation:  # type: ignore
-                            logger.info(f"Tool {tool} asking for confirmation")
+                    for tool in run_event.tools_requiring_confirmation:  # type: ignore
+                        confirm_arg = f"Confirm Tool [bold blue]{tool.tool_name}({tool.tool_args})[/] requires confirmation."
+                        execution = CommandExecution(
+                            command=confirm_arg,
+                            explanation=tool.tool_args.get("explanation", ""),
+                            working_directory=tool.tool_args.get("working_directory", self.code_session.working_directory),
+                            agent_reasoning=tool.tool_args.get("reasoning", ""),
+                            related_files=tool.tool_args.get("related_files", [])
+                        )
+                        confirmation_response = await self.confirmation_handler(execution)
+                        tool.confirmed = confirmation_response.choice.lower() == "yes"
+                    # replace stream with continuation stream
+                    return ('continue', run_event.tools)
+            return ('done', None)
 
-                            confirm_arg = f"Confirm Tool [bold blue]{tool.tool_name}({tool.tool_args})[/] requires confirmation."
-                            # Ask for confirmation
-                            execution = CommandExecution(
-                                command=confirm_arg,
-                                explanation=tool.tool_args.get("explanation", ""),
-                                working_directory=tool.tool_args.get("working_directory", self.code_session.working_directory),
-                                agent_reasoning=tool.tool_args.get("reasoning", ""),
-                                related_files=tool.tool_args.get("related_files", [])
-                            )
+        # main persistent loop
+        run_stream = self.agent.arun(task, stream=True, user_id=user_id)
+        while True:
+            result = await process_stream(run_stream)
+            if result is True or (isinstance(result, tuple) and result[0] == 'done'):
+                break
+            elif isinstance(result, tuple) and result[0] == 'continue':
+                run_stream = self.agent.acontinue_run(run_id=active_run_id, updated_tools=result[1], stream=True, user_id=user_id)
+        
 
-                            # Get user confirmation using the callback
-                            logger.warning(f"� EXEC: Requesting confirmation for: {execution.command}")
-                            confirmation_response = await self.confirmation_handler(execution)
-
-                            tool.confirmed = False
-                            if confirmation_response.choice.lower() == "yes":
-                                tool.confirmed = True
-
-                        async for resp in self.agent.acontinue_run(run_id=run_event.run_id, updated_tools=run_event.tools, stream=True):
-                            # Handle continuing run events the same way as the main loop
-                            logger.debug(f"Continue run event: {resp.event}, paused: {resp.is_paused}")
-                            if not resp.is_paused:
-                                if resp.event in [RunEvent.tool_call_completed]:
-                                    logger.info(f"Tool completed after confirmation: {resp.tool.tool_name} -> {resp.tool.result}")
-                                    await status_queue.put(f"Tool Result: {resp.tool.tool_name} -> {resp.tool.result}")
-                                    # CRITICAL: Also send tool result to output queue for user display
-                                    await output_queue.put(f"\n🔧 Tool Result:\n{resp.tool.result}\n")
-                                elif resp.event in [RunEvent.run_content]:
-                                    logger.debug(f"Continue run content: {resp.content}")
-                                    await output_queue.put(resp.content)
-                                else:
-                                    await status_queue.put(f"Continue: {resp.event}")
-
-                    except Exception as e:
-                        logger.error(f"Confirmation handling error: {type(e).__name__}: {str(e)}", exc_info=True)
-                        # Re-raise to let TaskGroup handle it properly
-                        raise
-        finally:
-            pass
-
-    def clear_memory(self) -> None:
-        """Clear agent conversation memory."""
-        pass
 
 def main():
-    agent = AgnoAgent()
+    code_session = CodeSession(
+        working_directory=".",
+        project_context="News project",
+        mcp_servers=[],
+    )
+    agent = AgnoAgent(code_session)
     print("Running the news reporter agent...")
     agent.agent.print_response("What is currently happening in the technology industry?")
 

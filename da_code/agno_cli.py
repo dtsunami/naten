@@ -8,17 +8,7 @@ import sys
 import time
 import subprocess
 
-import random
-from typing import List, Optional
 from pathlib import Path
-#import termios
-#import tty
-
-from rich.prompt import Prompt
-from rich.console import Console
-from rich.status import Status
-from rich.text import Text
-from rich.panel import Panel
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -28,321 +18,32 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.completion import PathCompleter, WordCompleter, Completer, Completion
 
 from .config import ConfigManager, setup_logging
-from .context import ContextLoader
+from .context import ContextLoader, DirectoryContext
 from .models import CodeSession, CommandExecution, UserResponse, ConfirmationResponse
 from .agno_agent import AgnoAgent
 from .mcp_tool import mcp2tool
+from .ux import (
+    show_splash,
+    show_status_splash,
+    SimpleStatusInterface,
+    confirmation_handler,
+    console  # Import the shared console from ux
+)
 
 
 logger = logging.getLogger(__name__)
 
-# Global console for clean interaction
-console = Console()
 
-
-async def async_prompt_user_silent(choices: List[str], default: str = None, command: str = None) -> str:
-    """Interactive prompt with visual arrow indicator for selected option."""
-
-
-    # Choice configuration with colors
-    choice_config = {
-        "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
-        "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
-        "modify": {"label": "✏️  Modify", "desc": "Edit the command before execution", "color": "yellow"},
-        "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
-    }
-
-    def display_static_confirmation():
-        """Display confirmation panel once - no updates until selection made."""
-        content_lines = Text()
-
-        # Add command info if provided
-        if command:
-            command_text = Text()
-            command_text.append("Command: ", style="bold cyan")
-            command_text.append(f"`{command}`", style="bold yellow")
-            content_lines.append(command_text)
-            content_lines.append("\n")
-
-        # Add choices (no arrow initially)
-        for i, choice in enumerate(choices):
-            config = choice_config.get(choice.lower(), {"label": choice, "desc": "", "color": "white"})
-            line = Text()
-            line.append("    ", style="white")
-            line.append(f"{i+1}. {config['label']}", style=config['color'])
-            if config['desc']:
-                line.append(f" - {config['desc']}", style="white dim")
-            line.append("\n")
-            content_lines.append(line) 
-
-
-        # Instructions
-        instructions = Text()
-        instructions.append("Press 1-4", style="cyan bold")
-        instructions.append(" or use ", style="white dim")
-        instructions.append("↑/↓ arrows", style="cyan bold")
-        instructions.append(" and ", style="white dim")
-        instructions.append("Enter", style="red bold")
-        instructions.append(" to select\n", style="white dim")
-        content_lines.append(instructions)
-
-
-        # Display the panel once
-        unified_panel = Panel(
-            content_lines,
-            title="🤖 Confirm Agent Command",
-            title_align="left",
-            border_style="cyan"
-        )
-        console.print(unified_panel)
-
-    def get_keypress_choice() -> str:
-        fd = sys.stdin.fileno()
-        #old_settings = termios.tcgetattr(fd)
-        selected_index = 0  # Initialize locally
-
-        try:
-            #tty.setraw(sys.stdin.fileno())
-
-            # Display confirmation panel once
-            display_static_confirmation()
-            
-            # display the default choice
-            config = choice_config.get(choices[selected_index].lower(), {"label": choices[selected_index], "desc": "", "color": "white"})
-            print(f"\r\033[K▶ {selected_index + 1}. {config['label']}", end='', flush=True)
-            
-            while True:
-                key = sys.stdin.read(1)
-
-                # Number key shortcuts
-                if key in ['1', '2', '3', '4']:
-                    idx = int(key) - 1
-                    if idx < len(choices):
-                        return choices[idx]
-
-                # Arrow keys - track selection and show simple feedback
-                elif key == '\x1b':
-                    key += sys.stdin.read(2)
-                    if key == '\x1b[A':  # Up
-                        selected_index = (selected_index - 1) % len(choices)
-                        # Show simple selection feedback
-                        config = choice_config.get(choices[selected_index].lower(), {"label": choices[selected_index], "color": "white"})
-                        print(f"\r\033[K▶ {selected_index + 1}. {config['label']}", end='', flush=True)
-                    elif key == '\x1b[B':  # Down
-                        selected_index = (selected_index + 1) % len(choices)
-                        # Show simple selection feedback
-                        config = choice_config.get(choices[selected_index].lower(), {"label": choices[selected_index], "color": "white"})
-                        print(f"\r\033[K▶ {selected_index + 1}. {config['label']}", end='', flush=True)
-
-                # Enter key
-                elif key in ['\r', '\n']:
-                    # Clear any status line before returning
-                    print('\r\033[K', end='', flush=True)
-                    return choices[selected_index]
-
-                # Ctrl+C
-                elif key == '\x03':
-                    raise KeyboardInterrupt()
-
-        finally:
-            pass
-            #termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    # Get choice asynchronously
-    loop = asyncio.get_event_loop()
-    selected_choice = await loop.run_in_executor(None, get_keypress_choice)
-
-    # Show clean selection result in console history
-    config = choice_config.get(selected_choice.lower(), {"label": selected_choice, "color": "white"})
-    console.print(f"[green bold]✅ Selected: {config['label']}[/green bold]")
-
-    return selected_choice
-
-
-
-def display_simple_confirmation(execution) -> None:
-    """Display simplified command confirmation panel using UserResponse enum."""
-    from rich.panel import Panel
-    from rich.text import Text
-
-    # Build content
-    content = []
-
-    # Command info section
-    command_text = Text()
-    command_text.append("Command: ", style="bold cyan")
-    command_text.append(execution.command, style="bold white")
-    content.append(str(command_text))
-
-    # Add separator
-    content.append("")
-
-    # Complete choice display using all UserResponse enum values
-    choices = [
-        ("✅ Yes", "Execute the command as shown"),
-        ("❌ No", "Cancel command execution"),
-        ("✏️ Modify", "Edit the command before execution"),
-        ("❓ Explain", "Ask agent to explain the command")
-    ]
-
-    for i, (label, desc) in enumerate(choices):
-        choice_line = Text()
-        choice_line.append(f"  {i+1}. {label}", style="bold")
-        choice_line.append(f" - {desc}", style="white dim")
-        content.append(str(choice_line))
-
-    # Add instructions
-    content.append("")
-    instructions = Text()
-    instructions.append("Press ", style="white dim")
-    instructions.append("1-4", style="cyan bold")
-    instructions.append(" or use ", style="white dim")
-    instructions.append("↑/↓ arrows", style="cyan bold")
-    instructions.append(" + ", style="white dim")
-    instructions.append("Enter", style="green bold")
-    content.append(str(instructions))
-
-    # Create panel
-    panel = Panel(
-        "\n".join(content),
-        title="🤖 Command Confirmation",
-        title_align="left",
-        border_style="cyan",
-        padding=(1, 2)
-    )
-
-    console.print(panel)
-
-
-
-
-"""ASCII art splash screen for da_code."""
-
-
-
-def get_splash_screen() -> str:
-    """Get the da_code ASCII splash screen."""
-
-    # Main da_code ASCII art
-    ascii_art = r"""
-██████╗  █████╗      ██████╗ ██████╗ ██████╗ ███████╗
-██╔══██╗██╔══██╗    ██╔════╝██╔═══██╗██╔══██╗██╔════╝
-██║  ██║███████║    ██║     ██║   ██║██║  ██║█████╗
-██║  ██║██╔══██║    ██║     ██║   ██║██║  ██║██╔══╝
-██████╔╝██║  ██║    ╚██████╗╚██████╔╝██████╔╝███████╗
-╚═════╝ ╚═╝  ╚═╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
-
-    🤖 Agentic CLI with Agno & Azure OpenAI 🚀
-    """
-
-    return ascii_art
-
-def get_random_taglines() -> List[str]:
-    """Get random taglines for variety."""
-    return [
-        "🤖 Agentic CLI with Agno & Azure OpenAI 🚀",
-        "🧠 AI-Powered Command Line Assistant 🔧",
-        "⚡ Smart Automation with Human Oversight 🛡️",
-        "🎯 Precision Coding with AI Intelligence 💡",
-        "🔬 Advanced AI Tooling for Developers 🚀",
-        "🌟 Next-Gen CLI Experience 🤖",
-        "⚙️  Intelligent Command Execution 🎪",
-        "🎨 Where AI Meets Development Workflow 🔥"
-    ]
-
-
-def get_mini_splash() -> str:
-    """Get a smaller splash for quick starts."""
-    return r"""
-██████╗  █████╗ ██████╗
-██╔══██╗██╔══██╗██╔════╝
-██║  ██║███████║██║     
-██║  ██║██╔══██║██║     
-██████╔╝██║  ██║╚██████╗
-╚═════╝ ╚═╝  ╚═╝ ╚═════╝
-🤖 Your AI Coding Assistant 🚀
-"""
-
-
-def get_status_splash() -> str:
-    """Get splash screen for status/setup commands."""
-    return r"""
-    ╔═════════════════════════════════╗
-    ║     ██████╗  █████╗ ██████╗     ║
-    ║     ██╔══██╗██╔══██╗██╔════╝    ║
-    ║     ██║  ██║███████║██║         ║
-    ║     ██║  ██║██╔══██║██║         ║
-    ║     ██████╔╝██║  ██╚██████╗     ║
-    ║     ╚═════╝ ╚═╝  ╚═╝╚═════╝     ║
-    ╚═════════════════════════════════╝
-    """
-
-
-def print_with_colors(text: str, color_code: str = "94") -> None:
-    """Print text with ANSI colors."""
-    print(f"\033[{color_code}m{text}\033[0m")
-
-
-def print_gradient_splash(text: str) -> None:
-    """Print splash with gradient effect."""
-    lines = text.split('\n')
-    # True blue gradient: dark blue -> bright blue -> cyan
-    colors = ["34", "94", "94", "96", "96", "36", "36", "96"]
-
-    for i, line in enumerate(lines):
-        color = colors[i % len(colors)]
-        print(f"\033[{color}m{line}\033[0m")
-
-
-def print_rainbow_splash(text: str) -> None:
-    """Print splash with rainbow colors."""
-    lines = text.split('\n')
-    rainbow_colors = ["91", "93", "92", "96", "94", "95"]
-
-    for i, line in enumerate(lines):
-        if line.strip():  # Only color non-empty lines
-            color = rainbow_colors[i % len(rainbow_colors)]
-            print(f"\033[{color}m{line}\033[0m")
-        else:
-            print(line)
-
-
-def show_splash(style: str = "default", mini: bool = False) -> None:
-    """Show splash screen with specified style."""
-
-    if mini:
-        splash = get_mini_splash()
-    else:
-        splash = get_splash_screen()
-        # Add random tagline
-        taglines = get_random_taglines()
-        random_tagline = random.choice(taglines)
-        splash = splash.replace("🤖 Agentic CLI with Agno & Azure OpenAI 🚀", random_tagline)
-
-    # Apply styling
-    if style == "gradient":
-        print_gradient_splash(splash)
-    elif style == "blue":
-        print_with_colors(splash, "94")
-    elif style == "cyan":
-        print_with_colors(splash, "96")
-    elif style == "green":
-        print_with_colors(splash, "92")
-    elif style == "yellow":
-        print_with_colors(splash, "93")
-    elif style == "purple":
-        print_with_colors(splash, "95")
-    else:
-        # Default - no colors
-        print(splash)
-
-
-def show_status_splash() -> None:
-    """Show splash for status/configuration commands."""
-    print_with_colors(get_status_splash(), "96")
+#====================================================================================================
+# Cli session, example config, and status functions
+#====================================================================================================
 
 
 def create_session(context_ldr: ContextLoader):
+    
+    if not os.path.exists(".da"):
+        os.makedirs(".da")
+
     # Load project context
     project_context = context_ldr.load_project_context()
 
@@ -392,7 +93,6 @@ def create_example_configuration(config_mgr: ConfigManager, context_ldr: Context
         return 1
 
 
-
 def show_status(config_mgr: ConfigManager, context_ldr: ContextLoader) -> int:
     """Show configuration and system status."""
     try:
@@ -422,6 +122,10 @@ def show_status(config_mgr: ConfigManager, context_ldr: ContextLoader) -> int:
         print(f"❌ Status check failed: {e}")
         return 1
 
+
+#====================================================================================================
+# Shell mode and command execution
+#====================================================================================================
 
 
 class ShellCompleter(Completer):
@@ -562,345 +266,10 @@ class ShellModeManager:
         return "\n".join(context_lines)
 
 
-class SimpleStatusInterface:
-    """Simple status interface with Rich spinner and agent insights."""
 
-    def __init__(self):
-        self.start_time = None
-        self.current_status = None
-        self.llm_calls = 0
-        self.tool_calls = 0
-        self.total_tokens = 0
-        self.callback_handler = None
-        # Agent metrics (LangGraph only)
-        self.agent_metrics = {'calls': 0, 'tokens': 0}
-
-    def start_execution(self, message: str):
-        """Start execution with status message."""
-        self.start_time = time.time()
-        self.llm_calls = 0
-        self.tool_calls = 0
-        self.total_tokens = 0
-        # Reset agent metrics
-        self.agent_metrics = {'calls': 0, 'tokens': 0}
-        self.current_status = Status(f"🤖 {message}", spinner="dots")
-        self.current_status.start()
-
-    def update_status(self, message: str):
-        """Update the current status message."""
-        if self.current_status:
-            elapsed = time.time() - self.start_time if self.start_time else 0
-            status_text = f"🤖 {message} | {elapsed:.1f}s"
-            if self.llm_calls > 0:
-                status_text += f" | LLM: {self.llm_calls}"
-            if self.tool_calls > 0:
-                status_text += f" | Tools: {self.tool_calls}"
-            if self.total_tokens > 0:
-                status_text += f" | Tokens: {self.total_tokens}"
-            self.current_status.update(status_text)
-
-    def log_llm_call(self, tokens_used: int = 0):
-        """Log an LLM call."""
-        self.llm_calls += 1
-        if tokens_used > 0:
-            self.total_tokens += tokens_used
-        self.update_status("Processing...")
-
-    def log_tool_call(self, tool_name: str = ""):
-        """Log a tool call."""
-        self.tool_calls += 1
-        self.update_status(f"Using tool: {tool_name}" if tool_name else "Using tool...")
-
-    def track_agent_call(self, tokens: int = 0):
-        """Track agent calls and token usage."""
-        self.agent_metrics['calls'] += 1
-        self.agent_metrics['tokens'] += tokens
-
-    def stop_execution(self, success: bool = True, final_message: str = None):
-        """Stop execution and show final result."""
-        if self.current_status:
-            self.current_status.stop()
-
-        elapsed = time.time() - self.start_time if self.start_time else 0
-
-        if success:
-            result_text = "✅ Complete"
-        else:
-            result_text = "❌ Failed"
-
-        result_text += f" {elapsed:.1f}s"
-
-        # Add current directory
-        current_dir = os.path.basename(os.getcwd()) or "/"
-        result_text += f" | 📂 {current_dir}"
-
-        if self.llm_calls > 0:
-            result_text += f" | LLM: {self.llm_calls}"
-        if self.tool_calls > 0:
-            result_text += f" | Tools: {self.tool_calls}"
-        if self.total_tokens > 0:
-            result_text += f" | Tokens: {self.total_tokens}"
-
-        if final_message:
-            result_text += f" | {final_message}"
-
-        console.print(result_text)
-        self.current_status = None
-        self.callback_handler = None
-
-
-async def async_prompt_text(message: str, default: str = None) -> str:
-    """Async wrapper for Rich text prompts."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: Prompt.ask(message, default=default)
-    )
-
-
-def get_file_emoji(filename: str) -> str:
-    """Get emoji for file type"""
-    name_lower = filename.lower()
-    if name_lower.endswith(('.py', '.pyw')):
-        return "🐍"
-    elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
-        return "🟨"
-    elif name_lower.endswith(('.md', '.markdown')):
-        return "📖"
-    elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
-        return "⚙️"
-    elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
-        return "🔧"
-    elif name_lower.endswith(('.txt', '.log')):
-        return "📝"
-    elif name_lower.endswith(('.sh', '.bash', '.zsh')):
-        return "🔸"
-    elif name_lower.endswith(('.html', '.htm', '.css')):
-        return "🌐"
-    elif name_lower.endswith(('.sql', '.db', '.sqlite')):
-        return "🗄️"
-    elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-        return "🖼️"
-    else:
-        return "📄"
-
-
-def calculate_directory_activity_score(dir_path: Path, current_time: float) -> float:
-    """Calculate activity score using max(avg_file_activity, directory_activity)"""
-    try:
-        dir_stat = dir_path.stat()
-        directory_update_delta = current_time - dir_stat.st_mtime
-
-        # Get all file update deltas
-        file_deltas = []
-        for file_path in dir_path.rglob('*'):
-            if (file_path.is_file() and
-                not file_path.name.startswith('.') and
-                file_path.name not in {'__pycache__', '.pyc', '.pyo'}):
-                file_delta = current_time - file_path.stat().st_mtime
-                file_deltas.append(file_delta)
-
-        if not file_deltas:
-            return directory_update_delta
-
-        avg_file_activity = sum(file_deltas) / len(file_deltas)
-
-        # Your scoring formula: max of average file activity vs directory activity
-        score = max(avg_file_activity, directory_update_delta)
-        return score
-
-    except (OSError, PermissionError):
-        return float('inf')  # Inaccessible = lowest priority
-
-
-def get_activity_ranked_directories(working_dir: str, top_n: int = 3) -> list:
-    """Get directories ranked by recent activity score"""
-    current_time = time.time()
-    scored_dirs = []
-    path = Path(working_dir)
-
-    ignored = {'.git', '__pycache__', '.vscode', 'node_modules', '.pytest_cache'}
-
-    for item in path.iterdir():
-        if (item.is_dir() and
-            not item.name.startswith('.') and
-            item.name not in ignored):
-            score = calculate_directory_activity_score(item, current_time)
-            scored_dirs.append((item.name, score))
-
-    # Sort by score (lower = more recent activity)
-    scored_dirs.sort(key=lambda x: x[1])
-    return scored_dirs[:top_n]
-
-
-def get_subdirectory_preview(working_dir: str, subdir_name: str, max_files: int = 4) -> str:
-    """Get preview of subdirectory contents with emoji file types"""
-    subdir_path = Path(working_dir) / subdir_name
-    if not subdir_path.exists() or not subdir_path.is_dir():
-        return ""
-
-    preview_lines = []
-    file_count = 0
-    total_files = 0
-
-    try:
-        # Get files sorted by size (larger files often more important)
-        files = []
-        for item in subdir_path.iterdir():
-            if item.is_file() and not item.name.startswith('.'):
-                try:
-                    size = item.stat().st_size
-                    files.append((item.name, size))
-                    total_files += 1
-                except (OSError, PermissionError):
-                    continue
-
-        # Sort by size descending, then by name
-        files.sort(key=lambda x: (-x[1], x[0]))
-
-        # Show top files with emojis
-        for filename, size in files[:max_files]:
-            if size < 1024:
-                size_str = f"{size}B"
-            elif size < 1024*1024:
-                size_str = f"{size//1024}KB"
-            else:
-                size_str = f"{size//(1024*1024)}MB"
-
-            emoji = get_file_emoji(filename)
-            preview_lines.append(f"  └── {emoji} {filename} ({size_str})")
-            file_count += 1
-
-        # Add summary if there are more files
-        if total_files > max_files:
-            remaining = total_files - max_files
-            preview_lines.append(f"  └── ... and {remaining} more files")
-
-    except (OSError, PermissionError):
-        preview_lines.append(f"  └── (unable to read {subdir_name})")
-
-    return "\n".join(preview_lines)
-
-
-def format_time_delta(seconds: float) -> str:
-    """Format time delta in human readable form"""
-    if seconds < 60:
-        return f"{int(seconds)}s ago"
-    elif seconds < 3600:
-        return f"{int(seconds/60)}m ago"
-    elif seconds < 86400:
-        return f"{int(seconds/3600)}h ago"
-    else:
-        return f"{int(seconds/86400)}d ago"
-
-
-def get_directory_listing(working_dir: str) -> tuple[str, float]:
-    """Get integrated directory listing with subdirectory previews and time deltas."""
-    try:
-        path = Path(working_dir)
-        listing = []
-        current_time = time.time()
-
-        # Get files/dirs, skip ignored patterns
-        ignored = {'.git', '__pycache__', '.vscode', 'node_modules'}
-
-        # Get activity scores for directories
-        directory_scores = {}
-        for item in path.iterdir():
-            if (item.is_dir() and
-                not item.name.startswith('.') and
-                item.name not in ignored):
-                score = calculate_directory_activity_score(item, current_time)
-                directory_scores[item.name] = score
-
-        # Process all items with integrated subdirectory previews
-        for item in sorted(path.iterdir()):
-            if item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
-                continue
-            if item.name in ignored:
-                continue
-
-            try:
-                if item.is_dir():
-                    # Directory with activity score and time delta
-                    activity_score = directory_scores.get(item.name, float('inf'))
-                    time_delta = format_time_delta(activity_score)
-
-                    listing.append(f"📁 {item.name}/ ({time_delta})")
-
-                    # Add subdirectory preview if it's one of the active directories
-                    if activity_score < 7 * 86400:  # Only show preview for dirs active within 7 days
-                        preview = get_subdirectory_preview(working_dir, item.name, max_files=3)
-                        if preview:
-                            listing.append(preview)
-                else:
-                    # File with size and modification time
-                    stat = item.stat()
-                    mod_delta = current_time - stat.st_mtime
-                    time_str = format_time_delta(mod_delta)
-
-                    size = stat.st_size
-                    if size < 1024:
-                        size_str = f"{size}B"
-                    elif size < 1024*1024:
-                        size_str = f"{size//1024}KB"
-                    else:
-                        size_str = f"{size//(1024*1024)}MB"
-
-                    emoji = get_file_emoji(item.name)
-                    listing.append(f"{emoji} {item.name} ({size_str}, {time_str})")
-
-            except (OSError, PermissionError):
-                continue
-
-        if not listing:
-            listing.append("(empty directory)")
-
-        result = "\n".join(listing)
-        timestamp = time.time()
-        return result, timestamp
-
-    except Exception as e:
-        logger.error(f"Failed to get directory listing: {e}")
-        return f"📁 {working_dir} (unable to read)", time.time()
-
-
-def check_directory_changes(working_dir: str, cache_timestamp: float) -> Optional[str]:
-    """Check if directory changed since timestamp. Returns update message if changed."""
-    if not cache_timestamp:
-        return None
-
-    try:
-        path = Path(working_dir)
-
-        # Quick check: any file newer than cache?
-        for item in path.iterdir():
-            if item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
-                continue
-            if item.name in {'.git', '__pycache__', '.vscode', 'node_modules'}:
-                continue
-
-            try:
-                if item.stat().st_mtime > cache_timestamp:
-                    new_listing, _ = get_directory_listing(working_dir)
-                    return f"📁 Directory updated:\n{new_listing}\n\n"
-            except (OSError, PermissionError):
-                continue
-
-        return None
-
-    except Exception as e:
-        logger.error(f"Failed to check directory changes: {e}")
-        return None
-
-
-
-
-#---------------------------------------------------------------
-# Setup
-#---------------------------------------------------------------
-
-# Agent will be initialized in main() after config validation
+#====================================================================================================
+# async main with status interface and command loop
+#====================================================================================================
 
 
 # Available commands
@@ -911,49 +280,9 @@ async def async_main():
     status_interface = SimpleStatusInterface()
     shell_manager = ShellModeManager()
 
-
-
-    async def confirmation_handler(execution: CommandExecution, status_interface=status_interface) -> ConfirmationResponse:
-        """Handle command confirmation directly."""
-        # Stop status to show confirmation dialog cleanly
-        status_interface.stop_execution()
-
-        # Get user choice using enum values with command display
-        response = await async_prompt_user_silent([
-            UserResponse.YES.value.title(),    # "Yes"
-            UserResponse.NO.value.title(),     # "No"
-            UserResponse.MODIFY.value.title(), # "Modify"
-            UserResponse.EXPLAIN.value.title() # "Explain"
-        ], default=UserResponse.YES.value.title(), command=execution.command)
-
-        modified_command = None
-        if response.lower() == UserResponse.MODIFY.value:
-            # Get modified command from user
-            modified_command = await async_prompt_text("Enter modified command", default=execution.command)
-            if not modified_command:
-                response = UserResponse.NO.value.title()
-
-        # Restart status interface for continued execution
-        status_interface.start_execution("Processing...")
-
-        # Convert response back to enum value for consistency
-        response_lower = response.lower()
-        if response_lower == "yes":
-            enum_choice = UserResponse.YES.value
-        elif response_lower == "no":
-            enum_choice = UserResponse.NO.value
-        elif response_lower == "modify":
-            enum_choice = UserResponse.MODIFY.value
-        elif response_lower == "explain":
-            enum_choice = UserResponse.EXPLAIN.value
-        else:
-            enum_choice = UserResponse.NO.value  # Default fallback
-
-        return ConfirmationResponse(
-            choice=enum_choice,
-            modified_command=modified_command
-        )
-
+    async def confirm_wrapper(execution: CommandExecution) -> ConfirmationResponse:
+        return await confirmation_handler(execution, status_interface)
+    
     show_splash("gradient")
 
     # Check if we need to run setup first
@@ -971,9 +300,10 @@ async def async_main():
             raise ValueError("Failed to create code session!")
 
         status_interface.update_status("Initializing Agno agent...")
-            
-        # Directory cache for change detection
-        directory_cache, cache_timestamp = get_directory_listing(code_session.working_directory)
+
+        # Directory context for change detection
+        dir_context = DirectoryContext(code_session.working_directory)
+        directory_cache, cache_timestamp = dir_context.get_directory_listing()
         agent = AgnoAgent(code_session, directory_cache)
 
         # Track dynamic MCP tools
@@ -1019,7 +349,7 @@ async def async_main():
 
     # Set up history files
     agent_history = FileHistory(agent.config.history_file_path)
-    shell_history_path = os.getenv('SHELL_HISTORY_FILE', os.path.expanduser('~/.da_code_shell_history'))
+    shell_history_path = os.getenv('DA_CODE_SHELL_HISTORY', f'.da{os.sep}shell_history')
     shell_history = FileHistory(shell_history_path)
 
     # Set up completers
@@ -1035,7 +365,7 @@ async def async_main():
         shell_manager.toggle_shell_mode()
 
     # Create PromptSession for async usage - will switch history and completer dynamically
-    session = PromptSession(
+    prompt_session = PromptSession(
         history=agent_history,
         multiline=False,
         complete_style='column',
@@ -1051,23 +381,30 @@ async def async_main():
                 if shell_manager.is_shell_mode:
                     prompt_text = HTML('<yellow>shell$</yellow> ')
                     # Switch to shell history and completer
-                    session.history = shell_history
-                    session.completer = shell_completer
+                    prompt_session.history = shell_history
+                    prompt_session.completer = shell_completer
                 else:
                     prompt_text = HTML('<cyan>agent!</cyan> ')
                     # Switch to agent history and no completer
-                    session.history = agent_history
-                    session.completer = None
+                    prompt_session.history = agent_history
+                    prompt_session.completer = None
 
-                user_input = await session.prompt_async(prompt_text)
+                user_input = await prompt_session.prompt_async(prompt_text)
                 await queue.put(user_input)
             except (EOFError, KeyboardInterrupt):
                 return None
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
         
     input_queue = asyncio.Queue()
     status_queue = asyncio.Queue()
     output_queue = asyncio.Queue()
+
+    user_id = os.getenv('USER', None)
+    if user_id is None:
+        user_id = os.getenv('USERNAME', None)
+    if user_id is None:
+        user_id = "dang"
+    
     
     async with asyncio.TaskGroup() as tg:
         wait_for_input = tg.create_task(get_user_input_with_history(input_queue))
@@ -1120,7 +457,6 @@ async def async_main():
                     console.print("  • setup - Create configuration files")
                     console.print("  • status - Show current configuration status")
                     console.print("  • add_mcp <url> [name] - Add MCP server dynamically")
-                    console.print("  • shell - Toggle shell mode")
                     console.print("  • exit/quit/q - Exit the application")
                     console.print("\n[bold]Shell Mode:[/bold]")
                     console.print("  • Type [cyan]shell[/cyan] or press [cyan]Escape[/cyan] to toggle between modes")
@@ -1187,10 +523,10 @@ async def async_main():
                     # Beautiful unified streaming execution 🚀
                     try:
                         # Check for directory changes and add to user input if needed
-                        dir_update = check_directory_changes(code_session.working_directory, cache_timestamp)
+                        dir_update = dir_context.check_changes(cache_timestamp)
                         if dir_update:
                             # Update cache with fresh listing
-                            directory_cache, cache_timestamp = get_directory_listing(code_session.working_directory)
+                            directory_cache, cache_timestamp = dir_context.get_directory_listing()
 
                         # Add shell context to the user input if available
                         shell_context = shell_manager.get_shell_context_for_agent()
@@ -1206,12 +542,14 @@ async def async_main():
                         if context_parts:
                             context_str = "\n".join(context_parts)
                             enhanced_input = f"{context_str}\n\nUser request: {user_input}"
+                        
+                        sanitized_input = enhanced_input.encode('utf-8', 'replace').decode('utf-8')
 
                         status_message = f"Calculating: {user_input[:40]}..."
                         status_interface.start_execution(status_message)
                         output_message = ""
                         running_agent = tg.create_task(
-                            agent.arun(enhanced_input, confirmation_handler, tg, status_queue, output_queue)
+                            agent.arun(sanitized_input, confirm_wrapper, status_queue, output_queue, user_id)
                         )
                         user_input = None
                     except Exception as e:
@@ -1226,11 +564,6 @@ async def async_main():
                 continue
             except EOFError:
                 break
-        
-            finally:
-                # No MCP cleanup needed - custom MCP implementation will handle this
-                pass
-            
 
 
 
