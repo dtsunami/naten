@@ -105,7 +105,7 @@ class AgnoAgent():
                 if mcp_tool:
                     mcp_tools.append(mcp_tool)
                     actual_name = getattr(mcp_tool, 'name', 'unknown')
-                    logging.warning(f"✅ MCP: Successfully loaded {url} as '{actual_name}'")
+                    logging.info(f"✅ MCP: Successfully loaded {url} as '{actual_name}'")
                 else:
                     logging.error(f"❌ MCP: Failed to load {url}")
             except Exception as e:
@@ -128,7 +128,7 @@ class AgnoAgent():
         #self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
         # Agno uses the AzureOpenAI class to interface with Azure's service
         #self.llm = AzureAIFoundry(
-        logging.warning(f"Deployment Name {self.config.deployment_name}")
+        logging.info(f"Deployment Name {self.config.deployment_name}")
         self.llm = AzureOpenAI(
             id=self.config.deployment_name,
             #id="gpt-5-mini",
@@ -143,7 +143,7 @@ class AgnoAgent():
         
         self.reasoning = None
         if self.config.reasoning_deployment is not None:
-            logging.warning(f"Reasoning Deployment {self.config.reasoning_deployment}")
+            logging.info(f"Reasoning Deployment {self.config.reasoning_deployment}")
             self.reasoning = AzureOpenAI(
                 id=self.config.reasoning_deployment,
                 api_key=self.config.api_key,

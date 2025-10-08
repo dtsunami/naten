@@ -213,7 +213,7 @@ Any tool arguments(query, command, search, ...) should be supplied in the args p
             except Exception as e:
                 return f"Error calling MCP server: {str(e)}"
 
-        logger.warning(f"✅ MCP: Successfully created tool '{tool_name}' with {len(tools_info)} capabilities")
+        logger.info(f"✅ MCP: Successfully created tool '{tool_name}' with {len(tools_info)} capabilities")
         return mcp_server_tool
 
     except Exception as e:

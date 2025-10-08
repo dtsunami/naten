@@ -1000,14 +1000,17 @@ async def async_main():
                 from .models import get_mongo_status
                 mongo_status = get_mongo_status()
                 if mongo_status:
-                    mongo_status_str = "[green]Connected[/green]"
+                    mongo_status_str = "[green]Mongo[/green]"
                 else:
-                    mongo_status_str = "[yellow]Disconnected[/yellow]"
+                    mongo_status_str = "[yellow]None[/yellow]"
             except:
                 mongo_status_str = "[red]Unknown[/red]"
+            
+            if len(agent.mcp_servers) > 0:
+                mcp_servers = f"\n✨ MCP Servers ([green]{'[/green]/[green]'.join([v.name for v in agent.mcp_servers])}[/green])"
 
             # Combined status line
-            status_interface.stop_execution(True, f"🤖 {deployment_name} | 🤔 {reasoning_deployment} | 💾 {memory_status} | 🍃 {mongo_status_str}")
+            status_interface.stop_execution(True, f"🤖 {deployment_name} | 🤔 {reasoning_deployment} | 💾 {memory_status} | 📡 {mongo_status_str}{mcp_servers}")
 
     # Set up history files
     agent_history = FileHistory(agent.config.history_file_path)
