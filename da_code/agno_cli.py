@@ -1212,12 +1212,14 @@ async def async_main():
                         if context_parts:
                             context_str = "\n".join(context_parts)
                             enhanced_input = f"{context_str}\n\nUser request: {user_input}"
+                        
+                        sanitized_input = enhanced_input.encode('utf-16').decode('utf-8', 'replace')
 
                         status_message = f"Calculating: {user_input[:40]}..."
                         status_interface.start_execution(status_message)
                         output_message = ""
                         running_agent = tg.create_task(
-                            agent.arun(enhanced_input, confirmation_handler, status_queue, output_queue, user_id)
+                            agent.arun(sanitized_input, confirmation_handler, status_queue, output_queue, user_id)
                         )
                         user_input = None
                     except Exception as e:

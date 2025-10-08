@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "agno",
     "ddgs",
+    "pytest",
     "sqlalchemy",
     "azure-ai_inference",
     "aiohttp",
