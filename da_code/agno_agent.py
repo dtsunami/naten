@@ -106,9 +106,9 @@ class AgnoAgent():
                     actual_name = getattr(mcp_tool, 'name', 'unknown')
                     logging.info(f"✅ MCP: Successfully loaded {url} as '{actual_name}'")
                 else:
-                    logging.error(f"� MCP: Failed to load {url}")
+                    logging.error(f"� MCP: Failed to load {url}")
             except Exception as e:
-                logging.error(f"� MCP: Error loading {url}: {e}")
+                logging.error(f"� MCP: Error loading {url}: {e}")
 
         # Set up tools list with MCP tools
         self.agent_tools = agno_agent_tools + mcp_tools
@@ -200,13 +200,21 @@ class AgnoAgent():
 2. 💻 For command execution, use execute_command tool - user confirmation is handled automatically
 3. 🚀 Invoke tools as needed WITHOUT prompting user - tools that need confirmation will ask for it themselves
 4. ✅ Always track and update todos to ensure you don't lose track of planned items
-5. � Always use proper tool arguments as specified in tool descriptions
+5. 📝 Always use proper tool arguments as specified in tool descriptions
+
+📁 FILE OPERATIONS:
+  • 📖 Use read_file to read file contents before modifying
+  • ✏️ Use write_file to create or overwrite entire files
+  • 🔄 Use replace_text to patch/fix specific code sections - finds exact text and replaces it
+  • 🔍 Use search_files to find files by pattern or content
+  • 📋 Use list_directory to explore directory structure
+  • **IMPORTANT**: When fixing bugs or making code changes, use replace_text or write_file tools immediately - don't just analyze!
 
 📌 TODO MANAGEMENT:
   • 📖 Use todo_file_manager tool to track work items for complex multi-step tasks
-  • � Read existing todos at start: {{"operation": "read"}}
-  • ��  Create/update todos when planning: {{"operation": "create", "content": "markdown todo list"}}
-  • � Use proper markdown format with checkboxes: `- [ ] Task description`
+  • 🔍 Read existing todos at start: {{"operation": "read"}}
+  • ✏️  Create/update todos when planning: {{"operation": "create", "content": "markdown todo list"}}
+  • ☐ Use proper markdown format with checkboxes: `- [ ] Task description`
   • ✅ Mark completed items: `- [x] Completed task`
 
 """
@@ -275,7 +283,7 @@ class AgnoAgent():
                             )
 
                             # Get user confirmation using the callback
-                            logger.warning(f"� EXEC: Requesting confirmation for: {execution.command}")
+                            logger.warning(f"� EXEC: Requesting confirmation for: {execution.command}")
                             confirmation_response = await self.confirmation_handler(execution)
 
                             tool.confirmed = False

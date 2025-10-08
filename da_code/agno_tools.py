@@ -49,25 +49,25 @@ def get_file_emoji(filename: str) -> str:
     """Get emoji for file type"""
     name_lower = filename.lower()
     if name_lower.endswith(('.py', '.pyw')):
-        return "ðŸ"
+        return "ðŸ"
     elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
         return "ðŸŸ¨"
     elif name_lower.endswith(('.md', '.markdown')):
         return "ðŸ“–"
     elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
-        return "âš™ï¸"
+        return "âš™ï¸"
     elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
         return "ðŸ”§"
     elif name_lower.endswith(('.txt', '.log')):
-        return "ðŸ“"
+        return "ðŸ“"
     elif name_lower.endswith(('.sh', '.bash', '.zsh')):
         return "ðŸ”¸"
     elif name_lower.endswith(('.html', '.htm', '.css')):
-        return "ðŸŒ"
+        return "ðŸŒ"
     elif name_lower.endswith(('.sql', '.db', '.sqlite')):
-        return "ðŸ—„ï¸"
+        return "ðŸ—„ï¸"
     elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-        return "ðŸ–¼ï¸"
+        return "ðŸ–¼ï¸"
     else:
         return "ðŸ“„"
 
@@ -126,7 +126,7 @@ class TodoTool(Toolkit):
                 size = self.todo_file.stat().st_size
                 return f"âœ… todo.md exists ({size} bytes)"
             else:
-                return "âŒ todo.md does not exist"
+                return "ï¿½ todo.md does not exist"
 
         except Exception as e:
             return f"Error checking file existence: {str(e)}"
@@ -168,13 +168,13 @@ class TodoTool(Toolkit):
 #====================================================================================================
 
 class CommandTool(Toolkit):
-    """Ccommand execution tool."""
+    """Command execution tool."""
 
     def __init__(self, **kwargs):
         super().__init__(
             name="command_tool",
-            tools=[self.execute_command,
-            ],
+            tools=[self.execute_command],
+            requires_confirmation_tools=["execute_command"],
             **kwargs
         )
 
@@ -218,16 +218,16 @@ class CommandTool(Toolkit):
                     output += "No output"
                 return output
             else:
-                output = f"âŒ Command failed (exit code: {result.returncode})\n"
+                output = f"ï¿½ Command failed (exit code: {result.returncode})\n"
                 if result.stderr:
                     stderr = result.stderr.strip()
                     output += f"Error:\n{stderr[:1000]}" + ("...\n(truncated)" if len(stderr) > 1000 else "")
                 return output
 
         except subprocess.TimeoutExpired:
-            return "â° Command timed out after 5 minutes"
+            return "ï¿½ Command timed out after 5 minutes"
         except Exception as e:
-            return f"âŒ Command execution failed: {str(e)}"
+            return f"ï¿½ Command execution failed: {str(e)}"
 
 
 #====================================================================================================
@@ -241,6 +241,7 @@ class WebSearchTool(Toolkit):
         super().__init__(
             name="web_search",
             tools=[self.search],
+            requires_confirmation_tools=["search"],
             **kwargs
         )
 
@@ -257,7 +258,7 @@ class WebSearchTool(Toolkit):
         try:
             import urllib.parse
 
-            result = f"ðŸ” Search results for: {query}\n\n"
+            result = f"ï¿½ Search results for: {query}\n\n"
 
             try:
                 # Primary: DuckDuckGo instant answers
@@ -303,13 +304,13 @@ class WebSearchTool(Toolkit):
                         return result
                     else:
                         # Fallback: provide helpful search suggestion
-                        return f"ðŸ” Search: {query}\n\nNo instant results available. This query might work better with:\nâ€¢ More specific terms\nâ€¢ Different keywords\nâ€¢ Academic or technical search engines\n\nNote: This tool provides instant answers and definitions. For general web results, consider using a browser."
+                        return f"ï¿½ Search: {query}\n\nNo instant results available. This query might work better with:\nâ€¢ More specific terms\nâ€¢ Different keywords\nâ€¢ Academic or technical search engines\n\nNote: This tool provides instant answers and definitions. For general web results, consider using a browser."
 
                 else:
-                    return f"ðŸ” Search: {query}\n\nâŒ Search service unavailable (status {response.status_code})"
+                    return f"ï¿½ Search: {query}\n\nï¿½ Search service unavailable (status {response.status_code})"
 
             except Exception as e:
-                return f"ðŸ” Search: {query}\n\nâŒ Search error: {str(e)}\n\nNote: This tool provides instant answers and definitions from DuckDuckGo's API."
+                return f"ï¿½ Search: {query}\n\nï¿½ Search error: {str(e)}\n\nNote: This tool provides instant answers and definitions from DuckDuckGo's API."
 
         except Exception as e:
             return f"Web search error: {str(e)}"
@@ -376,7 +377,7 @@ class FileTool(Toolkit):
                         items.append({
                             "name": rel_path + "/",
                             "type": "directory",
-                            "emoji": "ðŸ“",
+                            "emoji": "ï¿½",
                             "size": None
                         })
                         # Recursively list subdirectories if depth allows
@@ -751,10 +752,10 @@ class PythonTool(Toolkit):
 
                 return result
             else:
-                return f"â° Code execution timed out after {timeout} seconds"
+                return f"ï¿½ Code execution timed out after {timeout} seconds"
 
         except Exception as e:
-            return f"âŒ Python execution error: {str(e)}"
+            return f"ï¿½ Python execution error: {str(e)}"
         finally:
             # Restore output
             sys.stdout = old_stdout
@@ -795,16 +796,16 @@ class GitTool(Toolkit):
                 timeout=30
             )
         except Exception as e:
-            return f"âŒ Git status failed: {str(e)}"
+            return f"ï¿½ Git status failed: {str(e)}"
         if result.returncode == 0:
             if result.stdout:
                 return f"ðŸ“‹ Git Status:\n{result.stdout}"
             else:
                 return "âœ… Working directory clean"
         else:
-            return f"âŒ Git status failed: {result.stderr}"
+            return f"ï¿½ Git status failed: {result.stderr}"
 
-    def diff(self, files: List[str] = None) -> str:
+    def diff(self, files: Optional[List[str]] = None) -> str:
         """Show git diff.
 
         Args:
@@ -820,16 +821,16 @@ class GitTool(Toolkit):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         except Exception as e:
-            return f"âŒ Git diff failed: {str(e)}"
+            return f"ï¿½ Git diff failed: {str(e)}"
 
         if result.returncode == 0:
             if result.stdout:
                 output = result.stdout
-                return f"ðŸ“ Git Diff:\n{output[:2000]}" + ("...\n(truncated)" if len(output) > 2000 else "")
+                return f"ï¿½ Git Diff:\n{output[:2000]}" + ("...\n(truncated)" if len(output) > 2000 else "")
             else:
                 return "No changes to show"
         else:
-            return f"âŒ Git diff failed: {result.stderr}"
+            return f"ï¿½ Git diff failed: {result.stderr}"
 
     def log(self, limit: int = 10) -> str:
         """Show git log.
@@ -848,12 +849,12 @@ class GitTool(Toolkit):
                 timeout=30
             )
         except Exception as e:
-            return f"âŒ Git log failed: {str(e)}"
+            return f"ï¿½ Git log failed: {str(e)}"
 
         if result.returncode == 0:
             return f"ðŸ“œ Recent Commits:\n{result.stdout}"
         else:
-            return f"âŒ Git log failed: {result.stderr}"
+            return f"ï¿½ Git log failed: {result.stderr}"
 
     def branch(self, branch_name: str = None) -> str:
         """Show current branch or create new branch.
@@ -875,7 +876,7 @@ class GitTool(Toolkit):
                 if result.returncode == 0:
                     return f"âœ… Created and switched to branch: {branch_name}"
                 else:
-                    return f"âŒ Branch creation failed: {result.stderr}"
+                    return f"ï¿½ Branch creation failed: {result.stderr}"
             else:
                 result = subprocess.run(
                     ["git", "branch", "--show-current"],
@@ -886,15 +887,16 @@ class GitTool(Toolkit):
                 if result.returncode == 0:
                     return f"ðŸŒ¿ Current branch: {result.stdout.strip()}"
                 else:
-                    return f"âŒ Branch check failed: {result.stderr}"
+                    return f"ï¿½ Branch check failed: {result.stderr}"
         except Exception as e:
-            return f"âŒ Branch operation failed: {str(e)}"
+            return f"ï¿½ Branch operation failed: {str(e)}"
 
-    def commit(self, message: str) -> str:
+    def commit(self, message: str, **kwargs) -> str:
         """Commit changes.
 
         Args:
             message: Commit message
+            **kwargs: Additional arguments (ignored for compatibility)
 
         Returns:
             Commit result
@@ -907,12 +909,12 @@ class GitTool(Toolkit):
                 timeout=30
             )
         except Exception as e:
-            return f"âŒ Commit failed: {str(e)}"
+            return f"ï¿½ Commit failed: {str(e)}"
 
         if result.returncode == 0:
             return f"âœ… Commit successful: {message}"
         else:
-            return f"âŒ Commit failed: {result.stderr}"
+            return f"ï¿½ Commit failed: {result.stderr}"
 
 
 #====================================================================================================
@@ -961,7 +963,7 @@ class HttpTool(Toolkit):
                 else:
                     return f"Error: Unsupported HTTP method: {method} (only GET, HEAD allowed)"
 
-            result = f"ðŸŒ HTTP {method.upper()} {url}\n"
+            result = f"ï¿½ HTTP {method.upper()} {url}\n"
             result += f"Status: {response.status_code} {response.reason_phrase}\n\n"
 
             # Add key response headers
@@ -998,8 +1000,8 @@ class HttpTool(Toolkit):
             return result
 
         except httpx.TimeoutException:
-            return f"â° HTTP request timed out after {timeout} seconds"
+            return f"ï¿½ HTTP request timed out after {timeout} seconds"
         except httpx.RequestError as e:
-            return f"âŒ HTTP request failed: {str(e)}"
+            return f"ï¿½ HTTP request failed: {str(e)}"
         except Exception as e:
-            return f"âŒ HTTP fetch error: {str(e)}"
+            return f"ï¿½ HTTP fetch error: {str(e)}"

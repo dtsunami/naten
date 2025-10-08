@@ -960,6 +960,8 @@ async def async_main():
     if not ConfigManager().validate_config():
         console.print("[yellow]Configuration not found. Run 'setup' to create configuration files.[/yellow]")
         console.print(f"Available commands: {', '.join(commands)}")
+        # Configuration missing - return early to avoid uninitialized agent usage
+        return
     else:
         # Initialize agent if config is valid
         status_interface.start_execution("Initializing session...")
@@ -980,6 +982,9 @@ async def async_main():
         if agent is None:
             logger.error("Agent init failed, rerun setup")
         else:
+            # Initialize mcp_servers display string to avoid NameError
+            mcp_servers = ""
+
             # Get deployment name
             deployment_name = agent.config.deployment_name
             reasoning_deployment = agent.config.reasoning_deployment
@@ -1076,7 +1081,7 @@ async def async_main():
                 # If agent is not running then wait for input command 
                 if running_agent is None:
                     if wait_for_input.done():
-                        console(f"ERROR: wait_for_input is done!! {wait_for_input.result()}")
+                        console.print(f"ERROR: wait_for_input is done!! {wait_for_input.result()}")
                     user_input = await input_queue.get()
                 elif running_agent.done():
                     try:
