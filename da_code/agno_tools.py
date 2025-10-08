@@ -26,14 +26,13 @@ def get_workspace_root() -> str:
 
 def within_workspace(path: str) -> bool:
     """Ensure the given path is within the allowed workspace."""
-    workspace_root = get_workspace_root()
+    workspace_root = os.path.abspath(get_workspace_root())
     abs_path = os.path.abspath(path)
-    abs_workspace = os.path.abspath(workspace_root)
-    return abs_path.startswith(abs_workspace)
+    return abs_path == workspace_root or abs_path.startswith(workspace_root + os.sep)
 
 def safe_path(path: str) -> str:
     """Resolve and validate a path inside the workspace."""
-    workspace_root = get_workspace_root()
+    workspace_root = os.path.abspath(get_workspace_root())
 
     # Handle absolute paths on Windows and Unix
     if os.path.isabs(path):
@@ -42,7 +41,7 @@ def safe_path(path: str) -> str:
         # Relative paths are resolved from workspace root
         abs_path = os.path.abspath(os.path.join(workspace_root, path))
 
-    if not within_workspace(abs_path) and False:
+    if not within_workspace(abs_path):
         raise ValueError(f"Path {abs_path} is outside workspace {workspace_root}")
     return abs_path
 
@@ -50,25 +49,25 @@ def get_file_emoji(filename: str) -> str:
     """Get emoji for file type"""
     name_lower = filename.lower()
     if name_lower.endswith(('.py', '.pyw')):
-        return "ğŸ"
+        return "ğŸ"
     elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
         return "ğŸŸ¨"
     elif name_lower.endswith(('.md', '.markdown')):
         return "ğŸ“–"
     elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
-        return "âš™ï¸"
+        return "âš™ï¸"
     elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
         return "ğŸ”§"
     elif name_lower.endswith(('.txt', '.log')):
-        return "ğŸ“"
+        return "ğŸ“"
     elif name_lower.endswith(('.sh', '.bash', '.zsh')):
         return "ğŸ”¸"
     elif name_lower.endswith(('.html', '.htm', '.css')):
-        return "ğŸŒ"
+        return "ğŸŒ"
     elif name_lower.endswith(('.sql', '.db', '.sqlite')):
-        return "ğŸ—„ï¸"
+        return "ğŸ—„ï¸"
     elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-        return "ğŸ–¼ï¸"
+        return "ğŸ–¼ï¸"
     else:
         return "ğŸ“„"
 
@@ -127,7 +126,7 @@ class TodoTool(Toolkit):
                 size = self.todo_file.stat().st_size
                 return f"âœ… todo.md exists ({size} bytes)"
             else:
-                return "âŒ todo.md does not exist"
+                return "âŒ todo.md does not exist"
 
         except Exception as e:
             return f"Error checking file existence: {str(e)}"
@@ -219,16 +218,16 @@ class CommandTool(Toolkit):
                     output += "No output"
                 return output
             else:
-                output = f"âŒ Command failed (exit code: {result.returncode})\n"
+                output = f"âŒ Command failed (exit code: {result.returncode})\n"
                 if result.stderr:
                     stderr = result.stderr.strip()
                     output += f"Error:\n{stderr[:1000]}" + ("...\n(truncated)" if len(stderr) > 1000 else "")
                 return output
 
         except subprocess.TimeoutExpired:
-            return "â° Command timed out after 5 minutes"
+            return "â° Command timed out after 5 minutes"
         except Exception as e:
-            return f"âŒ Command execution failed: {str(e)}"
+            return f"âŒ Command execution failed: {str(e)}"
 
 
 #====================================================================================================
@@ -258,7 +257,7 @@ class WebSearchTool(Toolkit):
         try:
             import urllib.parse
 
-            result = f"ğŸ” Search results for: {query}\n\n"
+            result = f"ğŸ” Search results for: {query}\n\n"
 
             try:
                 # Primary: DuckDuckGo instant answers
@@ -304,13 +303,13 @@ class WebSearchTool(Toolkit):
                         return result
                     else:
                         # Fallback: provide helpful search suggestion
-                        return f"ğŸ” Search: {query}\n\nNo instant results available. This query might work better with:\nâ€¢ More specific terms\nâ€¢ Different keywords\nâ€¢ Academic or technical search engines\n\nNote: This tool provides instant answers and definitions. For general web results, consider using a browser."
+                        return f"ğŸ” Search: {query}\n\nNo instant results available. This query might work better with:\nâ€¢ More specific terms\nâ€¢ Different keywords\nâ€¢ Academic or technical search engines\n\nNote: This tool provides instant answers and definitions. For general web results, consider using a browser."
 
                 else:
-                    return f"ğŸ” Search: {query}\n\nâŒ Search service unavailable (status {response.status_code})"
+                    return f"ğŸ” Search: {query}\n\nâŒ Search service unavailable (status {response.status_code})"
 
             except Exception as e:
-                return f"ğŸ” Search: {query}\n\nâŒ Search error: {str(e)}\n\nNote: This tool provides instant answers and definitions from DuckDuckGo's API."
+                return f"ğŸ” Search: {query}\n\nâŒ Search error: {str(e)}\n\nNote: This tool provides instant answers and definitions from DuckDuckGo's API."
 
         except Exception as e:
             return f"Web search error: {str(e)}"
@@ -377,7 +376,7 @@ class FileTool(Toolkit):
                         items.append({
                             "name": rel_path + "/",
                             "type": "directory",
-                            "emoji": "ğŸ“",
+                            "emoji": "ğŸ“",
                             "size": None
                         })
                         # Recursively list subdirectories if depth allows
@@ -429,7 +428,7 @@ class FileTool(Toolkit):
             File contents as string
         """
         path = safe_path(path)
-        with open(path, "r", errors="ignore") as f:
+        with open(path, "r", encoding='utf-8', errors="ignore") as f:
             lines = f.readlines()
         return "".join(lines[start_line-1:end_line]) if end_line else "".join(lines[start_line-1:])
 
@@ -451,8 +450,11 @@ class FileTool(Toolkit):
             os.makedirs(parent_dir, exist_ok=True)
 
         # Write the file
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            return json.dumps({"error": f"Failed to write file: {str(e)}"})
 
         file_exists_msg = "Updated" if os.path.exists(path) else "Created"
         return f"{file_exists_msg} file: {path} ({len(content)} bytes)"
@@ -479,8 +481,11 @@ class FileTool(Toolkit):
             os.makedirs(parent_dir, exist_ok=True)
 
         # Create the file
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            return json.dumps({"error": f"Failed to write file: {str(e)}"})
 
         return f"Created file: {path} ({len(content)} bytes)"
 
@@ -521,7 +526,10 @@ class FileTool(Toolkit):
         import glob
         results = []
 
-        for file_path in glob.glob(safe_path(pattern), recursive=True):
+        # Build a glob rooted at the workspace to avoid expanding outside the project root
+        root = get_workspace_root()
+        search_pattern = os.path.join(root, pattern)
+        for file_path in glob.glob(search_pattern, recursive=True):
             if os.path.isfile(file_path):
                 if content:
                     try:
@@ -556,7 +564,7 @@ class FileTool(Toolkit):
         import re
         path = safe_path(path)
 
-        with open(path, "r", errors="ignore") as f:
+        with open(path, "r", encoding='utf-8', errors="ignore") as f:
             content = f.read()
 
         if use_regex:
@@ -570,7 +578,7 @@ class FileTool(Toolkit):
                 new_content = content.replace(search_text, replace_text)
                 count = content.count(search_text)
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding='utf-8') as f:
             f.write(new_content)
 
         return f"Replaced {count} occurrence(s) in {path}"
@@ -586,10 +594,13 @@ class FileTool(Toolkit):
             Success message with source and destination paths
         """
         import shutil
-        src = safe_path(source_path)
-        dst = safe_path(destination_path)
-        shutil.copy2(src, dst)
-        return f"Copied {src} to {dst}"
+        try:
+            src = safe_path(source_path)
+            dst = safe_path(destination_path)
+            shutil.copy2(src, dst)
+            return f"Copied {src} to {dst}"
+        except Exception as e:
+            return json.dumps({"error": f"Failed to copy file: {str(e)}"})
 
     def move_file(self, source_path: str, destination_path: str) -> str:
         """Move or rename a file.
@@ -602,10 +613,13 @@ class FileTool(Toolkit):
             Success message with source and destination paths
         """
         import shutil
-        src = safe_path(source_path)
-        dst = safe_path(destination_path)
-        shutil.move(src, dst)
-        return f"Moved {src} to {dst}"
+        try:
+            src = safe_path(source_path)
+            dst = safe_path(destination_path)
+            shutil.move(src, dst)
+            return f"Moved {src} to {dst}"
+        except Exception as e:
+            return json.dumps({"error": f"Failed to move file: {str(e)}"})
 
 
 #====================================================================================================
@@ -737,10 +751,10 @@ class PythonTool(Toolkit):
 
                 return result
             else:
-                return f"â° Code execution timed out after {timeout} seconds"
+                return f"â° Code execution timed out after {timeout} seconds"
 
         except Exception as e:
-            return f"âŒ Python execution error: {str(e)}"
+            return f"âŒ Python execution error: {str(e)}"
         finally:
             # Restore output
             sys.stdout = old_stdout
@@ -773,19 +787,22 @@ class GitTool(Toolkit):
         Returns:
             Git status output or clean working directory message
         """
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            return f"âŒ Git status failed: {str(e)}"
         if result.returncode == 0:
             if result.stdout:
                 return f"ğŸ“‹ Git Status:\n{result.stdout}"
             else:
                 return "âœ… Working directory clean"
         else:
-            return f"âŒ Git status failed: {result.stderr}"
+            return f"âŒ Git status failed: {result.stderr}"
 
     def diff(self, files: List[str] = None) -> str:
         """Show git diff.
@@ -800,15 +817,19 @@ class GitTool(Toolkit):
         if files:
             cmd.extend(files)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            return f"âŒ Git diff failed: {str(e)}"
+
         if result.returncode == 0:
             if result.stdout:
                 output = result.stdout
-                return f"ğŸ“ Git Diff:\n{output[:2000]}" + ("...\n(truncated)" if len(output) > 2000 else "")
+                return f"ğŸ“ Git Diff:\n{output[:2000]}" + ("...\n(truncated)" if len(output) > 2000 else "")
             else:
                 return "No changes to show"
         else:
-            return f"âŒ Git diff failed: {result.stderr}"
+            return f"âŒ Git diff failed: {result.stderr}"
 
     def log(self, limit: int = 10) -> str:
         """Show git log.
@@ -819,16 +840,20 @@ class GitTool(Toolkit):
         Returns:
             Git log output
         """
-        result = subprocess.run(
-            ["git", "log", f"--max-count={limit}", "--oneline"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        try:
+            result = subprocess.run(
+                ["git", "log", f"--max-count={limit}", "--oneline"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            return f"âŒ Git log failed: {str(e)}"
+
         if result.returncode == 0:
             return f"ğŸ“œ Recent Commits:\n{result.stdout}"
         else:
-            return f"âŒ Git log failed: {result.stderr}"
+            return f"âŒ Git log failed: {result.stderr}"
 
     def branch(self, branch_name: str = None) -> str:
         """Show current branch or create new branch.
@@ -839,28 +864,31 @@ class GitTool(Toolkit):
         Returns:
             Current branch name or branch creation result
         """
-        if branch_name:
-            result = subprocess.run(
-                ["git", "checkout", "-b", branch_name],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode == 0:
-                return f"âœ… Created and switched to branch: {branch_name}"
+        try:
+            if branch_name:
+                result = subprocess.run(
+                    ["git", "checkout", "-b", branch_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    return f"âœ… Created and switched to branch: {branch_name}"
+                else:
+                    return f"âŒ Branch creation failed: {result.stderr}"
             else:
-                return f"âŒ Branch creation failed: {result.stderr}"
-        else:
-            result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode == 0:
-                return f"ğŸŒ¿ Current branch: {result.stdout.strip()}"
-            else:
-                return f"âŒ Branch check failed: {result.stderr}"
+                result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    return f"ğŸŒ¿ Current branch: {result.stdout.strip()}"
+                else:
+                    return f"âŒ Branch check failed: {result.stderr}"
+        except Exception as e:
+            return f"âŒ Branch operation failed: {str(e)}"
 
     def commit(self, message: str) -> str:
         """Commit changes.
@@ -871,16 +899,20 @@ class GitTool(Toolkit):
         Returns:
             Commit result
         """
-        result = subprocess.run(
-            ["git", "commit", "-m", message],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        try:
+            result = subprocess.run(
+                ["git", "commit", "-m", message],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            return f"âŒ Commit failed: {str(e)}"
+
         if result.returncode == 0:
             return f"âœ… Commit successful: {message}"
         else:
-            return f"âŒ Commit failed: {result.stderr}"
+            return f"âŒ Commit failed: {result.stderr}"
 
 
 #====================================================================================================
@@ -929,7 +961,7 @@ class HttpTool(Toolkit):
                 else:
                     return f"Error: Unsupported HTTP method: {method} (only GET, HEAD allowed)"
 
-            result = f"ğŸŒ HTTP {method.upper()} {url}\n"
+            result = f"ğŸŒ HTTP {method.upper()} {url}\n"
             result += f"Status: {response.status_code} {response.reason_phrase}\n\n"
 
             # Add key response headers
@@ -966,8 +998,8 @@ class HttpTool(Toolkit):
             return result
 
         except httpx.TimeoutException:
-            return f"â° HTTP request timed out after {timeout} seconds"
+            return f"â° HTTP request timed out after {timeout} seconds"
         except httpx.RequestError as e:
-            return f"âŒ HTTP request failed: {str(e)}"
+            return f"âŒ HTTP request failed: {str(e)}"
         except Exception as e:
-            return f"âŒ HTTP fetch error: {str(e)}"
+            return f"âŒ HTTP fetch error: {str(e)}"
