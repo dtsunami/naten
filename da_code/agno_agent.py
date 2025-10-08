@@ -87,8 +87,8 @@ class AgnoAgent():
         try:
             self.db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
             self.db_type = "postgres"
-        except:
-            logging.warning("Postgre init failed, failing back to sqlite :-(")
+        except Exception as e:
+            logging.warning(f"Postgres init failed, falling back to sqlite: {e}")
             self.db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
             self.db_type = "sqlite"
 
@@ -107,9 +107,9 @@ class AgnoAgent():
                     actual_name = getattr(mcp_tool, 'name', 'unknown')
                     logging.info(f"✅ MCP: Successfully loaded {url} as '{actual_name}'")
                 else:
-                    logging.error(f"❌ MCP: Failed to load {url}")
+                    logging.error(f"� MCP: Failed to load {url}")
             except Exception as e:
-                logging.error(f"❌ MCP: Error loading {url}: {e}")
+                logging.error(f"� MCP: Error loading {url}: {e}")
 
         # Set up tools list with MCP tools
         self.agent_tools = agno_agent_tools + mcp_tools
@@ -172,7 +172,7 @@ class AgnoAgent():
             description=self.system_message,
             instructions=instructions,
             markdown=True,
-            reasoning=True,
+            reasoning=self.reasoning is not None,
             enable_user_memories=True,
             add_memories_to_context=True,
             structured_outputs=False,
