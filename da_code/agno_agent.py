@@ -35,20 +35,20 @@ from .context import ContextLoader
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .telemetry import TelemetryManager, PerformanceTracker
 from .agno_tools import (
-    handle_todo_operation, execute_command, web_search, file_tool,
-    file_search, current_time, python_executor, git_operations, http_fetch
+    TodoTool, CommandTool, WebSearchTool, FileTool,
+    TimeTool, PythonTool, GitTool, HttpTool
 )
 from .mcp_tool import mcp2tool
 
 agno_agent_tools = [
-    handle_todo_operation,
-    execute_command,
-    file_tool,
-    current_time,
-    python_executor,
-    git_operations,
-    http_fetch,
-    DuckDuckGoTools(),
+    TodoTool(),
+    CommandTool(),
+    WebSearchTool(),
+    FileTool(),
+    TimeTool(),
+    PythonTool(),
+    GitTool(),
+    HttpTool(),
     ReasoningTools(
             enable_think=True,
             enable_analyze=True,

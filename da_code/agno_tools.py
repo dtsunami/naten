@@ -4,8 +4,7 @@ import time
 from typing import Dict, Any, List, Optional, Union, Literal
 import httpx
 from pathlib import Path
-from agno.agent import Agent
-from agno.tools import tool
+from agno.tools import Toolkit
 from pydantic import BaseModel, Field, ConfigDict
 from .models import (
     AgentConfig, CodeSession, CommandExecution, CommandStatus,
@@ -18,424 +17,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 #====================================================================================================
-# Pydantics
+# Utilities
 #====================================================================================================
-
-# Modern Pydantic v2 models for tool parameters
-class TodoOperation(BaseModel):
-    """Structured parameters for todo operations."""
-    model_config = ConfigDict(extra='forbid')
-
-    operation: Literal["read", "exists", "create", "update", "write"] = "read"
-    content: Optional[str] = None
-
-class WebSearchParams(BaseModel):
-    """Structured parameters for web search."""
-    model_config = ConfigDict(extra='forbid')
-
-    query: str = Field(..., description="Search query")
-    num_results: int = Field(5, ge=1, le=20, description="Number of results to return")
-
-class FileSearchParams(BaseModel):
-    """Structured parameters for file search."""
-    model_config = ConfigDict(extra='forbid')
-
-    pattern: str = Field("*", description="Glob pattern for file matching")
-    content: Optional[str] = Field(None, description="Text content to search for")
-    max_results: int = Field(20, ge=1, le=100, description="Maximum results to return")
-
-class TimeParams(BaseModel):
-    """Structured parameters for time operations."""
-    model_config = ConfigDict(extra='forbid')
-
-    format: str = Field("iso", description="Time format: iso, human, timestamp, date, time, or custom strftime")
-    timezone: str = Field("UTC", description="Timezone (currently only UTC supported)")
-
-class PythonCodeParams(BaseModel):
-    """Structured parameters for Python code execution."""
-    model_config = ConfigDict(extra='forbid')
-
-    code: str = Field(..., description="Python code to execute")
-    timeout: int = Field(30, ge=1, le=300, description="Timeout in seconds (1-300)")
-
-class GitParams(BaseModel):
-    """Structured parameters for git operations."""
-    model_config = ConfigDict(extra='forbid')
-
-    operation: Literal["status", "commit", "diff", "branch", "log"] = "status"
-    message: Optional[str] = Field(None, description="Commit message (required for commit operation)")
-    branch_name: Optional[str] = Field(None, description="Branch name for branch operations")
-    files: Optional[List[str]] = Field(None, description="Specific files for diff operation")
-    limit: int = Field(10, ge=1, le=50, description="Number of log entries to show")
-
-
-#====================================================================================================
-# Tool input handling
-#====================================================================================================
-
-
-def _handle_simple_string(value: str, model_class: type) -> Union[BaseModel, str]:
-    """Handle simple string inputs for different model classes."""
-    if model_class == TodoOperation:
-        return TodoOperation(operation="create", content=value)
-    elif model_class == WebSearchParams:
-        return WebSearchParams(query=value)
-    elif model_class == FileSearchParams:
-        return FileSearchParams(pattern=value)
-    elif model_class == TimeParams:
-        return TimeParams(format=value)
-    elif model_class == PythonCodeParams:
-        return PythonCodeParams(code=value)
-    elif model_class == GitParams:
-        return GitParams(operation="status")
-    else:
-        return f"Invalid input format for {model_class.__name__}"
-
-
-# Tool factory functions with modern patterns
-def _parse_tool_input(tool_input: Union[str, dict], model_class: type) -> Union[BaseModel, str]:
-    """Parse and validate tool input using Pydantic models."""
-    try:
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-
-                # Handle LangChain's __arg1 format
-                if "__arg1" in params:
-                    arg1_value = params["__arg1"]
-                    if isinstance(arg1_value, str):
-                        try:
-                            # Try to parse __arg1 as JSON
-                            actual_params = json.loads(arg1_value)
-                            return model_class(**actual_params)
-                        except json.JSONDecodeError:
-                            # __arg1 is a simple string, handle by model type
-                            return _handle_simple_string(arg1_value, model_class)
-                    else:
-                        # __arg1 is already a dict
-                        return model_class(**arg1_value)
-                else:
-                    # Normal JSON params
-                    return model_class(**params)
-            except json.JSONDecodeError:
-                # Handle simple string inputs
-                return _handle_simple_string(tool_input, model_class)
-        else:
-            # Handle dict input (already parsed)
-            if "__arg1" in tool_input:
-                arg1_value = tool_input["__arg1"]
-                if isinstance(arg1_value, str):
-                    try:
-                        actual_params = json.loads(arg1_value)
-                        return model_class(**actual_params)
-                    except json.JSONDecodeError:
-                        return _handle_simple_string(arg1_value, model_class)
-                else:
-                    return model_class(**arg1_value)
-            else:
-                return model_class(**tool_input)
-    except Exception as e:
-        return f"Parameter validation error: {str(e)}"
-
-#====================================================================================================
-# TODO Tool
-#====================================================================================================
-
-
-
-class TodoManager:
-    """Modern todo.md file manager with async support and structured operations."""
-
-    def __init__(self, working_directory: str = None):
-        """Initialize todo manager."""
-        self.working_dir = working_directory or os.getcwd()
-        self.todo_file = Path(self.working_dir) / "todo.md"
-
-    def read_todo_file(self) -> str:
-        """Read current contents of todo.md file."""
-        try:
-            if not self.todo_file.exists():
-                return "No todo.md file exists in the current directory."
-
-            content = self.todo_file.read_text(encoding='utf-8')
-            if not content.strip():
-                return "todo.md file exists but is empty."
-
-            return content.strip()
-
-        except Exception as e:
-            return f"Error reading todo file: {str(e)}"
-
-    def file_exists(self) -> str:
-        """Check if todo.md file exists."""
-        try:
-            exists = self.todo_file.exists()
-            if exists:
-                size = self.todo_file.stat().st_size
-                return f"✅ todo.md exists ({size} bytes)"
-            else:
-                return "❌ todo.md does not exist"
-
-        except Exception as e:
-            return f"Error checking file existence: {str(e)}"
-
-    def create_todo_file(self, content: str) -> str:
-        """Create or completely replace todo.md file with provided content."""
-        try:
-            # Ensure content follows proper markdown format
-            if not content.strip().startswith('# '):
-                content = f"# TODO\n\n{content.strip()}"
-
-            self.todo_file.write_text(content.strip() + '\n', encoding='utf-8')
-            return f"✅ Created/updated todo.md file"
-
-        except Exception as e:
-            return f"Error creating todo file: {str(e)}"
-
-    def update_todo_file(self, new_content: str) -> str:
-        """Update todo.md file by replacing its contents."""
-        return self.create_todo_file(new_content)
-
-working_directory = os.getcwd()
-todo_manager = TodoManager(working_directory)
-
-@tool(
-    name="todo_file_manager",
-    description="Manage todo.md file with structured operations and modern validation.",
-    instructions="""
-SUPPORTED FORMATS:
-  - JSON: {"operation": "read"} or {"operation": "create", "content": "..."}
-
-OPERATIONS:
-  - read/get/show: Read current todo.md contents
-  - exists/check: Check if todo.md file exists
-  - create/update/write: Create or replace todo.md with content
-
-EXAMPLE INPUTS:
-  - {"operation": "read"}
-  - {"operation": "create", "content": "# TODO\n\n- [ ] New task"}
-  - "Quick todo item"
- 
-TODO FORMAT: Use markdown with - [ ] for tasks, - [x] for completed items
-    """
-)
-def handle_todo_operation(tool_input: str) -> str:
-    """Handle todo.md file operations with structured validation."""
-    params = _parse_tool_input(tool_input, TodoOperation)
-    if isinstance(params, str):
-        return params
-
-    try:
-        if params.operation in ["read", "get", "show"]:
-            return todo_manager.read_todo_file()
-        elif params.operation in ["exists", "check"]:
-            return todo_manager.file_exists()
-        elif params.operation in ["create", "update", "write"]:
-            if not params.content:
-                return "Error: content parameter is required for create/update operations"
-            return todo_manager.create_todo_file(params.content)
-        else:
-            return f"Error: Unsupported operation '{params.operation}'"
-    except Exception as e:
-        return f"Todo operation error: {str(e)}"
-
-
-
-#====================================================================================================
-# Command Tool
-#====================================================================================================
-
-
-@tool(
-    name="shell_command",
-    description="Execute shell/bash commands with user confirmation",
-    requires_confirmation=True,
-    instructions="""
-Input should be a JSON string with:
-- command: The command to execute (required)
-- explanation: Brief explanation of what the command does (optional)
-- reasoning: Why this command is needed (optional)
-- working_directory: Directory to run command in (optional)
-- related_files: List of files this command affects (optional)
-
-Example: {"command": "ls -la", "explanation": "List directory contents", "reasoning": "User wants to see files"}
-
-The tool will request user confirmation before executing any command.
-"""
-)
-def execute_command(tool_input: str) -> str:
-    """Execute shell commands with user confirmation."""
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.warning(f"🔧 SHELL_COMMAND TOOL CALLED with input: {tool_input}")
-
-    try:
-        # Parse command input
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-            except json.JSONDecodeError:
-                # Simple string command
-                params = {"command": tool_input}
-        else:
-            params = tool_input
-
-        command = params.get("command")
-        if not command:
-            command = params.get("cmd")
-        if not command:
-            return "Error: No command specified"
-
-        working_dir = params.get("working_directory", os.getcwd())
-
-        logger.warning(f"🔧 EXECUTING COMMAND: {command} in {working_dir}")
-        start_time = time.time()
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=working_dir,
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-
-        logger.warning(f"🔧 COMMAND RESULT: returncode={result.returncode}, stdout_len={len(result.stdout) if result.stdout else 0}")
-
-        exec_time = time.time() - start_time
-
-        if result.returncode == 0:
-            output = f"✅ Command executed successfully ({exec_time:.2f}s)\n"
-            if result.stdout:
-                stdout = result.stdout.strip()
-                output += f"Output:\n{stdout[:2000]}" + ("...\n(truncated)" if len(stdout) > 2000 else "")
-            else:
-                output += "No output"
-            return output
-        else:
-            output = f"❌ Command failed (exit code: {result.returncode})\n"
-            if result.stderr:
-                stderr = result.stderr.strip()
-                output += f"Error:\n{stderr[:1000]}" + ("...\n(truncated)" if len(stderr) > 1000 else "")
-            return output
-
-    except subprocess.TimeoutExpired:
-        return "⏰ Command timed out after 5 minutes"
-    except Exception as e:
-        return f"❌ Command execution failed: {str(e)}"
-
-
-#====================================================================================================
-# Web Search Tool
-#====================================================================================================
-
-@tool(
-    name="web_search",
-    description="Search the web for current information using DuckDuckGo with user confirmation",
-    requires_confirmation=True,
-    instructions="""
-SUPPORTED FORMATS:
-- JSON: {"query": "search terms", "num_results": 5}
-- Simple text: "search terms"
-
-EXAMPLE INPUTS:
-- {"query": "Python asyncio tutorial", "num_results": 3}
-- "latest AI news 2025"
-- {"query": "pydantic validation examples"}
-
-Returns: Instant answers, related topics, and source links.
-"""
-)
-def web_search(tool_input: str) -> str:
-    """Search the web for current information."""
-    try:
-        # Parse search input
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-                query = params.get("query", "")
-                num_results = params.get("num_results", 5)
-            except json.JSONDecodeError:
-                # Simple string query
-                query = tool_input
-                num_results = 5
-        else:
-            query = tool_input.get("query", "")
-            num_results = tool_input.get("num_results", 5)
-
-        if not query:
-            return "Error: No search query specified"
-
-        # Enhanced web search with multiple fallbacks
-        import httpx
-        import urllib.parse
-
-        result = f"🔍 Search results for: {query}\n\n"
-
-        try:
-            # Primary: DuckDuckGo instant answers
-            encoded_query = urllib.parse.quote(query)
-            url = f"https://api.duckduckgo.com/?q={encoded_query}&format=json&no_redirect=1&no_html=1"
-
-            with httpx.Client(timeout=10) as client:
-                response = client.get(url)
-
-            if response.status_code == 200:
-                data = response.json()
-
-                # Add instant answer if available
-                if data.get("AbstractText"):
-                    result += f"📖 Summary: {data['AbstractText']}\n"
-                    if data.get("AbstractURL"):
-                        result += f"   Source: {data['AbstractURL']}\n\n"
-
-                # Add related topics
-                if data.get("RelatedTopics"):
-                    result += "🔗 Related topics:\n"
-                    for i, topic in enumerate(data["RelatedTopics"][:num_results]):
-                        if isinstance(topic, dict) and topic.get("Text"):
-                            result += f"{i+1}. {topic['Text'][:200]}...\n"
-                            if topic.get("FirstURL"):
-                                result += f"   Source: {topic['FirstURL']}\n"
-                    result += "\n"
-
-                # Add definition if available
-                if data.get("Definition"):
-                    result += f"📚 Definition: {data['Definition']}\n"
-                    if data.get("DefinitionURL"):
-                        result += f"   Source: {data['DefinitionURL']}\n\n"
-
-                # Add answer if available
-                if data.get("Answer"):
-                    result += f"💡 Answer: {data['Answer']}\n"
-                    if data.get("AnswerType"):
-                        result += f"   Type: {data['AnswerType']}\n\n"
-
-                # Check if we got meaningful results
-                if len(result) > 100:  # More than just the header
-                    return result
-                else:
-                    # Fallback: provide helpful search suggestion
-                    return f"🔍 Search: {query}\n\nNo instant results available. This query might work better with:\n• More specific terms\n• Different keywords\n• Academic or technical search engines\n\nNote: This tool provides instant answers and definitions. For general web results, consider using a browser."
-
-            else:
-                return f"🔍 Search: {query}\n\n❌ Search service unavailable (status {response.status_code})"
-
-        except Exception as e:
-            return f"🔍 Search: {query}\n\n❌ Search error: {str(e)}\n\nNote: This tool provides instant answers and definitions from DuckDuckGo's API."
-
-    except Exception as e:
-        return f"Web search error: {str(e)}"
-
-
-#====================================================================================================
-# File Search Tool
-#====================================================================================================
-
-import os
-import re
-import glob
-import shutil
-import json
 
 def get_workspace_root() -> str:
     """Get workspace root from environment variable or current directory."""
@@ -451,164 +34,329 @@ def within_workspace(path: str) -> bool:
 def safe_path(path: str) -> str:
     """Resolve and validate a path inside the workspace."""
     workspace_root = get_workspace_root()
-    abs_path = os.path.abspath(os.path.join(workspace_root, path))
+
+    # Handle absolute paths on Windows and Unix
+    if os.path.isabs(path):
+        abs_path = os.path.abspath(path)
+    else:
+        # Relative paths are resolved from workspace root
+        abs_path = os.path.abspath(os.path.join(workspace_root, path))
+
     if not within_workspace(abs_path) and False:
         raise ValueError(f"Path {abs_path} is outside workspace {workspace_root}")
     return abs_path
 
-@tool(
-    name="file_tool",
-    description="Perform file operations: search, read, list directories, copy, move, and replace within the workspace",
-    instructions="""
-SUPPORTED OPERATIONS:
-• search - Find files by pattern/content
-• read - Read file contents
-• list - List directory contents with emoji file types
-• copy - Copy files
-• move - Move/rename files
-• replace - Find and replace text in files
+def get_file_emoji(filename: str) -> str:
+    """Get emoji for file type"""
+    name_lower = filename.lower()
+    if name_lower.endswith(('.py', '.pyw')):
+        return "🐍"
+    elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
+        return "🟨"
+    elif name_lower.endswith(('.md', '.markdown')):
+        return "📖"
+    elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
+        return "⚙️"
+    elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
+        return "🔧"
+    elif name_lower.endswith(('.txt', '.log')):
+        return "📝"
+    elif name_lower.endswith(('.sh', '.bash', '.zsh')):
+        return "🔸"
+    elif name_lower.endswith(('.html', '.htm', '.css')):
+        return "🌐"
+    elif name_lower.endswith(('.sql', '.db', '.sqlite')):
+        return "🗄️"
+    elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
+        return "🖼️"
+    else:
+        return "📄"
 
-FORMATS:
-- JSON: {"operation": "search", "pattern": "*.py", "content": "async def", "max_results": 10}
-- JSON: {"operation": "read", "path": "file.py", "start_line": 1, "end_line": 20}
-- JSON: {"operation": "list", "path": "subdir", "max_depth": 2, "show_hidden": false}
-- JSON: {"operation": "copy", "source_path": "file.py", "destination_path": "copy.py"}
-- JSON: {"operation": "move", "source_path": "old.py", "destination_path": "new.py"}
-- JSON: {"operation": "replace", "path": "file.py", "search_text": "foo", "replace_text": "bar"}
 
-LIST DIRECTORY:
-- Default: Current directory, depth 1, no hidden files
-- Emoji file types: 🐍 Python, 🟨 JS/TS, 📖 Markdown, ⚙️ Config, 📁 Directories
-- Returns JSON with structured file/directory info
+#====================================================================================================
+# TODO Toolkit
+#====================================================================================================
 
-EXAMPLES:
-- {"operation": "list", "path": "da_code"}
-- {"operation": "list", "path": ".", "max_depth": 2}
-- {"operation": "search", "pattern": "**/*.py"}
-- {"operation": "read", "path": "README.md"}
+class TodoTool(Toolkit):
+    """Todo.md file management tool."""
 
-Returns:
-- search: JSON array of file paths and line matches
-- read: Raw text content
-- list: JSON object with directory structure and emoji file types
-- copy/move/replace: Confirmation string
-"""
-)
-def file_tool(tool_input: str) -> str:
-    """Unified file operations tool for searching, reading, copying, moving, and replacing content."""
-    logger.debug(f" file_tool input {tool_input}")
-    try:
-        # Detect JSON input or plain string
-        params = json.loads(tool_input) if tool_input.strip().startswith("{") else {"operation": "search", "pattern": tool_input}
-    except Exception:
-        return json.dumps({"error": "Invalid JSON input"})
+    def __init__(self, working_directory: str = None, **kwargs):
+        """Initialize todo tool."""
+        self.working_dir = working_directory or os.getcwd()
+        self.todo_file = Path(self.working_dir) / "todo.md"
 
-   
-    operation = params.get("operation", "search")
+        super().__init__(
+            name="todo_tool",
+            tools=[
+                self.read_todo,
+                self.check_exists,
+                self.create_todo,
+                self.update_todo,
+            ],
+            **kwargs
+        )
 
-    if operation == "search":
-        pattern = params.get("pattern") or "**/*"
-        content = params.get("content")
-        max_results = params.get("max_results", 50)
-        results = []
+    def read_todo(self) -> str:
+        """Read current contents of todo.md file.
 
-        for path in glob.glob(safe_path(pattern), recursive=True):
-            if os.path.isfile(path):
-                if content:
-                    try:
-                        with open(path, "r", errors="ignore") as f:
-                            for i, line in enumerate(f, start=1):
-                                if content in line:
-                                    results.append({"file": path, "line": i, "text": line.strip()})
-                                    if len(results) >= max_results:
-                                        return json.dumps(results)
-                    except Exception as e:
-                        results.append({"file": path, "error": str(e)})
+        Returns:
+            Contents of todo.md file or status message
+        """
+        try:
+            if not self.todo_file.exists():
+                return "No todo.md file exists in the current directory."
+
+            content = self.todo_file.read_text(encoding='utf-8')
+            if not content.strip():
+                return "todo.md file exists but is empty."
+
+            return content.strip()
+
+        except Exception as e:
+            return f"Error reading todo file: {str(e)}"
+
+    def check_exists(self) -> str:
+        """Check if todo.md file exists.
+
+        Returns:
+            Status message indicating if file exists and its size
+        """
+        try:
+            exists = self.todo_file.exists()
+            if exists:
+                size = self.todo_file.stat().st_size
+                return f"✅ todo.md exists ({size} bytes)"
+            else:
+                return "❌ todo.md does not exist"
+
+        except Exception as e:
+            return f"Error checking file existence: {str(e)}"
+
+    def create_todo(self, content: str) -> str:
+        """Create or completely replace todo.md file with provided content.
+
+        Args:
+            content: Content to write to todo.md file
+
+        Returns:
+            Success message
+        """
+        try:
+            # Ensure content follows proper markdown format
+            if not content.strip().startswith('# '):
+                content = f"# TODO\n\n{content.strip()}"
+
+            self.todo_file.write_text(content.strip() + '\n', encoding='utf-8')
+            return f"✅ Created/updated todo.md file"
+
+        except Exception as e:
+            return f"Error creating todo file: {str(e)}"
+
+    def update_todo(self, content: str) -> str:
+        """Update todo.md file by replacing its contents.
+
+        Args:
+            content: New content for the todo.md file
+
+        Returns:
+            Success message
+        """
+        return self.create_todo(content)
+
+
+#====================================================================================================
+# Command Toolkit
+#====================================================================================================
+
+class CommandTool(Toolkit):
+    """Ccommand execution tool."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="command_tool",
+            tools=[self.execute_command,
+            ],
+            **kwargs
+        )
+
+    def execute_command(self, command: str, working_directory: str = None, explanation: str = None) -> str:
+        """Execute shell/bash commands with user confirmation.
+
+        Args:
+            command: The shell command to execute
+            working_directory: Directory to run in (optional)
+            explanation: What the command does (optional)
+
+        Returns:
+            Command execution result with stdout/stderr
+        """
+        logger.warning(f"🔧 SHELL_COMMAND TOOL CALLED with command: {command}")
+
+        try:
+            working_dir = working_directory or os.getcwd()
+
+            logger.warning(f"🔧 EXECUTING COMMAND: {command} in {working_dir}")
+            start_time = time.time()
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+
+            logger.warning(f"🔧 COMMAND RESULT: returncode={result.returncode}, stdout_len={len(result.stdout) if result.stdout else 0}")
+
+            exec_time = time.time() - start_time
+
+            if result.returncode == 0:
+                output = f"✅ Command executed successfully ({exec_time:.2f}s)\n"
+                if result.stdout:
+                    stdout = result.stdout.strip()
+                    output += f"Output:\n{stdout[:2000]}" + ("...\n(truncated)" if len(stdout) > 2000 else "")
                 else:
-                    results.append({"file": path, "size": os.path.getsize(path)})
-                    if len(results) >= max_results:
-                        return json.dumps(results)
-        return json.dumps(results)
-
-    elif operation == "read":
-        path = safe_path(params["path"])
-        start = params.get("start_line", 1)
-        end = params.get("end_line")
-        with open(path, "r", errors="ignore") as f:
-            lines = f.readlines()
-        return "".join(lines[start:end]) if end else "".join(lines)
-
-    elif operation == "copy":
-        src = safe_path(params["source_path"])
-        dst = safe_path(params["destination_path"])
-        shutil.copy2(src, dst)
-        return f"Copied {src} to {dst}"
-
-    elif operation == "move":
-        src = safe_path(params["source_path"])
-        dst = safe_path(params["destination_path"])
-        shutil.move(src, dst)
-        return f"Moved {src} to {dst}"
-
-    elif operation == "replace":
-        path = safe_path(params["path"])
-        search_text = params["search_text"]
-        replace_text = params["replace_text"]
-        use_regex = params.get("use_regex", False)
-        case_sensitive = params.get("case_sensitive", True)
-
-        with open(path, "r", errors="ignore") as f:
-            content = f.read()
-
-        if use_regex:
-            flags = 0 if case_sensitive else re.IGNORECASE
-            new_content, count = re.subn(search_text, replace_text, content, flags=flags)
-        else:
-            if not case_sensitive:
-                pattern = re.compile(re.escape(search_text), re.IGNORECASE)
-                new_content, count = pattern.subn(replace_text, content)
+                    output += "No output"
+                return output
             else:
-                new_content = content.replace(search_text, replace_text)
-                count = content.count(search_text)
+                output = f"❌ Command failed (exit code: {result.returncode})\n"
+                if result.stderr:
+                    stderr = result.stderr.strip()
+                    output += f"Error:\n{stderr[:1000]}" + ("...\n(truncated)" if len(stderr) > 1000 else "")
+                return output
 
-        with open(path, "w") as f:
-            f.write(new_content)
+        except subprocess.TimeoutExpired:
+            return "⏰ Command timed out after 5 minutes"
+        except Exception as e:
+            return f"❌ Command execution failed: {str(e)}"
 
-        return f"Replaced {count} occurrence(s) in {path}"
 
-    elif operation == "list":
-        # Enhanced directory listing with emoji file types
-        path = safe_path(params.get("path", "."))
-        show_hidden = params.get("show_hidden", False)
-        max_depth = params.get("max_depth", 1)
+#====================================================================================================
+# Web Search Toolkit
+#====================================================================================================
 
-        def get_file_emoji(filename):
-            """Get emoji for file type"""
-            name_lower = filename.lower()
-            if name_lower.endswith(('.py', '.pyw')):
-                return "🐍"
-            elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
-                return "🟨"
-            elif name_lower.endswith(('.md', '.markdown')):
-                return "📖"
-            elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
-                return "⚙️"
-            elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
-                return "🔧"
-            elif name_lower.endswith(('.txt', '.log')):
-                return "📝"
-            elif name_lower.endswith(('.sh', '.bash', '.zsh')):
-                return "🔸"
-            elif name_lower.endswith(('.html', '.htm', '.css')):
-                return "🌐"
-            elif name_lower.endswith(('.sql', '.db', '.sqlite')):
-                return "🗄️"
-            elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-                return "🖼️"
-            else:
-                return "📄"
+class WebSearchTool(Toolkit):
+    """Web search toolkit using DuckDuckGo."""
 
-        def list_directory(dir_path, current_depth=0):
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="web_search",
+            tools=[self.search],
+            **kwargs
+        )
+
+    def search(self, query: str, num_results: int = 5) -> str:
+        """Search web using DuckDuckGo.
+
+        Args:
+            query: Search terms
+            num_results: Number of results to return (default: 5)
+
+        Returns:
+            Search results with instant answers, related topics, and source links
+        """
+        try:
+            import urllib.parse
+
+            result = f"🔍 Search results for: {query}\n\n"
+
+            try:
+                # Primary: DuckDuckGo instant answers
+                encoded_query = urllib.parse.quote(query)
+                url = f"https://api.duckduckgo.com/?q={encoded_query}&format=json&no_redirect=1&no_html=1"
+
+                with httpx.Client(timeout=10) as client:
+                    response = client.get(url)
+
+                if response.status_code == 200:
+                    data = response.json()
+
+                    # Add instant answer if available
+                    if data.get("AbstractText"):
+                        result += f"📖 Summary: {data['AbstractText']}\n"
+                        if data.get("AbstractURL"):
+                            result += f"   Source: {data['AbstractURL']}\n\n"
+
+                    # Add related topics
+                    if data.get("RelatedTopics"):
+                        result += "🔗 Related topics:\n"
+                        for i, topic in enumerate(data["RelatedTopics"][:num_results]):
+                            if isinstance(topic, dict) and topic.get("Text"):
+                                result += f"{i+1}. {topic['Text'][:200]}...\n"
+                                if topic.get("FirstURL"):
+                                    result += f"   Source: {topic['FirstURL']}\n"
+                        result += "\n"
+
+                    # Add definition if available
+                    if data.get("Definition"):
+                        result += f"📚 Definition: {data['Definition']}\n"
+                        if data.get("DefinitionURL"):
+                            result += f"   Source: {data['DefinitionURL']}\n\n"
+
+                    # Add answer if available
+                    if data.get("Answer"):
+                        result += f"💡 Answer: {data['Answer']}\n"
+                        if data.get("AnswerType"):
+                            result += f"   Type: {data['AnswerType']}\n\n"
+
+                    # Check if we got meaningful results
+                    if len(result) > 100:  # More than just the header
+                        return result
+                    else:
+                        # Fallback: provide helpful search suggestion
+                        return f"🔍 Search: {query}\n\nNo instant results available. This query might work better with:\n• More specific terms\n• Different keywords\n• Academic or technical search engines\n\nNote: This tool provides instant answers and definitions. For general web results, consider using a browser."
+
+                else:
+                    return f"🔍 Search: {query}\n\n❌ Search service unavailable (status {response.status_code})"
+
+            except Exception as e:
+                return f"🔍 Search: {query}\n\n❌ Search error: {str(e)}\n\nNote: This tool provides instant answers and definitions from DuckDuckGo's API."
+
+        except Exception as e:
+            return f"Web search error: {str(e)}"
+
+
+#====================================================================================================
+# File Toolkit
+#====================================================================================================
+
+class FileTool(Toolkit):
+    """File operations tool with separate methods for each operation."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="file_tool",
+            tools=[
+                self.list_directory,
+                self.read_file,
+                self.write_file,
+                self.create_file,
+                self.delete_file,
+                self.search_files,
+                self.replace_text,
+                self.copy_file,
+                self.move_file,
+            ],
+            **kwargs
+        )
+
+    def list_directory(self, path: str = ".", max_depth: int = 1, show_hidden: bool = False) -> str:
+        """List directory contents with emoji file types.
+
+        Args:
+            path: Directory path to list (default: current directory)
+            max_depth: Maximum recursion depth for subdirectories (default: 1)
+            show_hidden: Include hidden files (default: False)
+
+        Returns:
+            JSON string with directory listing including file types, sizes, and emojis
+        """
+        try:
+            path = safe_path(path)
+        except Exception as e:
+            return json.dumps({"error": f"Invalid path: {str(e)}"})
+
+        def list_dir_recursive(dir_path, current_depth=0):
             """Recursively list directory contents"""
             items = []
             if current_depth >= max_depth:
@@ -634,7 +382,7 @@ def file_tool(tool_input: str) -> str:
                         })
                         # Recursively list subdirectories if depth allows
                         if current_depth + 1 < max_depth:
-                            subitems = list_directory(item, current_depth + 1)
+                            subitems = list_dir_recursive(item, current_depth + 1)
                             items.extend(subitems)
                     else:
                         size = item.stat().st_size
@@ -662,229 +410,280 @@ def file_tool(tool_input: str) -> str:
         if not os.path.isdir(path):
             return json.dumps({"error": f"Path is not a directory: {path}"})
 
-        results = list_directory(path)
+        results = list_dir_recursive(path)
         return json.dumps({
             "path": path,
             "items": results,
             "total_items": len(results)
         })
 
-    else:
-        return json.dumps({"error": f"Unknown operation: {operation}"})
+    def read_file(self, path: str, start_line: int = 1, end_line: Optional[int] = None) -> str:
+        """Read file contents.
 
+        Args:
+            path: File path to read
+            start_line: Starting line number (default: 1)
+            end_line: Ending line number, reads to end if not specified
 
-@tool(
-    name="file_search",
-    description="Search for files by pattern and/or content",
-    instructions="""
-SUPPORTED FORMATS:
-- JSON: {"pattern": "*.py", "content": "async def", "max_results": 10}
-- Simple text: "*.py" (pattern only)
+        Returns:
+            File contents as string
+        """
+        path = safe_path(path)
+        with open(path, "r", errors="ignore") as f:
+            lines = f.readlines()
+        return "".join(lines[start_line-1:end_line]) if end_line else "".join(lines[start_line-1:])
 
-SEARCH TYPES:
-1. Pattern only: Find files matching glob pattern
-2. Content only: Find files containing text
-3. Combined: Both pattern and content filters
+    def write_file(self, path: str, content: str) -> str:
+        """Write or overwrite a file with content.
 
-EXAMPLE INPUTS:
-- {"pattern": "**/*.py", "max_results": 15}
-- {"content": "AsyncAgent", "max_results": 5}
-- {"pattern": "*.md", "content": "TODO"}
-- "requirements.txt"
+        Args:
+            path: File path to write
+            content: Content to write to the file
 
-Returns: File paths with sizes and line numbers for content matches.
-"""
-)
-def file_search(tool_input: str) -> str:
-    """Search for files by pattern and/or content."""
-    try:
-        # Parse search input
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-                pattern = params.get("pattern", "*")
-                content = params.get("content")
-                max_results = params.get("max_results", 20)
-            except json.JSONDecodeError:
-                # Simple string pattern
-                pattern = tool_input
-                content = None
-                max_results = 20
-        else:
-            pattern = tool_input.get("pattern", "*")
-            content = tool_input.get("content")
-            max_results = tool_input.get("max_results", 20)
+        Returns:
+            Success message with file path and size
+        """
+        path = safe_path(path)
 
+        # Create parent directories if they don't exist
+        parent_dir = os.path.dirname(path)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+
+        # Write the file
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        file_exists_msg = "Updated" if os.path.exists(path) else "Created"
+        return f"{file_exists_msg} file: {path} ({len(content)} bytes)"
+
+    def create_file(self, path: str, content: str = "") -> str:
+        """Create a new file (fails if file already exists).
+
+        Args:
+            path: File path to create
+            content: Initial content for the file (default: empty string)
+
+        Returns:
+            Success message or error if file exists
+        """
+        path = safe_path(path)
+
+        # Check if file already exists
+        if os.path.exists(path):
+            return json.dumps({"error": f"File already exists: {path}. Use write_file to overwrite."})
+
+        # Create parent directories if they don't exist
+        parent_dir = os.path.dirname(path)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+
+        # Create the file
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        return f"Created file: {path} ({len(content)} bytes)"
+
+    def delete_file(self, path: str) -> str:
+        """Delete a file.
+
+        Args:
+            path: File path to delete
+
+        Returns:
+            Success message or error
+        """
+        path = safe_path(path)
+
+        if not os.path.exists(path):
+            return json.dumps({"error": f"File does not exist: {path}"})
+
+        if os.path.isdir(path):
+            return json.dumps({"error": f"Cannot delete directory: {path}. This operation only deletes files."})
+
+        try:
+            os.remove(path)
+            return f"Deleted file: {path}"
+        except Exception as e:
+            return json.dumps({"error": f"Failed to delete file: {str(e)}"})
+
+    def search_files(self, pattern: str = "**/*", content: Optional[str] = None, max_results: int = 50) -> str:
+        """Search for files by pattern and/or content.
+
+        Args:
+            pattern: Glob pattern for file matching (default: all files)
+            content: Text content to search for in files (optional)
+            max_results: Maximum number of results to return (default: 50)
+
+        Returns:
+            JSON string with search results including file paths, line numbers, and matches
+        """
         import glob
-        from pathlib import Path
-
         results = []
 
-        # Find files by pattern
-        if pattern:
-            files = glob.glob(pattern, recursive=True)
-            files = [f for f in files if Path(f).is_file()][:max_results]
+        for file_path in glob.glob(safe_path(pattern), recursive=True):
+            if os.path.isfile(file_path):
+                if content:
+                    try:
+                        with open(file_path, "r", errors="ignore") as f:
+                            for i, line in enumerate(f, start=1):
+                                if content in line:
+                                    results.append({"file": file_path, "line": i, "text": line.strip()})
+                                    if len(results) >= max_results:
+                                        return json.dumps(results)
+                    except Exception as e:
+                        results.append({"file": file_path, "error": str(e)})
+                else:
+                    results.append({"file": file_path, "size": os.path.getsize(file_path)})
+                    if len(results) >= max_results:
+                        return json.dumps(results)
+        return json.dumps(results)
+
+    def replace_text(self, path: str, search_text: str, replace_text: str,
+                     use_regex: bool = False, case_sensitive: bool = True) -> str:
+        """Replace text in a file.
+
+        Args:
+            path: File path to modify
+            search_text: Text to search for
+            replace_text: Text to replace with
+            use_regex: Use regular expression for search (default: False)
+            case_sensitive: Case-sensitive search (default: True)
+
+        Returns:
+            Success message with number of replacements
+        """
+        import re
+        path = safe_path(path)
+
+        with open(path, "r", errors="ignore") as f:
+            content = f.read()
+
+        if use_regex:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            new_content, count = re.subn(search_text, replace_text, content, flags=flags)
         else:
-            files = []
-
-        # If content search specified, filter by content
-        if content and files:
-            content_matches = []
-            for file_path in files:
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines = f.readlines()
-                        matching_lines = []
-                        for i, line in enumerate(lines, 1):
-                            if content.lower() in line.lower():
-                                matching_lines.append((i, line.strip()[:100]))
-
-                        if matching_lines:
-                            file_size = Path(file_path).stat().st_size
-                            content_matches.append({
-                                'path': file_path,
-                                'size': file_size,
-                                'matches': matching_lines[:5]  # Limit matches per file
-                            })
-                except Exception:
-                    continue
-
-            if content_matches:
-                result = f"📁 Files containing '{content}':\n\n"
-                for match in content_matches[:max_results]:
-                    result += f"📄 {match['path']} ({match['size']} bytes)\n"
-                    for line_num, line_content in match['matches']:
-                        result += f"   Line {line_num}: {line_content}\n"
-                    result += "\n"
-                return result
+            if not case_sensitive:
+                pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+                new_content, count = pattern.subn(replace_text, content)
             else:
-                return f"No files found containing '{content}'"
+                new_content = content.replace(search_text, replace_text)
+                count = content.count(search_text)
 
-        elif files:
-            # Pattern-only search
-            result = f"📁 Files matching '{pattern}':\n\n"
-            for file_path in files:
-                try:
-                    file_size = Path(file_path).stat().st_size
-                    result += f"📄 {file_path} ({file_size} bytes)\n"
-                except Exception:
-                    result += f"📄 {file_path}\n"
-            return result
-        else:
-            return f"No files found matching pattern: {pattern}"
+        with open(path, "w") as f:
+            f.write(new_content)
 
-    except Exception as e:
-        return f"File search error: {str(e)}"
+        return f"Replaced {count} occurrence(s) in {path}"
+
+    def copy_file(self, source_path: str, destination_path: str) -> str:
+        """Copy a file to a new location.
+
+        Args:
+            source_path: Source file path
+            destination_path: Destination file path
+
+        Returns:
+            Success message with source and destination paths
+        """
+        import shutil
+        src = safe_path(source_path)
+        dst = safe_path(destination_path)
+        shutil.copy2(src, dst)
+        return f"Copied {src} to {dst}"
+
+    def move_file(self, source_path: str, destination_path: str) -> str:
+        """Move or rename a file.
+
+        Args:
+            source_path: Source file path
+            destination_path: Destination file path
+
+        Returns:
+            Success message with source and destination paths
+        """
+        import shutil
+        src = safe_path(source_path)
+        dst = safe_path(destination_path)
+        shutil.move(src, dst)
+        return f"Moved {src} to {dst}"
 
 
 #====================================================================================================
-# Time Tool
+# Time Toolkit
 #====================================================================================================
 
-@tool(
-    name="current_time",
-    description="Get current time in various formats",
-    instructions="""
-SUPPORTED FORMATS:
-- JSON: {"format": "iso", "timezone": "UTC"}
-- Simple text: "iso" or "human" or "timestamp"
+class TimeTool(Toolkit):
+    """Time operations toolkit."""
 
-FORMATS:
-- iso: ISO 8601 format (2025-01-15T10:30:00Z)
-- human: Human readable (January 15, 2025 10:30 AM UTC)
-- timestamp: Unix timestamp (1737889800)
-- date: Date only (2025-01-15)
-- time: Time only (10:30:00)
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="time_toolkit",
+            tools=[
+                self.current_time,
+            ],
+            **kwargs
+        )
 
-EXAMPLE INPUTS:
-- {"format": "human"}
-- "iso"
-- {"format": "timestamp"}
-"""
-)
-def current_time(tool_input: str = "iso") -> str:
-    """Get current time in various formats."""
-    try:
-        # Parse time input
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-                format_type = params.get("format", "iso")
-            except json.JSONDecodeError:
-                # Simple string format
-                format_type = tool_input
-        else:
-            format_type = tool_input.get("format", "iso")
+    def current_time(self, format: str = "iso") -> str:
+        """Get current time in various formats.
 
+        Args:
+            format: Time format - iso, human, timestamp, date, time, or custom strftime
+
+        Returns:
+            Formatted current time
+        """
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
 
-        if format_type == "iso":
+        if format == "iso":
             return now.isoformat()
-        elif format_type == "human":
+        elif format == "human":
             return now.strftime("%B %d, %Y %I:%M %p UTC")
-        elif format_type == "timestamp":
+        elif format == "timestamp":
             return str(int(now.timestamp()))
-        elif format_type == "date":
+        elif format == "date":
             return now.strftime("%Y-%m-%d")
-        elif format_type == "time":
+        elif format == "time":
             return now.strftime("%H:%M:%S")
         else:
             # Custom strftime format
             try:
-                return now.strftime(format_type)
+                return now.strftime(format)
             except:
-                return f"Invalid time format: {format_type}"
-
-    except Exception as e:
-        return f"Time error: {str(e)}"
+                return f"Invalid time format: {format}"
 
 
 #====================================================================================================
-# Python Code Execution Tool
+# Python Toolkit
 #====================================================================================================
 
-@tool(
-    name="python_executor",
-    description="Execute Python code safely with timeout",
-    instructions="""
-SUPPORTED FORMATS:
-- JSON: {"code": "print('hello')", "timeout": 30}
-- Simple text: Python code directly
+class PythonTool(Toolkit):
+    """Python code execution toolkit."""
 
-EXAMPLE INPUTS:
-- {"code": "import math; print(math.pi)", "timeout": 10}
-- "print('Hello World')"
-- {"code": "x = [1,2,3]; print(sum(x))"}
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="python_toolkit",
+            tools=[
+                self.execute_code,
+            ],
+            **kwargs
+        )
 
-SECURITY: Runs in current Python context with 30 second timeout.
-"""
-)
-def python_executor(tool_input: str) -> str:
-    """Execute Python code safely with timeout."""
-    try:
-        # Parse code input
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-                code = params.get("code", "")
-                timeout = params.get("timeout", 30)
-            except json.JSONDecodeError:
-                # Simple string code
-                code = tool_input
-                timeout = 30
-        else:
-            code = tool_input.get("code", "")
-            timeout = tool_input.get("timeout", 30)
+    def execute_code(self, code: str, timeout: int = 30) -> str:
+        """Execute Python code safely with timeout.
 
-        if not code:
-            return "Error: No Python code specified"
+        Args:
+            code: Python code to execute
+            timeout: Timeout in seconds (default: 30, max: 300)
 
+        Returns:
+            Execution result with stdout/stderr or error message
+        """
         import sys
         import io
         import threading
-        import time
 
         # Capture output
         old_stdout = sys.stdout
@@ -947,181 +746,170 @@ def python_executor(tool_input: str) -> str:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
-    except Exception as e:
-        return f"Python executor error: {str(e)}"
-
 
 #====================================================================================================
-# Git Tool
+# Git Toolkit
 #====================================================================================================
 
-@tool(
-    name="git_operations",
-    description="Perform git operations like status, commit, diff, branch, log",
-    instructions="""
-SUPPORTED FORMATS:
-- JSON: {"operation": "status"} or {"operation": "commit", "message": "fix bug"}
-- Simple text: "status" or "commit" or "diff"
+class GitTool(Toolkit):
+    """Git operations toolkit."""
 
-OPERATIONS:
-- status: Show git status
-- commit: Commit changes (requires message)
-- diff: Show diff of changes
-- branch: Show current branch or create new one
-- log: Show recent commits
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="git_toolkit",
+            tools=[
+                self.status,
+                self.diff,
+                self.log,
+                self.branch,
+                self.commit,
+            ],
+            **kwargs
+        )
 
-EXAMPLE INPUTS:
-- {"operation": "status"}
-- {"operation": "commit", "message": "Add new feature"}
-- {"operation": "diff", "files": ["file1.py", "file2.py"]}
-- {"operation": "log", "limit": 5}
-- "status"
-"""
-)
-def git_operations(tool_input: str) -> str:
-    """Perform git operations."""
-    try:
-        # Parse git input
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-                operation = params.get("operation", "status")
-                message = params.get("message")
-                branch_name = params.get("branch_name")
-                files = params.get("files", [])
-                limit = params.get("limit", 10)
-            except json.JSONDecodeError:
-                # Simple string operation
-                operation = tool_input
-                message = None
-                branch_name = None
-                files = []
-                limit = 10
+    def status(self) -> str:
+        """Show git status.
+
+        Returns:
+            Git status output or clean working directory message
+        """
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            if result.stdout:
+                return f"📋 Git Status:\n{result.stdout}"
+            else:
+                return "✅ Working directory clean"
         else:
-            operation = tool_input.get("operation", "status")
-            message = tool_input.get("message")
-            branch_name = tool_input.get("branch_name")
-            files = tool_input.get("files", [])
-            limit = tool_input.get("limit", 10)
+            return f"❌ Git status failed: {result.stderr}"
 
-        import subprocess
+    def diff(self, files: List[str] = None) -> str:
+        """Show git diff.
 
-        def run_git_cmd(cmd_args):
+        Args:
+            files: Specific files to diff (optional)
+
+        Returns:
+            Git diff output
+        """
+        cmd = ["git", "diff"]
+        if files:
+            cmd.extend(files)
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            if result.stdout:
+                output = result.stdout
+                return f"📝 Git Diff:\n{output[:2000]}" + ("...\n(truncated)" if len(output) > 2000 else "")
+            else:
+                return "No changes to show"
+        else:
+            return f"❌ Git diff failed: {result.stderr}"
+
+    def log(self, limit: int = 10) -> str:
+        """Show git log.
+
+        Args:
+            limit: Number of log entries to show (default: 10)
+
+        Returns:
+            Git log output
+        """
+        result = subprocess.run(
+            ["git", "log", f"--max-count={limit}", "--oneline"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            return f"📜 Recent Commits:\n{result.stdout}"
+        else:
+            return f"❌ Git log failed: {result.stderr}"
+
+    def branch(self, branch_name: str = None) -> str:
+        """Show current branch or create new branch.
+
+        Args:
+            branch_name: Branch name to create (optional)
+
+        Returns:
+            Current branch name or branch creation result
+        """
+        if branch_name:
             result = subprocess.run(
-                ["git"] + cmd_args,
+                ["git", "checkout", "-b", branch_name],
                 capture_output=True,
                 text=True,
                 timeout=30
             )
-            return result
-
-        if operation == "status":
-            result = run_git_cmd(["status", "--porcelain"])
             if result.returncode == 0:
-                if result.stdout:
-                    return f"📋 Git Status:\n{result.stdout}"
-                else:
-                    return "✅ Working directory clean"
+                return f"✅ Created and switched to branch: {branch_name}"
             else:
-                return f"❌ Git status failed: {result.stderr}"
-
-        elif operation == "diff":
-            if files:
-                cmd = ["diff"] + files
-            else:
-                cmd = ["diff"]
-            result = run_git_cmd(cmd)
-            if result.returncode == 0:
-                if result.stdout:
-                    return f"📝 Git Diff:\n{result.stdout[:2000]}" + ("...\n(truncated)" if len(result.stdout) > 2000 else "")
-                else:
-                    return "No changes to show"
-            else:
-                return f"❌ Git diff failed: {result.stderr}"
-
-        elif operation == "log":
-            result = run_git_cmd(["log", f"--max-count={limit}", "--oneline"])
-            if result.returncode == 0:
-                return f"📜 Recent Commits:\n{result.stdout}"
-            else:
-                return f"❌ Git log failed: {result.stderr}"
-
-        elif operation == "branch":
-            if branch_name:
-                result = run_git_cmd(["checkout", "-b", branch_name])
-                if result.returncode == 0:
-                    return f"✅ Created and switched to branch: {branch_name}"
-                else:
-                    return f"❌ Branch creation failed: {result.stderr}"
-            else:
-                result = run_git_cmd(["branch", "--show-current"])
-                if result.returncode == 0:
-                    return f"🌿 Current branch: {result.stdout.strip()}"
-                else:
-                    return f"❌ Branch check failed: {result.stderr}"
-
-        elif operation == "commit":
-            if not message:
-                return "Error: Commit message required for commit operation"
-            result = run_git_cmd(["commit", "-m", message])
-            if result.returncode == 0:
-                return f"✅ Commit successful: {message}"
-            else:
-                return f"❌ Commit failed: {result.stderr}"
+                return f"❌ Branch creation failed: {result.stderr}"
         else:
-            return f"❌ Unsupported git operation: {operation}"
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                return f"🌿 Current branch: {result.stdout.strip()}"
+            else:
+                return f"❌ Branch check failed: {result.stderr}"
 
-    except Exception as e:
-        return f"Git operations error: {str(e)}"
+    def commit(self, message: str) -> str:
+        """Commit changes.
+
+        Args:
+            message: Commit message
+
+        Returns:
+            Commit result
+        """
+        result = subprocess.run(
+            ["git", "commit", "-m", message],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            return f"✅ Commit successful: {message}"
+        else:
+            return f"❌ Commit failed: {result.stderr}"
 
 
 #====================================================================================================
-# HTTP Fetch Tool
+# HTTP Toolkit
 #====================================================================================================
 
-@tool(
-    name="http_fetch",
-    description="Fetch content from HTTP/HTTPS URLs",
-    instructions="""
-SUPPORTED FORMATS:
-- JSON: {"url": "https://example.com", "method": "GET", "timeout": 10}
-- Simple text: "https://example.com" (GET request)
+class HttpTool(Toolkit):
+    """HTTP fetch toolkit."""
 
-METHODS:
-- GET: Fetch content from URL (default)
-- HEAD: Get headers only
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="http_toolkit",
+            tools=[
+                self.fetch,
+            ],
+            **kwargs
+        )
 
-EXAMPLE INPUTS:
-- {"url": "https://api.github.com/repos/python/cpython"}
-- "https://httpbin.org/json"
-- {"url": "https://api.example.com", "method": "HEAD"}
+    def fetch(self, url: str, method: str = "GET", timeout: int = 10) -> str:
+        """Fetch content from HTTP/HTTPS URLs.
 
-Returns: HTTP status, headers, and content (formatted JSON or text).
-"""
-)
-def http_fetch(tool_input: str) -> str:
-    """Fetch content from HTTP/HTTPS URLs."""
-    try:
-        # Parse fetch input
-        if isinstance(tool_input, str):
-            try:
-                params = json.loads(tool_input)
-                url = params.get("url", "")
-                method = params.get("method", "GET").upper()
-                timeout = params.get("timeout", 10)
-            except json.JSONDecodeError:
-                # Simple string URL
-                url = tool_input
-                method = "GET"
-                timeout = 10
-        else:
-            url = tool_input.get("url", "")
-            method = tool_input.get("method", "GET").upper()
-            timeout = tool_input.get("timeout", 10)
+        Args:
+            url: URL to fetch
+            method: HTTP method - GET or HEAD (default: GET)
+            timeout: Request timeout in seconds (default: 10)
 
-        if not url:
-            return "Error: No URL specified"
-
+        Returns:
+            HTTP response with status, headers, and content
+        """
         # Validate URL
         if not (url.startswith("http://") or url.startswith("https://")):
             return "Error: URL must start with http:// or https://"
@@ -1132,55 +920,54 @@ def http_fetch(tool_input: str) -> str:
             "Accept": "text/html,application/json,text/plain,*/*"
         }
 
-        import httpx
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+                if method.upper() == "GET":
+                    response = client.get(url, headers=headers)
+                elif method.upper() == "HEAD":
+                    response = client.head(url, headers=headers)
+                else:
+                    return f"Error: Unsupported HTTP method: {method} (only GET, HEAD allowed)"
 
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            if method == "GET":
-                response = client.get(url, headers=headers)
-            elif method == "HEAD":
-                response = client.head(url, headers=headers)
-            else:
-                return f"Error: Unsupported HTTP method: {method} (only GET, HEAD allowed)"
+            result = f"🌐 HTTP {method.upper()} {url}\n"
+            result += f"Status: {response.status_code} {response.reason_phrase}\n\n"
 
-        result = f"🌐 HTTP {method} {url}\n"
-        result += f"Status: {response.status_code} {response.reason_phrase}\n\n"
+            # Add key response headers
+            if response.headers:
+                result += "📋 Headers:\n"
+                key_headers = ["content-type", "content-length", "server", "last-modified"]
+                for header in key_headers:
+                    if header in response.headers:
+                        result += f"  {header}: {response.headers[header]}\n"
+                result += "\n"
 
-        # Add key response headers
-        if response.headers:
-            result += "📋 Headers:\n"
-            key_headers = ["content-type", "content-length", "server", "last-modified"]
-            for header in key_headers:
-                if header in response.headers:
-                    result += f"  {header}: {response.headers[header]}\n"
-            result += "\n"
+            # Add content (for GET only, not HEAD)
+            if method.upper() == "GET" and response.content:
+                content_type = response.headers.get("content-type", "").lower()
 
-        # Add content (for GET only, not HEAD)
-        if method == "GET" and response.content:
-            content_type = response.headers.get("content-type", "").lower()
-
-            if "json" in content_type:
-                try:
-                    # Pretty print JSON
-                    json_data = response.json()
-                    formatted_json = json.dumps(json_data, indent=2)
-                    result += f"📄 Content (JSON):\n{formatted_json[:1500]}"
-                    if len(formatted_json) > 1500:
-                        result += "...\n(truncated)"
-                except:
+                if "json" in content_type:
+                    try:
+                        # Pretty print JSON
+                        json_data = response.json()
+                        formatted_json = json.dumps(json_data, indent=2)
+                        result += f"📄 Content (JSON):\n{formatted_json[:1500]}"
+                        if len(formatted_json) > 1500:
+                            result += "...\n(truncated)"
+                    except:
+                        result += f"📄 Content:\n{response.text[:1500]}"
+                        if len(response.text) > 1500:
+                            result += "...\n(truncated)"
+                else:
+                    # Plain text or HTML
                     result += f"📄 Content:\n{response.text[:1500]}"
                     if len(response.text) > 1500:
                         result += "...\n(truncated)"
-            else:
-                # Plain text or HTML
-                result += f"📄 Content:\n{response.text[:1500]}"
-                if len(response.text) > 1500:
-                    result += "...\n(truncated)"
 
-        return result
+            return result
 
-    except httpx.TimeoutException:
-        return f"⏰ HTTP request timed out after {timeout} seconds"
-    except httpx.RequestError as e:
-        return f"❌ HTTP request failed: {str(e)}"
-    except Exception as e:
-        return f"❌ HTTP fetch error: {str(e)}"
+        except httpx.TimeoutException:
+            return f"⏰ HTTP request timed out after {timeout} seconds"
+        except httpx.RequestError as e:
+            return f"❌ HTTP request failed: {str(e)}"
+        except Exception as e:
+            return f"❌ HTTP fetch error: {str(e)}"
