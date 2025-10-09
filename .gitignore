@@ -5,6 +5,7 @@
 *.pyo
 *.pyd
 __pycache__/
+CLAUDE.md
 
 **/build
 **/*.egg-info

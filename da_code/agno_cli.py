@@ -16,9 +16,11 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.completion import PathCompleter, WordCompleter, Completer, Completion
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.application.current import get_app
 
 from .config import ConfigManager, setup_logging
-from .context import ContextLoader, DirectoryContext
+from .context import ContextLoader, DirectoryContext, NUDGE_PHRASES
 from .models import CodeSession, CommandExecution, UserResponse, ConfirmationResponse
 from .agno_agent import AgnoAgent
 from .mcp_tool import mcp2tool
@@ -170,6 +172,188 @@ class ShellCompleter(Completer):
             # Yield command completions first, then path completions
             yield from command_completions
             yield from path_completions
+
+
+class NudgeCompleter(Completer):
+    """Custom completer for agent mode with symbol-triggered completions."""
+
+    def __init__(self, working_dir: str = None):
+        self.nudge_phrases = NUDGE_PHRASES
+        self.path_completer = PathCompleter(expanduser=True)
+        self.working_dir = Path(working_dir) if working_dir else Path.cwd()
+        self._all_files_cache = None
+
+    def _get_all_project_files(self):
+        """Get all files in project recursively (cached)."""
+        if self._all_files_cache is not None:
+            return self._all_files_cache
+
+        all_files = []
+        ignored = {'.git', '.env', '__pycache__', 'node_modules', '.venv', 'venv', '.da', 'dist', 'build', '*-egg-info'}
+
+        try:
+            for item in self.working_dir.rglob('*'):
+                # Skip ignored directories
+                if any(ignored_dir in item.parts for ignored_dir in ignored):
+                    continue
+
+                if item.is_file():
+                    # Store relative path from working dir
+                    try:
+                        rel_path = item.relative_to(self.working_dir)
+                        all_files.append(str(rel_path))
+                    except ValueError:
+                        continue
+
+            self._all_files_cache = sorted(all_files)
+        except Exception as e:
+            logger.error(f"Error scanning project files: {e}")
+            self._all_files_cache = []
+
+        return self._all_files_cache
+
+    def _grep_files(self, search_term: str):
+        """Search file contents using grep/ripgrep."""
+        # Strip quotes if present
+        search_term = search_term.strip('\'"')
+        if not search_term:
+            return []
+
+        ignored_dirs = ['--exclude-dir=.git', '--exclude-dir=__pycache__',
+                       '--exclude-dir=node_modules', '--exclude-dir=.venv',
+                       '--exclude-dir=venv', '--exclude-dir=.da']
+
+        try:
+            # Try ripgrep first (faster)
+            result = subprocess.run(
+                ['rg', '--files-with-matches', '--no-heading', search_term] +
+                ['--glob', '!.git/', '--glob', '!__pycache__/', '--glob', '!node_modules/',
+                 '--glob', '!.venv/', '--glob', '!venv/', '--glob', '!.da/'],
+                cwd=self.working_dir,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip().split('\n')
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        try:
+            # Fallback to grep
+            result = subprocess.run(
+                ['grep', '-rl'] + ignored_dirs + [search_term, '.'],
+                cwd=self.working_dir,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return [f.lstrip('./') for f in result.stdout.strip().split('\n')]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return []
+
+    def get_completions(self, document, complete_event):
+        """Provide completions based on trigger symbols: ! @ ~"""
+        text = document.text
+
+        # Check for ! (nudge phrases)
+        exclaim_pos = text.rfind('!')
+        if exclaim_pos != -1 and exclaim_pos <= document.cursor_position:
+            phrase_start = exclaim_pos + 1
+            phrase_text = text[phrase_start:document.cursor_position]
+
+            for phrase in self.nudge_phrases:
+                if phrase.lower().startswith(phrase_text.lower()):
+                    # Remove ! and partial text, add full phrase + comma
+                    yield Completion(
+                        phrase + ", ",
+                        start_position=-(len(phrase_text) + 1),  # Remove ! + typed text
+                        display=phrase,
+                        display_meta="💡",
+                    )
+            return
+
+        # Check for ~ (content search)
+        tilde_pos = text.rfind('~')
+        if tilde_pos != -1 and tilde_pos <= document.cursor_position:
+            search_start = tilde_pos + 1
+            search_text = text[search_start:document.cursor_position]
+
+            # Always try to search (even if empty, to show an indicator)
+            try:
+                matching_files = self._grep_files(search_text) if search_text else []
+                if matching_files:
+                    for file_path in matching_files[:20]:  # Limit to 20 results
+                        yield Completion(
+                            file_path + ", ",
+                            start_position=-(len(search_text) + 1),  # Remove ~ + search term
+                            display=file_path,
+                            display_meta="🔍",
+                        )
+                elif search_text:  # Show message if no results
+                    yield Completion(
+                        "",
+                        start_position=0,
+                        display=f"No files found containing '{search_text}'",
+                        display_meta="❌",
+                    )
+            except Exception as e:
+                logger.error(f"Content search error: {e}")
+                yield Completion(
+                    "",
+                    start_position=0,
+                    display=f"Search error: {str(e)}",
+                    display_meta="❌",
+                )
+            return
+
+        # Check for @ (file path mode)
+        at_pos = text.rfind('@')
+        if at_pos != -1 and at_pos <= document.cursor_position:
+            path_start = at_pos + 1
+            path_text = text[path_start:document.cursor_position]
+
+            # Check for @@ (fuzzy search all files)
+            if path_text.startswith('@'):
+                search_term = path_text[1:].lower()
+                all_files = self._get_all_project_files()
+
+                for file_path in all_files:
+                    if not search_term or search_term in file_path.lower():
+                        yield Completion(
+                            file_path + ", ",
+                            start_position=-(len(path_text)),  # Remove @@ + search term
+                            display=file_path,
+                            display_meta="📁",
+                        )
+            else:
+                # Normal path completion
+                from prompt_toolkit.document import Document
+                path_doc = Document(path_text, len(path_text))
+
+                for completion in self.path_completer.get_completions(path_doc, complete_event):
+                    # PathCompleter gives us the right start_position for the path part
+                    # Add comma only for files, not directories
+                    # Directories end with / or \
+                    completed_path = "@" + path_text[:len(path_text) + completion.start_position] + completion.text
+
+                    # Check if it's a directory (ends with path separator)
+                    if completed_path.endswith('/') or completed_path.endswith('\\'):
+                        # Directory - no comma, allow continued navigation
+                        suffix = ""
+                    else:
+                        # File - add comma and space
+                        suffix = ", "
+
+                    yield Completion(
+                        completed_path + suffix,
+                        start_position=-(len(path_text) + 1),  # Remove @ + entire path_text
+                        display=completion.display,
+                        display_meta=completion.display_meta,
+                    )
 
 
 class ShellModeManager:
@@ -354,23 +538,75 @@ async def async_main():
 
     # Set up completers
     shell_completer = ShellCompleter()
-    # No completer for agent mode (or could add custom agent completer later)
+    nudge_completer = NudgeCompleter(working_dir=code_session.working_directory)  # Nudge phrase autocomplete for agent mode
 
-    # Create key bindings for shell mode toggle
+    # Create key bindings for shell mode toggle and completion
     bindings = KeyBindings()
+
+    # Storage for pasted content (maps placeholder to content)
+    pasted_content_storage = {}
+    paste_counter = [0]  # Mutable counter for unique paste IDs
 
     @bindings.add(Keys.Escape)  # Escape key
     def _(event):
         """Toggle shell mode with Escape key."""
         shell_manager.toggle_shell_mode()
 
+    @bindings.add(Keys.BracketedPaste)  # Ctrl+V for paste
+    def _(event):
+        """Intercept paste: show placeholder in prompt, store actual content."""
+        try:
+            pasted_text = event.data
+            if pasted_text:
+                pasted_text = pasted_text.rstrip('\n')
+                lines = pasted_text.split('\n')
+                line_count = len(lines)
+
+                # Create unique placeholder with ID
+                paste_counter[0] += 1
+                paste_id = paste_counter[0]
+                placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
+
+                # Store the actual pasted content with placeholder as key
+                pasted_content_storage[placeholder] = pasted_text
+
+                # Insert placeholder in buffer
+                event.current_buffer.insert_text(placeholder)
+
+        except Exception as e:
+            logger.error(f"Paste error: {e}")
+            # On error, do default paste
+            try:
+                event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
+            except:
+                pass
+
+    @bindings.add(Keys.Enter)
+    def _(event):
+        """Handle Enter: accept completion first, then submit on second press."""
+        # Check if completion menu is showing
+        if event.current_buffer.complete_state:
+            # Completion menu is active - accept the currently selected completion
+            completion_state = event.current_buffer.complete_state
+            if completion_state.current_completion:
+                # Apply the selected completion
+                event.current_buffer.apply_completion(completion_state.current_completion)
+            # Clear the completion state to close the menu
+            event.current_buffer.complete_state = None
+        else:
+            # No completion menu - submit the input
+            event.current_buffer.validate_and_handle()
+
     # Create PromptSession for async usage - will switch history and completer dynamically
     prompt_session = PromptSession(
         history=agent_history,
         multiline=False,
-        complete_style='column',
+        complete_style='multi-column',  # Multi-column for better space usage
         key_bindings=bindings,
         completer=None,  # Will be set dynamically
+        complete_in_thread=True,  # Better performance for large completions
+        enable_system_prompt=True,
+        reserve_space_for_menu=8,  # Reserve space for completion menu (8 rows)
     )
 
     async def get_user_input_with_history(queue):
@@ -385,9 +621,9 @@ async def async_main():
                     prompt_session.completer = shell_completer
                 else:
                     prompt_text = HTML('<cyan>agent!</cyan> ')
-                    # Switch to agent history and no completer
+                    # Switch to agent history and nudge phrase completer
                     prompt_session.history = agent_history
-                    prompt_session.completer = None
+                    prompt_session.completer = nudge_completer
 
                 user_input = await prompt_session.prompt_async(prompt_text)
                 await queue.put(user_input)
@@ -458,6 +694,16 @@ async def async_main():
                     console.print("  • status - Show current configuration status")
                     console.print("  • add_mcp <url> [name] - Add MCP server dynamically")
                     console.print("  • exit/quit/q - Exit the application")
+                    console.print("\n[bold]Agent Mode - Left-hand Ergonomic Triggers:[/bold]")
+                    console.print("  • [cyan]![/cyan] - AI nudge phrases: '!be<Tab>' → 'be careful and check your work' 💡")
+                    console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁")
+                    console.print("  • [cyan]@@[/cyan] - Fuzzy filename: '@@auth<Tab>' → all files with 'auth' in name 📁")
+                    console.print("  • [cyan]~[/cyan] - Content search: '~async def<Tab>' → files containing 'async def' 🔍")
+                    console.print("  • [cyan]#[/cyan] - Reserved for future use")
+                    console.print("  • [cyan]$[/cyan] - Reserved for future use")
+                    console.print("\n[bold]Clipboard:[/bold]")
+                    console.print("  • [cyan]Ctrl+V[/cyan] - Paste shows '[[paste#N: X lines]]' placeholder, actual content sent to agent")
+                    console.print("  • Delete placeholder to exclude that paste from context")
                     console.print("\n[bold]Shell Mode:[/bold]")
                     console.print("  • Type [cyan]shell[/cyan] or press [cyan]Escape[/cyan] to toggle between modes")
                     console.print("  • In shell mode, commands are executed directly")
@@ -532,15 +778,30 @@ async def async_main():
                         shell_context = shell_manager.get_shell_context_for_agent()
                         enhanced_input = user_input
 
-                        # Prepend contexts in order: directory updates, then shell context
+                        # Prepend contexts in order: pasted content, directory updates, then shell context
                         context_parts = []
+
+                        # Add pasted content ONLY if placeholder still exists in user_input
+                        if pasted_content_storage:
+                            pasted_sections = []
+                            for placeholder, pasted_text in pasted_content_storage.items():
+                                # Only include if placeholder is still in the input
+                                if placeholder in user_input:
+                                    pasted_sections.append(f"Pasted content from {placeholder}:\n```\n{pasted_text}\n```")
+
+                            if pasted_sections:
+                                context_parts.append("\n\n".join(pasted_sections))
+
+                            # Clear pasted content after using it
+                            pasted_content_storage.clear()
+
                         if dir_update:
                             context_parts.append(dir_update)
                         if shell_context:
                             context_parts.append(shell_context)
 
                         if context_parts:
-                            context_str = "\n".join(context_parts)
+                            context_str = "\n\n".join(context_parts)
                             enhanced_input = f"{context_str}\n\nUser request: {user_input}"
                         
                         sanitized_input = enhanced_input.encode('utf-8', 'replace').decode('utf-8')

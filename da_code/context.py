@@ -13,6 +13,74 @@ logger = logging.getLogger(__name__)
 
 
 #====================================================================================================
+# AI Nudge Phrases (Prompt Engineering Shortcuts)
+#====================================================================================================
+
+NUDGE_PHRASES = [
+    # Careful & thorough
+    "be careful and check your work",
+    "double-check before making changes",
+    "verify your changes after editing",
+    "make sure to test thoroughly",
+    "be conservative with changes",
+
+    # Reasoning & thinking
+    "think step-by-step",
+    "explain your reasoning as you go",
+    "show your work",
+    "break down the problem first",
+    "consider edge cases",
+    "think about possible issues before you act",
+    "analyze the implications",
+
+    # Testing & verification
+    "write tests first",
+    "test edge cases",
+    "include unit tests",
+    "verify the fix works",
+    "run the tests after changes",
+
+    # Safety & confirmation
+    "show me the diff first",
+    "ask before destructive operations",
+    "confirm before major changes",
+    "preview changes before applying",
+
+    # Efficiency & quality
+    "minimize tool calls where possible",
+    "batch related operations",
+    "be concise but thorough",
+    "focus on the key changes",
+
+    # Exploration & alternatives
+    "explore multiple approaches",
+    "consider alternative solutions",
+    "think creatively about this",
+    "look for patterns in the codebase",
+
+    # Code quality
+    "follow the existing code style",
+    "maintain consistency with the codebase",
+    "add helpful comments",
+    "keep the code readable",
+    "use descriptive variable names",
+
+    # Debugging & investigation
+    "trace the root cause",
+    "check related files too",
+    "look for similar issues",
+    "investigate thoroughly before fixing",
+    "understand why this is happening",
+
+    # Documentation & explanation
+    "explain what you're doing",
+    "document your changes",
+    "add docstrings if needed",
+    "make it clear for future readers",
+]
+
+
+#====================================================================================================
 # File/Directory Utilities
 #====================================================================================================
 
