@@ -241,9 +241,10 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                     elif run_event.event in [RunEvent.tool_call_started]:
                         await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
                     elif run_event.event in [RunEvent.tool_call_completed]:
-                        await status_queue.put(f"Tool Result: {run_event.tool.tool_name} -> {run_event.tool.result}")
-                        await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
+                        await status_queue.put(f"Tool Done: {run_event.tool.tool_name}")
+                        #await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
                     elif run_event.event in [RunEvent.run_content]:
+                        await status_queue.put(f"Streaming Content: ...")
                         if content_started:
                             await output_queue.put(run_event.content)
                         else:

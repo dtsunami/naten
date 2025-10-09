@@ -379,6 +379,7 @@ class ShellModeManager:
             # Keep shell command history manageable
             if len(self.shell_command_history) > 1000:
                 self.shell_command_history = self.shell_command_history[-1000:]
+        
 
         try:
             result = subprocess.run(
@@ -547,14 +548,67 @@ async def async_main():
     pasted_content_storage = {}
     paste_counter = [0]  # Mutable counter for unique paste IDs
 
-    @bindings.add(Keys.Escape)  # Escape key
-    def _(event):
-        """Toggle shell mode with Escape key."""
-        shell_manager.toggle_shell_mode()
+    # Use '#' (Shift+3) to toggle shell/agent mode and provide shell history navigation
+    shell_history_index = [None]  # Mutable index for navigating shell_command_history
 
-    @bindings.add(Keys.BracketedPaste)  # Ctrl+V for paste
+    @bindings.add('#')  # '#' (Shift+3)
     def _(event):
-        """Intercept paste: show placeholder in prompt, store actual content."""
+        """Toggle shell mode with '#' key (Shift+3)."""
+        shell_manager.toggle_shell_mode()
+        # Reset history navigation index when toggling modes
+        shell_history_index[0] = None
+        # Invalidate the application to force prompt re-render so the prompt label updates immediately
+        try:
+            # event.app.invalidate() will request a redraw
+            event.app.invalidate()
+        except Exception:
+            try:
+                get_app().invalidate()
+            except Exception:
+                pass
+
+    @bindings.add(Keys.Up, filter=Condition(lambda: shell_manager.is_shell_mode), eager=True)
+    def _(event):
+        """Navigate up through shell command history when in shell mode."""
+        # Only intercept up arrow when in shell mode and we have our in-memory history
+        hist = shell_manager.shell_command_history
+        if not hist:
+            return
+        idx = shell_history_index[0]
+        if idx is None:
+            idx = len(hist) - 1
+        else:
+            idx = max(0, idx - 1)
+        shell_history_index[0] = idx
+        cmd = hist[idx]
+        # Replace buffer content with the command
+        buf = event.current_buffer
+        buf.text = cmd
+        buf.cursor_position = len(cmd)
+
+    @bindings.add(Keys.Down, filter=Condition(lambda: shell_manager.is_shell_mode), eager=True)
+    def _(event):
+        """Navigate down through shell command history when in shell mode."""
+        hist = shell_manager.shell_command_history
+        if not hist:
+            return
+        idx = shell_history_index[0]
+        if idx is None:
+            return
+        if idx >= len(hist) - 1:
+            # Move past the last entry -> clear buffer and reset index
+            shell_history_index[0] = None
+            event.current_buffer.text = ''
+            return
+        idx = min(len(hist) - 1, idx + 1)
+        shell_history_index[0] = idx
+        cmd = hist[idx]
+        event.current_buffer.text = cmd
+        event.current_buffer.cursor_position = len(cmd)
+
+    @bindings.add(Keys.BracketedPaste)  # Terminal bracketed paste (clipboard)
+    def _(event):
+        """Intercept terminal paste: show placeholder in prompt, store actual content."""
         try:
             pasted_text = event.data
             if pasted_text:
@@ -575,10 +629,45 @@ async def async_main():
 
         except Exception as e:
             logger.error(f"Paste error: {e}")
-            # On error, do default paste
+            # On error, do default paste if possible
             try:
                 event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
-            except:
+            except Exception:
+                pass
+
+    @bindings.add('c-v')  # Ctrl+V
+    def _(event):
+        """Handle Ctrl+V paste from clipboard (desktop terminals)."""
+        try:
+            data = None
+            try:
+                data = event.app.clipboard.get_data().text
+            except Exception:
+                # Some clipboards return ClipboardData with 'data' attr
+                try:
+                    data = event.app.clipboard.get_data().data
+                except Exception:
+                    data = None
+
+            if data:
+                pasted_text = data.rstrip('\n')
+                lines = pasted_text.split('\n')
+                line_count = len(lines)
+
+                paste_counter[0] += 1
+                paste_id = paste_counter[0]
+                placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
+
+                pasted_content_storage[placeholder] = pasted_text
+                event.current_buffer.insert_text(placeholder)
+            else:
+                # Fallback to default paste behavior
+                event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
+        except Exception as e:
+            logger.error(f"Ctrl+V paste error: {e}")
+            try:
+                event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
+            except Exception:
                 pass
 
     @bindings.add(Keys.Enter)
@@ -610,22 +699,33 @@ async def async_main():
     )
 
     async def get_user_input_with_history(queue):
-        """Get user input with file-based history and arrow key support."""
-        while True:
+        """Get user input with file-based history and arrow key support.
+
+        Use a callable for the prompt message so that prompt_toolkit will re-evaluate
+        it on invalidate/redraw. The callable also updates the session's history
+        and completer as a side-effect so the displayed prompt and behaviors
+        switch immediately when toggling modes (e.g. via the '#' key).
+        """
+        def _get_prompt_message():
+            # Update history and completer as a side-effect so they change immediately
+            # when the prompt is re-rendered.
             try:
-                # Dynamic prompt, history, and completer based on mode
                 if shell_manager.is_shell_mode:
-                    prompt_text = HTML('<yellow>shell$</yellow> ')
-                    # Switch to shell history and completer
                     prompt_session.history = shell_history
                     prompt_session.completer = shell_completer
+                    return HTML('<yellow>shell$</yellow> ')
                 else:
-                    prompt_text = HTML('<cyan>agent!</cyan> ')
-                    # Switch to agent history and nudge phrase completer
                     prompt_session.history = agent_history
                     prompt_session.completer = nudge_completer
+                    return HTML('<cyan>agent!</cyan> ')
+            except Exception:
+                # Fallback to a simple prompt if something goes wrong
+                return HTML('<cyan>agent!</cyan> ')
 
-                user_input = await prompt_session.prompt_async(prompt_text)
+        while True:
+            try:
+                # Pass a callable so prompt_async will call it on redraws (invalidate())
+                user_input = await prompt_session.prompt_async(_get_prompt_message)
                 await queue.put(user_input)
             except (EOFError, KeyboardInterrupt):
                 return None
@@ -672,9 +772,10 @@ async def async_main():
                         console.print(f"[red]Agent error: {str(e)}[/red]")
                         logger.error(f"Agent execution error: {type(e).__name__}: {str(e)}", exc_info=True)
                 else:
+                    # Accumulate output while agent is running
                     while output_queue.qsize() > 0:
-                        output_message += await output_queue.get()
-                        #console.print(output_message, end="")
+                        chunk = await output_queue.get()
+                        output_message += chunk
                     while status_queue.qsize() > 0:
                         status_message = await status_queue.get()
                     status_interface.update_status(f"{status_message}")
@@ -699,13 +800,13 @@ async def async_main():
                     console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁")
                     console.print("  • [cyan]@@[/cyan] - Fuzzy filename: '@@auth<Tab>' → all files with 'auth' in name 📁")
                     console.print("  • [cyan]~[/cyan] - Content search: '~async def<Tab>' → files containing 'async def' 🔍")
-                    console.print("  • [cyan]#[/cyan] - Reserved for future use")
+                    console.print("  • [cyan]#[/cyan] - Toggle shell mode (Shift+3)")
                     console.print("  • [cyan]$[/cyan] - Reserved for future use")
                     console.print("\n[bold]Clipboard:[/bold]")
-                    console.print("  • [cyan]Ctrl+V[/cyan] - Paste shows '[[paste#N: X lines]]' placeholder, actual content sent to agent")
+                    console.print("  • [cyan]Ctrl+V or terminal paste[/cyan] - Paste shows '[[paste#N: X lines]]' placeholder, actual content sent to agent")
                     console.print("  • Delete placeholder to exclude that paste from context")
                     console.print("\n[bold]Shell Mode:[/bold]")
-                    console.print("  • Type [cyan]shell[/cyan] or press [cyan]Escape[/cyan] to toggle between modes")
+                    console.print("  • Type [cyan]shell[/cyan] or press [cyan]#[/cyan] to toggle between modes")
                     console.print("  • In shell mode, commands are executed directly")
                     console.print("  • [cyan]Tab[/cyan] completion for commands and file paths")
                     console.print("  • Shell output is automatically included in next agent prompt")
@@ -809,6 +910,7 @@ async def async_main():
                         status_message = f"Calculating: {user_input[:40]}..."
                         status_interface.start_execution(status_message)
                         output_message = ""
+                        logger.warning(f"Input Context : {enhanced_input}")
                         running_agent = tg.create_task(
                             agent.arun(sanitized_input, confirm_wrapper, status_queue, output_queue, user_id)
                         )
