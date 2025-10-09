@@ -116,7 +116,7 @@ class AgnoAgent():
         logging.info(f"🔧 Agent: Loaded {len(agno_agent_tools)} built-in tools + {len(mcp_tools)} MCP tools")
 
         self.system_message = self._build_system_prompt()
-        logging.info(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
+        logging.warning(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
 
 
 
@@ -163,6 +163,7 @@ class AgnoAgent():
 6. ✍️ Always use the replace_text tool to update/edit files and re-read the file back after edit to ensure it worked properly!
 '''.split("\n")
 
+        
         self.agent = Agent(
             name="da_code",
             model=self.llm,

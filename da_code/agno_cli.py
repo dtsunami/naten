@@ -910,7 +910,7 @@ async def async_main():
                         status_message = f"Calculating: {user_input[:40]}..."
                         status_interface.start_execution(status_message)
                         output_message = ""
-                        logger.warning(f"Input Context : {enhanced_input}")
+                        logger.info(f"Input Context : {enhanced_input}")
                         running_agent = tg.create_task(
                             agent.arun(sanitized_input, confirm_wrapper, status_queue, output_queue, user_id)
                         )
