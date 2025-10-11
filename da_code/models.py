@@ -254,6 +254,324 @@ class ProjectContext(BaseModel):
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+
+class FileChange(BaseModel):
+    """Represents a single file change event."""
+    model_config = ConfigDict(
+        validate_assignment=True,
+        extra='forbid',
+        str_strip_whitespace=True
+    )
+
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    event_type: str = Field(..., description="Type of event: created, modified, deleted, moved")
+    path: str = Field(..., description="Absolute path to the file")
+    relative_path: str = Field(..., description="Path relative to project root")
+    size: Optional[int] = Field(None, description="File size in bytes")
+    content_snapshot: Optional[str] = Field(None, description="Content snapshot for small files")
+    src_path: Optional[str] = Field(None, description="Source path for 'moved' events")
+    source: str = Field("unknown", description="Source of change: agent, user, or external")
+    pre_change_snapshot: Optional[str] = Field(None, description="Content before agent modification")
+
+
+
+class AgentConfig(BaseModel):
+    """Configuration for multi-framework agents."""
+    model_config = ConfigDict(
+        validate_assignment=True,
+        extra='forbid',
+        str_strip_whitespace=True
+    )
+
+    # Azure OpenAI configuration
+    azure_endpoint: str = Field(..., description="Azure OpenAI endpoint")
+    api_key: str = Field(..., description="Azure OpenAI API key")
+    api_version: str = Field("2023-12-01-preview", description="Azure OpenAI API version")
+    deployment_name: str = Field("gpt-4", description="Azure OpenAI deployment name")
+    reasoning_deployment: str|None = Field(None, description="Azure OpenAi reasoning model for agent")
+
+    # Agent behavior
+    temperature: float = Field(0.7, ge=0.0, le=2.0, description="Model temperature")
+    max_tokens: Optional[int] = Field(None, description="Maximum tokens per response")
+    agent_timeout: Optional[int] = Field(60, description="Request timeout in seconds")
+    max_retries: int = Field(2, description="Maximum number of retries")
+
+    # Tool configuration
+    command_timeout: int = Field(300, description="Default command timeout in seconds")
+    require_confirmation: bool = Field(True, description="Require user confirmation for commands")
+
+    # Framework configuration (LangGraph only)
+    # Note: da_code now uses LangGraph exclusively for simplicity and reliability
+    # CLI configuration
+    history_file_path: str = Field(..., description="Path to command history file")
+
+
+
+class FileSnapshot(BaseModel):
+    """Snapshot of a single file at a point in time."""
+    model_config = ConfigDict(
+        validate_assignment=True,
+        extra='forbid',
+        str_strip_whitespace=True
+    )
+
+    relative_path: str = Field(..., description="Path relative to project root")
+    content: Optional[str] = Field(None, description="File content (None if too large or binary)")
+    size: int = Field(..., description="File size in bytes")
+    content_hash: str = Field(..., description="SHA256 hash of file content")
+    is_binary: bool = Field(False, description="Whether file is binary")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class FileSystemHistory(BaseModel):
+    """Tracks file changes during a session with replay/restore capability."""
+    model_config = ConfigDict(
+        validate_assignment=True,
+        extra='allow',
+        str_strip_whitespace=True
+    )
+
+    session_id: str = Field(..., description="Associated session ID")
+    project_root: str = Field(..., description="Root directory of the project")
+    max_snapshot_size: int = Field(50_000, description="Max file size for content snapshots")
+    changes: List[FileChange] = Field(default_factory=list, description="All file changes")
+    last_reported_time: float = Field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
+    session_start_snapshot: Dict[str, FileSnapshot] = Field(default_factory=dict, description="Snapshot at session start")
+
+    def get_changes_since_last_prompt(self) -> Optional[str]:
+        """Get a summary of changes since last prompt."""
+        from collections import defaultdict
+
+        current_time = datetime.now(timezone.utc).timestamp()
+        new_changes = [c for c in self.changes if c.timestamp.timestamp() > self.last_reported_time]
+        self.last_reported_time = current_time
+
+        if not new_changes:
+            return None
+
+        # Group by event type
+        by_type = defaultdict(list)
+        for change in new_changes:
+            by_type[change.event_type].append(change.relative_path)
+
+        # Format summary
+        parts = []
+        for event_type in ['created', 'modified', 'deleted', 'moved']:
+            if by_type[event_type]:
+                files = ', '.join(by_type[event_type][:5])
+                more = f" (+{len(by_type[event_type]) - 5} more)" if len(by_type[event_type]) > 5 else ""
+                parts.append(f"{event_type.title()}: {files}{more}")
+
+        return "📁 File changes: " + " | ".join(parts)
+
+    def get_file_history(self, file_path: str) -> List[FileChange]:
+        """Get history of changes for a specific file."""
+        from pathlib import Path
+        path_obj = Path(file_path)
+
+        # Try to get relative path
+        try:
+            if path_obj.is_absolute():
+                relative = str(path_obj.relative_to(self.project_root))
+            else:
+                relative = str(path_obj)
+        except ValueError:
+            relative = str(path_obj)
+
+        return [c for c in self.changes if c.relative_path == relative]
+
+    def restore_file_content(self, file_path: str, timestamp: Optional[datetime] = None) -> Optional[str]:
+        """Restore file content to a specific point in time."""
+        history = self.get_file_history(file_path)
+
+        if not history:
+            return None
+
+        # Filter to changes before timestamp
+        if timestamp:
+            history = [c for c in history if c.timestamp <= timestamp]
+
+        if not history:
+            return None
+
+        # Find most recent change with content snapshot
+        for change in reversed(history):
+            if change.content_snapshot:
+                return change.content_snapshot
+
+        return None
+
+    def capture_session_start_snapshot(self, daignore=None) -> None:
+        """Capture complete snapshot of project directory at session start.
+
+        Respects .daignore rules to avoid snapshotting sensitive/ignored files.
+
+        Args:
+            daignore: DaIgnore instance for filtering files (optional)
+        """
+        import hashlib
+        from pathlib import Path as PathLib
+
+        logger.info(f"Capturing session-start snapshot for {self.project_root}")
+        project_path = PathLib(self.project_root)
+
+        # Common directories to always ignore
+        always_ignore = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', '.da', 'dist', 'build'}
+
+        file_count = 0
+        for item in project_path.rglob('*'):
+            # Skip directories
+            if not item.is_file():
+                continue
+
+            # Skip if any parent directory is in always_ignore
+            if any(ignored_dir in item.parts for ignored_dir in always_ignore):
+                continue
+
+            try:
+                # Get relative path
+                relative_path = str(item.relative_to(project_path))
+
+                # Check .daignore if provided
+                if daignore and daignore.is_ignored(str(item)):
+                    continue
+
+                # Get file stats
+                file_size = item.stat().st_size
+
+                # Read content and calculate hash
+                try:
+                    content = item.read_bytes()
+                    content_hash = hashlib.sha256(content).hexdigest()
+
+                    # Check if binary
+                    try:
+                        text_content = content.decode('utf-8')
+                        is_binary = False
+                        # Store content if small enough
+                        content_to_store = text_content if file_size <= self.max_snapshot_size else None
+                    except UnicodeDecodeError:
+                        is_binary = True
+                        content_to_store = None
+
+                    # Create snapshot
+                    snapshot = FileSnapshot(
+                        relative_path=relative_path,
+                        content=content_to_store,
+                        size=file_size,
+                        content_hash=content_hash,
+                        is_binary=is_binary
+                    )
+
+                    self.session_start_snapshot[relative_path] = snapshot
+                    file_count += 1
+
+                except Exception as e:
+                    logger.warning(f"Could not snapshot {relative_path}: {e}")
+                    continue
+
+            except Exception as e:
+                logger.warning(f"Error processing {item}: {e}")
+                continue
+
+        logger.info(f"Captured snapshot of {file_count} files")
+
+    def get_first_change_per_file(self) -> Dict[str, FileChange]:
+        """Get the first change for each file (session start state)."""
+        first_changes = {}
+        for change in self.changes:
+            rel_path = change.relative_path
+            if rel_path not in first_changes:
+                first_changes[rel_path] = change
+        return first_changes
+
+    def revert_all_changes(self) -> Dict[str, Any]:
+        """Revert ALL changes (agent, user, external) back to session start.
+
+        Uses session_start_snapshot to determine original file state.
+
+        Returns:
+            Dictionary with stats about the revert operation
+        """
+        from pathlib import Path as PathLib
+        import os
+
+        if not self.session_start_snapshot:
+            return {"status": "error", "message": "No session-start snapshot available"}
+
+        stats = {
+            "deleted": 0,
+            "restored": 0,
+            "errors": [],
+            "files_affected": 0
+        }
+
+        # Get all files that were changed during the session
+        changed_files = set()
+        for change in self.changes:
+            changed_files.add(change.relative_path)
+
+        # Restore changed files to session-start state
+        for rel_path in changed_files:
+            full_path = PathLib(self.project_root) / rel_path
+
+            try:
+                if rel_path in self.session_start_snapshot:
+                    # File existed at session start - restore it
+                    snapshot = self.session_start_snapshot[rel_path]
+
+                    if snapshot.content is not None:
+                        # We have the content - restore it
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        full_path.write_text(snapshot.content, encoding='utf-8')
+                        stats["restored"] += 1
+                        stats["files_affected"] += 1
+                        logger.info(f"Restored file to session-start state: {rel_path}")
+                    else:
+                        # Large file or binary - can't restore
+                        stats["errors"].append(f"{rel_path}: File too large or binary, cannot restore")
+                else:
+                    # File didn't exist at session start - delete it
+                    if full_path.exists():
+                        os.remove(full_path)
+                        stats["deleted"] += 1
+                        stats["files_affected"] += 1
+                        logger.info(f"Deleted file created during session: {rel_path}")
+
+            except Exception as e:
+                stats["errors"].append(f"{rel_path}: {str(e)}")
+                logger.error(f"Error reverting {rel_path}: {e}")
+
+        # Check for files that were deleted during session
+        for rel_path, snapshot in self.session_start_snapshot.items():
+            full_path = PathLib(self.project_root) / rel_path
+
+            if rel_path not in changed_files:
+                # File exists unchanged - skip it
+                continue
+
+            # If file was deleted (doesn't exist now but should)
+            if not full_path.exists():
+                try:
+                    if snapshot.content is not None:
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        full_path.write_text(snapshot.content, encoding='utf-8')
+                        stats["restored"] += 1
+                        stats["files_affected"] += 1
+                        logger.info(f"Restored deleted file: {rel_path}")
+                    else:
+                        stats["errors"].append(f"{rel_path}: File was deleted but cannot restore (too large or binary)")
+                except Exception as e:
+                    stats["errors"].append(f"{rel_path}: {str(e)}")
+                    logger.error(f"Error restoring deleted file {rel_path}: {e}")
+
+        return {
+            "status": "completed",
+            "stats": stats,
+            "total_files": len(changed_files)
+        }
+
+
 class CodeSession(BaseModel):
     """Main session model containing all command executions and context."""
     
@@ -277,11 +595,15 @@ class CodeSession(BaseModel):
     working_directory: str = Field(..., description="Base working directory for session")
     project_context: Optional[ProjectContext] = Field(None, description="Loaded project context")
     mcp_servers: List[MCPServerInfo] = Field(default_factory=list, description="Available MCP servers")
+    daignore: Any = Field(None, description="DaIgnore instance for filtering files")
 
     # Execution tracking
     executions: List[CommandExecution] = Field(default_factory=list, description="All command executions")
     llm_calls: List[LLMCall] = Field(default_factory=list, description="All LLM API calls")
     tool_calls: List[ToolCall] = Field(default_factory=list, description="All tool/MCP calls")
+
+    # Filesystem tracking
+    filesystem_history: Optional[FileSystemHistory] = Field(None, description="File change history for session")
 
     # Statistics
     total_commands: int = Field(0, description="Total number of commands executed")
@@ -329,6 +651,20 @@ class CodeSession(BaseModel):
         self.updated_at = datetime.now(timezone.utc)
         self.total_tool_calls += 1
 
+    def init_filesystem_history(self) -> None:
+        """Initialize filesystem history for this session."""
+        if not self.filesystem_history:
+            self.filesystem_history = FileSystemHistory(
+                session_id=self.session_id,
+                project_root=self.working_directory
+            )
+
+    def get_file_changes_summary(self) -> Optional[str]:
+        """Get summary of recent file changes."""
+        if not self.filesystem_history:
+            return None
+        return self.filesystem_history.get_changes_since_last_prompt()
+
     def get_session_summary(self) -> Dict[str, Any]:
         """Get a comprehensive summary of the session."""
         duration = (self.updated_at - self.created_at).total_seconds()
@@ -350,36 +686,6 @@ class CodeSession(BaseModel):
             "updated_at": self.updated_at.isoformat()
         }
 
-
-class AgentConfig(BaseModel):
-    """Configuration for multi-framework agents."""
-    model_config = ConfigDict(
-        validate_assignment=True,
-        extra='forbid',
-        str_strip_whitespace=True
-    )
-
-    # Azure OpenAI configuration
-    azure_endpoint: str = Field(..., description="Azure OpenAI endpoint")
-    api_key: str = Field(..., description="Azure OpenAI API key")
-    api_version: str = Field("2023-12-01-preview", description="Azure OpenAI API version")
-    deployment_name: str = Field("gpt-4", description="Azure OpenAI deployment name")
-    reasoning_deployment: str|None = Field(None, description="Azure OpenAi reasoning model for agent")
-
-    # Agent behavior
-    temperature: float = Field(0.7, ge=0.0, le=2.0, description="Model temperature")
-    max_tokens: Optional[int] = Field(None, description="Maximum tokens per response")
-    agent_timeout: Optional[int] = Field(60, description="Request timeout in seconds")
-    max_retries: int = Field(2, description="Maximum number of retries")
-
-    # Tool configuration
-    command_timeout: int = Field(300, description="Default command timeout in seconds")
-    require_confirmation: bool = Field(True, description="Require user confirmation for commands")
-
-    # Framework configuration (LangGraph only)
-    # Note: da_code now uses LangGraph exclusively for simplicity and reliability
-    # CLI configuration
-    history_file_path: str = Field(..., description="Path to command history file")
 
 
 class DaMongoTracker:
@@ -420,8 +726,8 @@ class DaMongoTracker:
     def _save_to_file(self, filename: str, data: Dict[str, Any]) -> None:
         """Fallback: save to local file."""
         try:
-            Path("da_sessions").mkdir(exist_ok=True)
-            with open(f"da_sessions/{filename}", 'w') as f:
+            Path(".da").mkdir(exist_ok=True)
+            with open(f".da/{filename}", 'w') as f:
                 json.dump(data, f, indent=2, default=str)
         except Exception:
             pass
@@ -433,6 +739,33 @@ class DaMongoTracker:
         success = await self._save_to_mongo("sessions", session_dict)
         if not success:
             self._save_to_file(f"{session.session_id}.json", session_dict)
+
+    async def load_session(self, session_id: str) -> Optional[CodeSession]:
+        """Load session from MongoDB or file."""
+        # Try MongoDB first
+        if self.mongo_enabled and self.client:
+            try:
+                db = self.client[self.database]
+                coll = db["sessions"]
+                session_dict = await coll.find_one({"session_id": session_id})
+                if session_dict:
+                    # Remove MongoDB _id field before creating CodeSession
+                    session_dict.pop('_id', None)
+                    return CodeSession(**session_dict)
+            except Exception as e:
+                logger.warning(f"Failed to load from MongoDB: {e}")
+
+        # Fallback to file
+        try:
+            session_file = Path(f".da/{session_id}.json")
+            if session_file.exists():
+                with open(session_file, 'r') as f:
+                    session_dict = json.load(f)
+                    return CodeSession(**session_dict)
+        except Exception as e:
+            logger.warning(f"Failed to load from file: {e}")
+
+        return None
 
     async def save_llm_call(self, session_id: str, llm_call: LLMCall) -> None:
         """Save LLM call to MongoDB or file."""
@@ -451,6 +784,22 @@ class DaMongoTracker:
         success = await self._save_to_mongo("tool_calls", call_dict)
         if not success:
             self._save_to_file(f"tool_{tool_call.id}.json", call_dict)
+
+    async def save_file_change(self, session_id: str, file_change: FileChange) -> None:
+        """Save file change to MongoDB or file."""
+        change_dict = file_change.dict()
+        change_dict["session_id"] = session_id
+
+        success = await self._save_to_mongo("file_changes", change_dict)
+        if not success:
+            # Fallback: append to session history file
+            try:
+                Path(".da").mkdir(exist_ok=True)
+                history_file = Path(f".da/session_{session_id}_files.jsonl")
+                with open(history_file, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(change_dict, default=str) + '\n')
+            except Exception:
+                pass
 
     async def close(self) -> None:
         """Close MongoDB connection."""

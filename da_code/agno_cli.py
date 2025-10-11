@@ -21,9 +21,11 @@ from prompt_toolkit.application.current import get_app
 
 from .config import ConfigManager, setup_logging
 from .context import ContextLoader, DirectoryContext, NUDGE_PHRASES
-from .models import CodeSession, CommandExecution, UserResponse, ConfirmationResponse
+from .models import CodeSession, CommandExecution, UserResponse, ConfirmationResponse, FileChange, da_mongo
 from .agno_agent import AgnoAgent
 from .mcp_tool import mcp2tool
+from .filesystem_watcher import FileSystemWatcher
+from .daignore import create_example_daignore
 from .ux import (
     show_splash,
     show_status_splash,
@@ -41,8 +43,8 @@ logger = logging.getLogger(__name__)
 #====================================================================================================
 
 
-def create_session(context_ldr: ContextLoader):
-    
+def create_session(context_ldr: ContextLoader, session_id: str = None):
+
     if not os.path.exists(".da"):
         os.makedirs(".da")
 
@@ -55,12 +57,26 @@ def create_session(context_ldr: ContextLoader):
     # Determine working directory
     working_dir = os.getcwd()
 
-    # Create session
-    code_session = CodeSession(
-        working_directory=working_dir,
-        project_context=project_context,
-        mcp_servers=mcp_servers,
-    )
+    # Initialize daignore for file filtering
+    from .daignore import DaIgnore
+    daignore = DaIgnore(project_root=working_dir)
+
+    # Create session with optional session_id for restart
+    if session_id:
+        code_session = CodeSession(
+            session_id=session_id,
+            working_directory=working_dir,
+            project_context=project_context,
+            mcp_servers=mcp_servers,
+            daignore=daignore,
+        )
+    else:
+        code_session = CodeSession(
+            working_directory=working_dir,
+            project_context=project_context,
+            mcp_servers=mcp_servers,
+            daignore=daignore,
+        )
     return code_session
 
 
@@ -80,13 +96,19 @@ def create_example_configuration(config_mgr: ConfigManager, context_ldr: Context
         if not Path('DA.json').exists():
             context_ldr.create_sample_da_json()
 
+        # Create .daignore if it doesn't exist
+        if not Path('.daignore').exists():
+            create_example_daignore()
+            print("✓ Created .daignore file")
+
         print("\n✅ Setup complete!")
         print("\nNext steps:")
         print("1. Edit .env with your Azure OpenAI credentials")
         print("2. Edit AGENTS.md with your project information")
         print("3. Edit DA.json with your MCP server configuration")
-        print("4. Run 'da_code status' to verify configuration")
-        print("5. Run 'da_code' to start interactive session")
+        print("4. Edit .daignore to control agent file access")
+        print("5. Run 'da_code status' to verify configuration")
+        print("6. Run 'da_code' to start interactive session")
 
         return 0
 
@@ -226,10 +248,10 @@ class NudgeCompleter(Completer):
             return []
 
         ignored_dirs = ['.git', '__pycache__',  'node_modules', '.venv', '.da']
-		glob_args = []
-		for igdir in ignored_dirs:
-		    glob_args.append('--glob')
-		    glob_args.append(f'!{igdir}')
+        glob_args = []
+        for igdir in ignored_dirs:
+            glob_args.append('--glob')
+            glob_args.append(f'!{igdir}')
 
         try:
             # Try ripgrep first (faster)
@@ -467,14 +489,18 @@ class ShellModeManager:
 # Available commands
 commands = ['help', 'setup', 'status', 'add_mcp', 'shell', 'exit', 'quit', 'q']
 
-async def async_main():
+# Global session ID for restart message
+_current_session_id = None
+
+async def async_main(session_id: str = None):
     """Async main with simple status interface."""
+    global _current_session_id
     status_interface = SimpleStatusInterface()
     shell_manager = ShellModeManager()
 
     async def confirm_wrapper(execution: CommandExecution) -> ConfirmationResponse:
         return await confirmation_handler(execution, status_interface)
-    
+
     show_splash("gradient")
 
     # Check if we need to run setup first
@@ -484,17 +510,47 @@ async def async_main():
         # Configuration missing - return early to avoid uninitialized agent usage
         return
     else:
-        # Initialize agent if config is valid
+        # Initialize or load session
         status_interface.start_execution("Initializing session...")
-        code_session = create_session(context_ldr=ContextLoader())
-        if code_session is None:
-            status_interface.stop_execution(False, "Session creation failed")
-            raise ValueError("Failed to create code session!")
+
+        if session_id:
+            # Try to load existing session
+            console.print(f"[cyan]Loading session {session_id}...[/cyan]")
+            code_session = await da_mongo.load_session(session_id)
+            if code_session is None:
+                console.print(f"[yellow]⚠️  Session {session_id} not found in MongoDB or file system[/yellow]")
+                console.print(f"[cyan]Creating new session with ID {session_id} to preserve chat history[/cyan]")
+                # Recreate session with the given session_id to maintain PostgreSQL chat history
+                code_session = create_session(context_ldr=ContextLoader(), session_id=session_id)
+                if code_session is None:
+                    status_interface.stop_execution(False, "Session creation failed")
+                    raise ValueError("Failed to create code session!")
+            else:
+                console.print(f"[green]✓ Session loaded[/green]")
+        else:
+            # Create new session
+            code_session = create_session(context_ldr=ContextLoader())
+            if code_session is None:
+                status_interface.stop_execution(False, "Session creation failed")
+                raise ValueError("Failed to create code session!")
+
+        # Store session ID globally for restart message
+        _current_session_id = code_session.session_id
+
+        # Initialize filesystem history for tracking file changes
+        code_session.init_filesystem_history()
+
+        # Capture session-start snapshot for restore functionality
+        if code_session.filesystem_history:
+            from .daignore import DaIgnore
+            daignore = DaIgnore(project_root=code_session.working_directory)
+            status_interface.update_status("Capturing session snapshot...")
+            code_session.filesystem_history.capture_session_start_snapshot(daignore=daignore)
 
         status_interface.update_status("Initializing Agno agent...")
 
         # Directory context for change detection
-        dir_context = DirectoryContext(code_session.working_directory)
+        dir_context = DirectoryContext(code_session.working_directory, daignore=code_session.daignore)
         directory_cache, cache_timestamp = dir_context.get_directory_listing()
         agent = AgnoAgent(code_session, directory_cache)
 
@@ -558,6 +614,9 @@ async def async_main():
     # Use '#' (Shift+3) to toggle shell/agent mode and provide shell history navigation
     shell_history_index = [None]  # Mutable index for navigating shell_command_history
 
+    # Cancellation flag for agent interrupt
+    cancel_agent = [False]  # Mutable flag for escape key interrupt
+
     @bindings.add('#')  # '#' (Shift+3)
     def _(event):
         """Toggle shell mode with '#' key (Shift+3)."""
@@ -573,6 +632,11 @@ async def async_main():
                 get_app().invalidate()
             except Exception:
                 pass
+
+    @bindings.add(Keys.Escape)
+    def _(event):
+        """Cancel running agent with Escape key."""
+        cancel_agent[0] = True
 
     @bindings.add(Keys.Up, filter=Condition(lambda: shell_manager.is_shell_mode), eager=True)
     def _(event):
@@ -749,16 +813,122 @@ async def async_main():
         user_id = "dang"
     
     
+    # Create filesystem watcher callback
+    async def on_file_change(event):
+        """Handle file change events from watchdog."""
+        try:
+            if not code_session.filesystem_history:
+                return
+
+            path = Path(event.src_path)
+            relative_path = str(path.relative_to(code_session.working_directory))
+
+            # Check if this is the first change for this file
+            existing_changes = code_session.filesystem_history.get_file_history(relative_path)
+            is_first_change = len(existing_changes) == 0
+
+            # Capture pre-change snapshot for first modification/deletion
+            pre_change_snapshot = None
+            if is_first_change and event.event_type in ['modified', 'deleted']:
+                # Note: Event fires AFTER change, so we can't capture pre-state here
+                # Pre-snapshots must be captured in FileTool before writing
+                pass
+
+            # Get file size and content snapshot for non-deleted files
+            size = None
+            content_snapshot = None
+
+            if event.event_type != 'deleted' and path.exists() and path.is_file():
+                try:
+                    size = path.stat().st_size
+
+                    # Store content snapshot for small files
+                    if size <= code_session.filesystem_history.max_snapshot_size:
+                        try:
+                            content_snapshot = path.read_text(encoding='utf-8', errors='replace')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # Determine source: agent if agent is running, otherwise external
+            source = "agent" if running_agent is not None and not running_agent.done() else "external"
+
+            # Create change record
+            change = FileChange(
+                event_type=event.event_type,
+                path=str(path),
+                relative_path=relative_path,
+                size=size,
+                content_snapshot=content_snapshot,
+                src_path=getattr(event, 'dest_path', None) if event.event_type == 'moved' else None,
+                source=source,
+                pre_change_snapshot=pre_change_snapshot
+            )
+
+            # Add to session history
+            code_session.filesystem_history.changes.append(change)
+
+            # Persist to MongoDB/disk
+            await da_mongo.save_file_change(code_session.session_id, change)
+
+        except Exception as e:
+            logger.error(f"Error processing file change: {e}")
+
+    # Async wrapper for filesystem watcher
+    async def run_filesystem_watcher():
+        """Run filesystem watcher in task group."""
+        fs_watcher = FileSystemWatcher(
+            root_dir=code_session.working_directory,
+            on_change_callback=on_file_change
+        )
+        try:
+            fs_watcher.start(asyncio.get_event_loop())
+            logger.info("Filesystem watcher started")
+            # Keep running indefinitely
+            while True:
+                await asyncio.sleep(1)
+        finally:
+            fs_watcher.stop()
+            logger.info("Filesystem watcher stopped")
+
     async with asyncio.TaskGroup() as tg:
         wait_for_input = tg.create_task(get_user_input_with_history(input_queue))
-        #task2 = tg.create_task(another_coro(...))
- 
+        fs_watcher_task = tg.create_task(run_filesystem_watcher())
+
         running_agent = None
         status_message = None
         output_message = None
         while True:
             try:
-                # If agent is not running then wait for input command 
+                # Check for cancellation request
+                if cancel_agent[0] and running_agent is not None and not running_agent.done():
+                    # Cancel the agent run first (tells the agent to stop)
+                    if agent.active_run_id:
+                        logger.debug(f"Cancelling agent run: {agent.active_run_id}")
+                        agent.agent.cancel_run(agent.active_run_id)
+
+                    # Then cancel the asyncio task
+                    running_agent.cancel()
+                    try:
+                        await running_agent
+                    except asyncio.CancelledError:
+                        pass
+
+                    running_agent = None
+                    status_interface.stop_execution(False, "Cancelled")
+
+                    # Print any partial output that was generated before cancellation
+                    if output_message:
+                        console.print("\n[dim]Partial output:[/dim]")
+                        console.print(output_message)
+
+                    cancel_agent[0] = False
+                    output_message = None
+                    status_message = None
+                    continue
+
+                # If agent is not running then wait for input command
                 if running_agent is None:
                     if wait_for_input.done():
                         console.print(f"ERROR: wait_for_input is done!! {wait_for_input.result()}")
@@ -793,7 +963,10 @@ async def async_main():
                     continue
 
                 if user_input.lower() in ['exit', 'quit', 'q']:
-                    console.print("👋 Goodbye!")
+                    console.print("\n[bold green]👋 Goodbye![/bold green]")
+                    console.print(f"\n[dim]To restart this session, run:[/dim]")
+                    console.print(f"[cyan]  da_code --session {code_session.session_id}[/cyan]")
+                    console.print()
                     break
                 elif user_input.lower() == 'help':
                     console.print("[bold]Available commands:[/bold]")
@@ -801,7 +974,11 @@ async def async_main():
                     console.print("  • setup - Create configuration files")
                     console.print("  • status - Show current configuration status")
                     console.print("  • add_mcp <url> [name] - Add MCP server dynamically")
+                    console.print("  • restore - Revert ALL file changes since session start")
                     console.print("  • exit/quit/q - Exit the application")
+                    console.print("\n[bold]Agent Control:[/bold]")
+                    console.print("  • [cyan]Escape[/cyan] - Cancel running agent execution 🛑")
+                    console.print("  • [cyan]restore[/cyan] - Undo all session changes (requires confirmation) ↩️")
                     console.print("\n[bold]Agent Mode - Left-hand Ergonomic Triggers:[/bold]")
                     console.print("  • [cyan]![/cyan] - AI nudge phrases: '!be<Tab>' → 'be careful and check your work' 💡")
                     console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁")
@@ -824,6 +1001,43 @@ async def async_main():
                     show_status(config_mgr=ConfigManager(), context_ldr=ContextLoader())
                 elif user_input.lower() == 'shell':
                     shell_manager.toggle_shell_mode()
+                    continue
+                elif user_input.lower().startswith('restore'):
+                    # Restore all changes back to session start
+                    console.print("[yellow]⚠️  This will revert ALL file changes since session start![/yellow]")
+                    console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
+
+                    # Wait for confirmation
+                    confirm_input = await input_queue.get()
+                    if confirm_input.lower() != 'yes':
+                        console.print("[cyan]Restore cancelled[/cyan]")
+                        continue
+
+                    console.print("[cyan]Reverting all changes...[/cyan]")
+                    try:
+                        if code_session.filesystem_history:
+                            result = code_session.filesystem_history.revert_all_changes()
+
+                            if result["status"] == "no_changes":
+                                console.print("[green]✓ No changes to revert[/green]")
+                            else:
+                                stats = result["stats"]
+                                console.print(f"[green]✓ Restore complete![/green]")
+                                console.print(f"  • Files deleted: {stats['deleted']}")
+                                console.print(f"  • Files restored: {stats['restored']}")
+                                console.print(f"  • Total files affected: {stats['files_affected']}")
+
+                                if stats['errors']:
+                                    console.print(f"\n[yellow]⚠️  Errors ({len(stats['errors'])}):[/yellow]")
+                                    for error in stats['errors'][:5]:  # Show first 5 errors
+                                        console.print(f"  • {error}")
+                                    if len(stats['errors']) > 5:
+                                        console.print(f"  ... and {len(stats['errors']) - 5} more")
+                        else:
+                            console.print("[yellow]No filesystem history available[/yellow]")
+                    except Exception as e:
+                        console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
+                        logger.error(f"Restore error: {e}", exc_info=True)
                     continue
                 elif user_input.startswith('add_mcp '):
                     # Handle dynamic MCP server addition
@@ -884,9 +1098,14 @@ async def async_main():
 
                         # Add shell context to the user input if available
                         shell_context = shell_manager.get_shell_context_for_agent()
+
+                        # Get file changes summary
+                        file_changes = code_session.get_file_changes_summary()
+                        logger.warning(f"File changes summary: {file_changes}")
+
                         enhanced_input = user_input
 
-                        # Prepend contexts in order: pasted content, directory updates, then shell context
+                        # Prepend contexts in order: pasted content, directory updates, file changes, then shell context
                         context_parts = []
 
                         # Add pasted content ONLY if placeholder still exists in user_input
@@ -905,6 +1124,8 @@ async def async_main():
 
                         if dir_update:
                             context_parts.append(dir_update)
+                        if file_changes:
+                            context_parts.append(file_changes)
                         if shell_context:
                             context_parts.append(shell_context)
 
@@ -945,6 +1166,7 @@ def main():
     parser.add_argument('command', nargs='?', choices=['setup', 'status'],
                        help='Command to run (setup creates config files and exits, test checks connection)')
     parser.add_argument('--working-dir', type=str, help='Working directory')
+    parser.add_argument('--session', type=str, help='Resume a previous session by session ID')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        default='INFO', help='Logging level')
 
@@ -967,10 +1189,13 @@ def main():
         sys.exit(result)
     # Interactive mode
     try:
-        
-        asyncio.run(async_main())
+        asyncio.run(async_main(session_id=args.session))
     except KeyboardInterrupt:
-        print("\nGoodbye!")
+        print("\n👋 Goodbye!")
+        if _current_session_id:
+            print(f"\nTo restart this session, run:")
+            print(f"  da_code --session {_current_session_id}")
+        print()
     except Exception as e:
         print(f"Error: {e}")
         logger.error(f"Main execution error: {e}")

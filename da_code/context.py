@@ -371,11 +371,28 @@ def get_file_emoji(filename: str) -> str:
 class DirectoryContext:
     """Provides intelligent directory context for the agent with activity-based previews."""
 
-    def __init__(self, working_dir: str):
-        """Initialize directory context."""
+    def __init__(self, working_dir: str, daignore=None):
+        """Initialize directory context.
+
+        Args:
+            working_dir: Working directory path
+            daignore: DaIgnore instance for filtering files (optional)
+        """
         self.working_dir = Path(working_dir)
+        self.daignore = daignore
         self._cache_timestamp = None
         self._cached_listing = None
+
+    def _should_ignore(self, path: Path) -> bool:
+        """Check if path should be ignored using DaIgnore or fallback patterns."""
+        # Use daignore if available
+        if self.daignore:
+            relative_path = str(path.relative_to(self.working_dir))
+            return self.daignore.is_ignored(relative_path)
+
+        # Fallback to hard-coded patterns if no daignore
+        ignored = {'.git', '__pycache__', '.vscode', 'node_modules', '.da'}
+        return path.name in ignored or path.name.startswith('.')
 
     def get_directory_listing(self) -> Tuple[str, float]:
         """Get integrated directory listing with subdirectory previews and time deltas."""
@@ -383,23 +400,21 @@ class DirectoryContext:
             listing = []
             current_time = time.time()
 
-            # Get files/dirs, skip ignored patterns
-            ignored = {'.git', '__pycache__', '.vscode', 'node_modules'}
-
             # Get activity scores for directories
             directory_scores = {}
             for item in self.working_dir.iterdir():
-                if (item.is_dir() and
-                    not item.name.startswith('.') and
-                    item.name not in ignored):
+                # Skip ignored files/directories
+                if self._should_ignore(item):
+                    continue
+
+                if item.is_dir():
                     score = self._calculate_activity_score(item, current_time)
                     directory_scores[item.name] = score
 
             # Process all items with integrated subdirectory previews
             for item in sorted(self.working_dir.iterdir()):
-                if item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
-                    continue
-                if item.name in ignored:
+                # Skip ignored files/directories
+                if self._should_ignore(item):
                     continue
 
                 try:
@@ -459,9 +474,8 @@ class DirectoryContext:
         try:
             # Quick check: any file newer than cache?
             for item in self.working_dir.iterdir():
-                if item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
-                    continue
-                if item.name in {'.git', '__pycache__', '.vscode', 'node_modules'}:
+                # Skip ignored files/directories
+                if self._should_ignore(item):
                     continue
 
                 try:
@@ -486,9 +500,11 @@ class DirectoryContext:
             # Get all file update deltas
             file_deltas = []
             for file_path in dir_path.rglob('*'):
-                if (file_path.is_file() and
-                    not file_path.name.startswith('.') and
-                    file_path.name not in {'__pycache__', '.pyc', '.pyo'}):
+                # Skip ignored files
+                if self._should_ignore(file_path):
+                    continue
+
+                if file_path.is_file():
                     file_delta = current_time - file_path.stat().st_mtime
                     file_deltas.append(file_delta)
 
@@ -518,7 +534,11 @@ class DirectoryContext:
             # Get files sorted by size (larger files often more important)
             files = []
             for item in subdir_path.iterdir():
-                if item.is_file() and not item.name.startswith('.'):
+                # Skip ignored files
+                if self._should_ignore(item):
+                    continue
+
+                if item.is_file():
                     try:
                         size = item.stat().st_size
                         files.append((item.name, size))

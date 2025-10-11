@@ -1,0 +1,36 @@
+# Python
+.venv
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+**/build
+**/*.egg-info
+
+# Environment and secrets
+.env
+.da
+
+
+**/node_modules
+**/package-lock.json
+**/.prompt.history
+**/AGENTS.md
+**/todo.md
+**/DA.json
+
+mcp
+
+# Docker
+.dockerignore
+.gitignore
+.git
+
+**/.pytest_cache
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -28,6 +28,8 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiohttp>=3.9.0",
     "httpx>=0.25.0",
+    "watchdog",
+    "pathspec",
     "azure-identity>=1.15.0",
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",

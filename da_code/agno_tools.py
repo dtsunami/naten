@@ -11,6 +11,7 @@ from .models import (
     LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, UserResponse, da_mongo
 )
 from .context import get_file_emoji
+from .daignore import DaIgnore
 import subprocess
 import os
 
@@ -20,6 +21,17 @@ logger = logging.getLogger(__name__)
 #====================================================================================================
 # Utilities
 #====================================================================================================
+
+
+# Global daignore instance (lazily initialized)
+_daignore_instance = None
+
+def get_daignore() -> DaIgnore:
+    """Get or create the global DaIgnore instance."""
+    global _daignore_instance
+    if _daignore_instance is None:
+        _daignore_instance = DaIgnore(project_root=get_workspace_root())
+    return _daignore_instance
 
 
 def get_workspace_root() -> str:
@@ -36,7 +48,7 @@ def within_workspace(path: str) -> bool:
 
 
 def safe_path(path: str) -> str:
-    """Resolve and validate a path inside the workspace."""
+    """Resolve and validate a path inside the workspace and check .daignore."""
     workspace_root = os.path.abspath(get_workspace_root())
 
     # Handle absolute paths on Windows and Unix
@@ -48,6 +60,12 @@ def safe_path(path: str) -> str:
 
     if not within_workspace(abs_path):
         raise ValueError(f"Path {abs_path} is outside workspace {workspace_root}")
+
+    # Check if path is ignored by .daignore
+    daignore = get_daignore()
+    if daignore.is_ignored(abs_path):
+        raise ValueError(f"Access denied: {abs_path} is ignored by .daignore")
+
     return abs_path
 
 

@@ -40,8 +40,6 @@ from .telemetry import TelemetryManager, PerformanceTracker
 from .agno_tools import (
     TodoTool, CommandTool, WebSearchTool, FileTool,
     TimeTool, PythonTool, GitTool, HttpTool
-    TodoTool, CommandTool, WebSearchTool, FileTool,
-    TimeTool, PythonTool, GitTool, HttpTool
 )
 from .mcp_tool import mcp2tool
 
@@ -238,19 +236,22 @@ Don't prompt the user before running tools, tools will ask user for confirmation
         logging.debug("Entering arun")
         self.confirmation_handler = confirmation_handler
         content_started = False
-        active_run_id = None
+        self.active_run_id = None
 
         async def process_stream(stream):
-            nonlocal content_started, active_run_id
+            nonlocal content_started
             async for run_event in stream:
-                if active_run_id is None and hasattr(run_event, 'run_id'):
-                    active_run_id = run_event.run_id
+                if self.active_run_id is None and hasattr(run_event, 'run_id'):
+                    self.active_run_id = run_event.run_id
 
                 if not run_event.is_paused:
-                    if run_event.event in [RunEvent.run_started, RunEvent.run_completed]:
+                    if run_event.event in [RunEvent.run_started, RunEvent.run_completed, RunEvent.run_cancelled]:
                         await status_queue.put(f"Run: {run_event.event})")
                         if run_event.event == RunEvent.run_completed:
                             return True
+                        elif run_event.event == RunEvent.run_cancelled:
+                            logger.info(f"Run cancelled event received for run_id: {self.active_run_id}")
+                            return ('cancelled', None)
                     elif run_event.event in [RunEvent.tool_call_started]:
                         await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
                     elif run_event.event in [RunEvent.tool_call_completed]:
@@ -284,10 +285,10 @@ Don't prompt the user before running tools, tools will ask user for confirmation
         run_stream = self.agent.arun(task, stream=True, user_id=user_id)
         while True:
             result = await process_stream(run_stream)
-            if result is True or (isinstance(result, tuple) and result[0] == 'done'):
+            if result is True or (isinstance(result, tuple) and result[0] in ['done', 'cancelled']):
                 break
             elif isinstance(result, tuple) and result[0] == 'continue':
-                run_stream = self.agent.acontinue_run(run_id=active_run_id, updated_tools=result[1], stream=True, user_id=user_id)
+                run_stream = self.agent.acontinue_run(run_id=self.active_run_id, updated_tools=result[1], stream=True, user_id=user_id)
         
 
 
