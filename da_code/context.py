@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -715,17 +716,19 @@ class ContextLoader:
         sample_data = {
             "mcp_servers": [
                 {
-                    "name": "search",
-                    "url": "http://localhost:8080/search",
-                    "port": 8003,
-                    "description": "Web search MCP server",
-                    "tools": ["web_search", "extract_content"]
+                "name": "agno_docs",
+                "url": "https://docs.agno.com/mcp",
+                "description": "Agno Agent docs"
+                },
+                {
+                "name": "fastmcp_docs",
+                "url": "https://gofastmcp.com/mcp",
+                "description": "FastMCP documentation server"
                 }
             ],
             "default_working_directory": ".",
             "agent_settings": {
-                "model": "gpt-40",
-                "temperature": 0.7,
+                "model": "gpt-5-chat",
                 "max_tokens": None,
                 "require_confirmation": True
             }
@@ -745,63 +748,6 @@ class ContextLoader:
 
 Brief description of your project goes here.
 
-## Agent Instructions
-
-Instructions for the da_code AI agent on how to work with this project:
-
-### Development Workflow
-- Preferred coding patterns and conventions
-- Testing approach (unit tests, integration tests, etc.)
-- Git workflow and commit message style
-- Code review process
-
-### Project Structure
-- Key directories and their purposes
-- Important configuration files
-- Entry points and main modules
-- Documentation locations
-
-### Tools and Technologies
-- Programming languages and frameworks
-- Build tools and package managers
-- Development dependencies
-- Deployment tools
-
-## Coding Standards
-
-### Style Guidelines
-- Code formatting preferences
-- Naming conventions
-- Comment and documentation style
-- Error handling patterns
-
-### Best Practices
-- Performance considerations
-- Security guidelines
-- Accessibility requirements
-- Browser/platform compatibility
-
-## Agent Behavior
-
-### Preferred Actions
-- Always run tests after code changes
-- Use specific linting/formatting tools
-- Follow specific commit patterns
-- Ask for confirmation before major changes
-
-### Project Context
-- Domain-specific knowledge the agent should know
-- Business logic and requirements
-- Integration points with external systems
-- Known issues or technical debt
-
-## Important Files
-
-- `src/main.py` - Application entry point
-- `tests/` - Test suite location
-- `requirements.txt` - Python dependencies
-- `README.md` - Project documentation
-- `.env.example` - Environment configuration template
 """
 
         try:

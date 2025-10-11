@@ -9,8 +9,11 @@ from datetime import timedelta
 import httpx
 from agno.agent import Agent, RunEvent
 from agno.models.azure import AzureOpenAI
+from agno.models.openai import OpenAIResponses
 from agno.models.azure import AzureAIFoundry
+from agno.db.mongo import MongoDb
 from agno.db.postgres import PostgresDb
+from pymongo import MongoClient
 from agno.db.sqlite import SqliteDb
 from agno.tools.reasoning import ReasoningTools
 from agno.tools.duckduckgo import DuckDuckGoTools
@@ -35,6 +38,8 @@ from .context import ContextLoader
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .telemetry import TelemetryManager, PerformanceTracker
 from .agno_tools import (
+    TodoTool, CommandTool, WebSearchTool, FileTool,
+    TimeTool, PythonTool, GitTool, HttpTool
     TodoTool, CommandTool, WebSearchTool, FileTool,
     TimeTool, PythonTool, GitTool, HttpTool
 )
@@ -86,10 +91,10 @@ class AgnoAgent():
         self.db_type = None
         try:
             self.db = PostgresDb(db_url=os.getenv("POSTGRES_CHAT_URL"))
-            self.db_type = "postgres"
+            self.db_type = "postgre"
         except Exception as e:
             logging.warning(f"Postgres init failed, falling back to sqlite: {e}")
-            self.db = SqliteDb(session_table="agno_agent_sessions", db_file=f"da_sessions{os.sep}sqlite.db")
+            self.db = SqliteDb(session_table="agno_agent_sessions", db_file=f".da{os.sep}sqlite.db")
             self.db_type = "sqlite"
 
 
@@ -129,6 +134,13 @@ class AgnoAgent():
         # Agno uses the AzureOpenAI class to interface with Azure's service
         #self.llm = AzureAIFoundry(
         logging.info(f"Deployment Name {self.config.deployment_name}")
+        #self.respllm = OpenAIResponses(
+        #    provider="azure",
+        #    id=self.config.deployment_name,
+        #    base_url=self.config.azure_endpoint,
+        #    api_key=self.config.api_key, 
+        #)
+
         self.llm = AzureOpenAI(
             id=self.config.deployment_name,
             #id="gpt-5-mini",

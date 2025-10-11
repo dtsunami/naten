@@ -213,22 +213,28 @@ class NudgeCompleter(Completer):
         return self._all_files_cache
 
     def _grep_files(self, search_term: str):
-        """Search file contents using grep/ripgrep."""
+        """
+		Search file contents using ripgrep/grep with a Python fallback.
+
+        Tries external fast search tools first (rg, then grep). If those
+        are missing or fail, falls back to a pure-Python scan of the project
+        files. This makes search reliable across different Linux environments.
+        """
         # Strip quotes if present
         search_term = search_term.strip('\'"')
         if not search_term:
             return []
 
-        ignored_dirs = ['--exclude-dir=.git', '--exclude-dir=__pycache__',
-                       '--exclude-dir=node_modules', '--exclude-dir=.venv',
-                       '--exclude-dir=venv', '--exclude-dir=.da']
+        ignored_dirs = ['.git', '__pycache__',  'node_modules', '.venv', '.da']
+		glob_args = []
+		for igdir in ignored_dirs:
+		    glob_args.append('--glob')
+		    glob_args.append(f'!{igdir}')
 
         try:
             # Try ripgrep first (faster)
             result = subprocess.run(
-                ['rg', '--files-with-matches', '--no-heading', search_term] +
-                ['--glob', '!.git/', '--glob', '!__pycache__/', '--glob', '!node_modules/',
-                 '--glob', '!.venv/', '--glob', '!venv/', '--glob', '!.da/'],
+                ['rg', '--files-with-matches', '--no-heading', search_term] + glob_args,
                 cwd=self.working_dir,
                 capture_output=True,
                 text=True,
@@ -239,16 +245,17 @@ class NudgeCompleter(Completer):
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
+        # Fallback to grep
         try:
-            # Fallback to grep
+            grep_args = ['grep', '-rl'] + [f'--exclude-dir={d}' for d in ignored_dirs] + [search_term, '.']
             result = subprocess.run(
-                ['grep', '-rl'] + ignored_dirs + [search_term, '.'],
-                cwd=self.working_dir,
+                grep_args,
+                cwd=str(self.working_dir),
                 capture_output=True,
                 text=True,
                 timeout=5
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and result.stdout.strip():
                 return [f.lstrip('./') for f in result.stdout.strip().split('\n')]
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
@@ -506,7 +513,7 @@ async def async_main():
             
             # Get chat memory status from agent
             try:
-                if agent.db_type == 'postgres':
+                if agent.db_type == 'postgre':
                     memory_status = "[green]PostgreSQL[/green]"
                 elif agent.db_type == 'sqlite':
                     memory_status = "[yellow]File[/yellow]"

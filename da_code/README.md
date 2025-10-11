@@ -99,7 +99,15 @@ da_code
 - **Rich terminal interface** with clear status indicators
 - **Extensible design** ready for multi-agent orchestration
 
-## 🚀 Quick Start
+## 🚀 Developer Setup & Architecture
+
+This README contains **developer-focused information** for building, extending, and integrating `da_code`.
+
+For simple usage and features, see the main `README.md` in the project root.
+
+---
+
+### Quick Start
 
 ### Prerequisites
 - Python 3.11+
