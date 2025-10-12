@@ -338,31 +338,7 @@ Next step: final one-line recommended next action for the engineering team.'''.s
 # File/Directory Utilities
 #====================================================================================================
 
-def get_file_emoji(filename: str) -> str:
-    """Get emoji for file type."""
-    name_lower = filename.lower()
-    if name_lower.endswith(('.py', '.pyw')):
-        return "🐍"
-    elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
-        return "🟨"
-    elif name_lower.endswith(('.md', '.markdown')):
-        return "📖"
-    elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
-        return "⚙️"
-    elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
-        return "🔧"
-    elif name_lower.endswith(('.txt', '.log')):
-        return "📝"
-    elif name_lower.endswith(('.sh', '.bash', '.zsh')):
-        return "🔸"
-    elif name_lower.endswith(('.html', '.htm', '.css')):
-        return "🌐"
-    elif name_lower.endswith(('.sql', '.db', '.sqlite')):
-        return "🗄️"
-    elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-        return "🖼️"
-    else:
-        return "📄"
+from .file_utils import get_file_emoji
 
 
 #====================================================================================================

@@ -10,7 +10,7 @@ from .models import (
     AgentConfig, CodeSession, CommandExecution, CommandStatus,
     LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, UserResponse, da_mongo
 )
-from .context import get_file_emoji
+from .file_utils import get_file_emoji
 from .daignore import DaIgnore
 import subprocess
 import os
@@ -67,33 +67,6 @@ def safe_path(path: str) -> str:
         raise ValueError(f"Access denied: {abs_path} is ignored by .daignore")
 
     return abs_path
-
-
-def get_file_emoji(filename: str) -> str:
-    """Get emoji for file type"""
-    name_lower = filename.lower()
-    if name_lower.endswith(('.py', '.pyw')):
-        return "🐍"
-    elif name_lower.endswith(('.js', '.jsx', '.ts', '.tsx')):
-        return "🟨"
-    elif name_lower.endswith(('.md', '.markdown')):
-        return "📖"
-    elif name_lower.endswith(('.json', '.yaml', '.yml', '.toml')):
-        return "⚙️"
-    elif name_lower.endswith(('.env', '.gitignore', '.dockerignore')):
-        return "🔧"
-    elif name_lower.endswith(('.txt', '.log')):
-        return "📝"
-    elif name_lower.endswith(('.sh', '.bash', '.zsh')):
-        return "🔸"
-    elif name_lower.endswith(('.html', '.htm', '.css')):
-        return "🌐"
-    elif name_lower.endswith(('.sql', '.db', '.sqlite')):
-        return "🗄️"
-    elif name_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-        return "🖼️"
-    else:
-        return "📄"
 
 
 #====================================================================================================
