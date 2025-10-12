@@ -940,7 +940,21 @@ async def async_main(session_id: str = None):
         lines = pasted_text.split('\n')
         line_count = len(lines)
 
-        # Create unique placeholder with ID
+        # Check if paste is a direct command - if so, paste directly without placeholder
+        first_line = lines[0].strip().lower()
+        direct_commands = ['add_mcp', 'add_voice']
+
+        is_direct_command = any(first_line.startswith(cmd) for cmd in direct_commands)
+
+        # Also check if it's a single-line paste (likely a command or short text)
+        is_single_line = line_count == 1
+
+        # Paste directly if it's a command or single line
+        if is_direct_command or is_single_line:
+            buffer.insert_text(pasted_text)
+            return
+
+        # Multi-line paste for agent context: create placeholder
         paste_counter[0] += 1
         paste_id = paste_counter[0]
         placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
@@ -1049,6 +1063,167 @@ async def async_main(session_id: str = None):
                 event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
             except Exception:
                 pass
+
+    # Voice server URL (CLI feature, not agent tool)
+    voice_server_url = [None]  # Mutable for inner function access
+
+    # Voice recording state (shared between Ctrl+I and Space handlers)
+    voice_recording_state = {
+        "session_id": None,
+        "is_recording": False,
+        "voice_url": None
+    }
+
+    @bindings.add('escape', 'v')  # Alt+V
+    def _(event):
+        """Voice input via achat server (streaming with VAD)."""
+        import requests
+        import time
+
+        # Check if voice server is configured
+        voice_url = voice_server_url[0]
+
+        if not voice_url:
+            # Show helpful setup message
+            console.print("\n[yellow]🎤 Voice input not available[/yellow]")
+            console.print("   [dim]To enable voice input:[/dim]")
+            console.print("   1. On your local machine: [cyan]achat[/cyan]")
+            console.print("   2. Copy connection command from output")
+            console.print("   3. Paste here: [cyan]add_voice http://localhost:8765[/cyan]")
+            console.print("   4. Press [cyan]Alt+V[/cyan] to record voice!\n")
+            return
+
+        # Show recording indicator
+        console.print("🔴 [red]Recording...[/red] (press [cyan]Space[/cyan] to stop, auto-stops on silence)")
+
+        try:
+            # Start streaming session
+            response = requests.post(
+                f"{voice_url}/tools/voice_stream_start",
+                timeout=5
+            )
+            result = response.json()
+
+            if result.get("status") != "recording":
+                error = result.get("error", "Unknown error")
+                console.print(f"[red]❌ Failed to start recording: {error}[/red]")
+                return
+
+            session_id = result.get("session_id")
+            if not session_id:
+                console.print("[red]❌ No session ID returned[/red]")
+                return
+
+            # Store session state for Space key handler
+            voice_recording_state["session_id"] = session_id
+            voice_recording_state["is_recording"] = True
+            voice_recording_state["voice_url"] = voice_url
+
+            # Poll for transcript chunks
+            start_time = time.time()
+            max_duration = 30  # Safety timeout
+            poll_interval = 0.5  # Poll every 500ms
+
+            while voice_recording_state["is_recording"] and (time.time() - start_time) < max_duration:
+                # Check for new chunks
+                try:
+                    chunk_response = requests.get(
+                        f"{voice_url}/tools/voice_stream_chunk/{session_id}",
+                        timeout=2
+                    )
+                    chunk_result = chunk_response.json()
+
+                    if chunk_result.get("status") == "success":
+                        chunks = chunk_result.get("chunks", [])
+
+                        # Insert new chunks into buffer
+                        for chunk_text in chunks:
+                            if chunk_text.strip():
+                                # Insert with space separator
+                                if event.current_buffer.text and not event.current_buffer.text.endswith(" "):
+                                    event.current_buffer.insert_text(" ")
+                                event.current_buffer.insert_text(chunk_text.strip())
+                                console.print(f"  → [cyan]{chunk_text.strip()}[/cyan]")
+
+                        # Check if recording is complete
+                        if chunk_result.get("is_complete"):
+                            console.print("✅ [green]Recording complete[/green]")
+                            voice_recording_state["is_recording"] = False
+                            break
+
+                except requests.exceptions.Timeout:
+                    # Timeout on chunk poll is OK, just continue
+                    pass
+                except Exception as e:
+                    logger.error(f"Chunk poll error: {e}")
+
+                # Sleep before next poll
+                time.sleep(poll_interval)
+
+            # Clean up
+            voice_recording_state["session_id"] = None
+            voice_recording_state["is_recording"] = False
+
+            if time.time() - start_time >= max_duration:
+                console.print("[yellow]⚠️  Recording timed out (safety limit)[/yellow]")
+
+        except requests.exceptions.ConnectionError:
+            console.print(f"[red]❌ Cannot connect to voice server at {voice_url}[/red]")
+            console.print("   [dim]Is achat running on your local machine?[/dim]")
+        except requests.exceptions.Timeout:
+            console.print("[red]❌ Voice request timed out[/red]")
+        except Exception as e:
+            console.print(f"[red]❌ Voice error: {e}[/red]")
+            logger.error(f"Voice input error: {e}")
+        finally:
+            # Ensure state is cleaned up
+            voice_recording_state["session_id"] = None
+            voice_recording_state["is_recording"] = False
+
+    @bindings.add(' ', filter=Condition(lambda: voice_recording_state["is_recording"]))
+    def _(event):
+        """Stop voice recording when Space is pressed during recording."""
+        import requests
+
+        if not voice_recording_state["is_recording"]:
+            return
+
+        session_id = voice_recording_state.get("session_id")
+        voice_url = voice_recording_state.get("voice_url")
+
+        if not session_id or not voice_url:
+            return
+
+        console.print("⏹️  [yellow]Stopping recording...[/yellow]")
+
+        try:
+            # Stop the recording session
+            response = requests.post(
+                f"{voice_url}/tools/voice_stream_stop/{session_id}",
+                timeout=5
+            )
+            result = response.json()
+
+            if result.get("status") == "stopped":
+                # Get any final chunks
+                final_chunks = result.get("chunks", [])
+                for chunk_text in final_chunks:
+                    if chunk_text.strip():
+                        if event.current_buffer.text and not event.current_buffer.text.endswith(" "):
+                            event.current_buffer.insert_text(" ")
+                        event.current_buffer.insert_text(chunk_text.strip())
+                        console.print(f"  → [cyan]{chunk_text.strip()}[/cyan]")
+
+                console.print("✅ [green]Recording stopped[/green]")
+
+            # Signal Ctrl+I loop to stop
+            voice_recording_state["is_recording"] = False
+
+        except Exception as e:
+            console.print(f"[red]❌ Failed to stop recording: {e}[/red]")
+            logger.error(f"Stop recording error: {e}")
+            # Force stop anyway
+            voice_recording_state["is_recording"] = False
 
     @bindings.add(Keys.Enter)
     def _(event):
@@ -1295,11 +1470,18 @@ async def async_main(session_id: str = None):
                     console.print("  • setup - Create configuration files")
                     console.print("  • status - Show current configuration status")
                     console.print("  • add_mcp <url> [name] - Add MCP server dynamically")
+                    console.print("  • add_voice <url> - Configure voice server (CLI feature)")
                     console.print("  • restore - Revert ALL file changes since session start")
                     console.print("  • exit/quit/q - Exit the application")
                     console.print("\n[bold]Agent Control:[/bold]")
                     console.print("  • [cyan]Escape[/cyan] - Cancel running agent execution 🛑")
                     console.print("  • [cyan]restore[/cyan] - Undo all session changes (requires confirmation) ↩️")
+                    console.print("\n[bold]Voice Input:[/bold]")
+                    console.print("  • [cyan]Alt+V[/cyan] - Start streaming voice recording with live transcript 🎤")
+                    console.print("  • [cyan]Space[/cyan] - Stop recording (or auto-stops on silence)")
+                    console.print("    Records up to 25s, transcribes in real-time chunks")
+                    console.print("    Requires achat server running on local machine")
+                    console.print("    Setup: Run [cyan]achat[/cyan] locally, then [cyan]add_voice http://localhost:8765[/cyan]")
                     console.print("\n[bold]Agent Mode - Left-hand Ergonomic Triggers:[/bold]")
                     console.print("  • [cyan]![/cyan] - AI nudge phrases: '!be<Tab>' → 'be careful and check your work' 💡")
                     console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁")
@@ -1643,6 +1825,50 @@ async def async_main(session_id: str = None):
                     except Exception as e:
                         console.print(f"[red]❌ Error adding MCP server: {str(e)}[/red]")
                         logger.error(f"MCP addition error: {e}")
+                    continue
+                elif user_input.startswith('add_voice '):
+                    # Handle voice server configuration (CLI feature, not agent tool)
+                    try:
+                        voice_url = user_input[10:].strip()
+
+                        if not voice_url:
+                            console.print("[red]Usage: add_voice <url>[/red]")
+                            console.print("[dim]Example: add_voice http://localhost:8765[/dim]")
+                            continue
+
+                        # Validate URL format
+                        if not voice_url.startswith('http://') and not voice_url.startswith('https://'):
+                            console.print("[red]URL must start with http:// or https://[/red]")
+                            continue
+
+                        # Test connection
+                        console.print(f"[yellow]Testing connection to voice server: {voice_url}[/yellow]")
+                        import requests
+                        try:
+                            response = requests.get(f"{voice_url.rstrip('/')}/", timeout=3)
+                            if response.status_code == 200:
+                                data = response.json()
+                                if data.get('service') == 'achat':
+                                    voice_server_url[0] = voice_url.rstrip('/')
+                                    console.print(f"[green]✅ Voice server connected: {data.get('service')} v{data.get('version')}[/green]")
+                                    console.print(f"[green]   Available tools: {', '.join(data.get('tools', []))}[/green]")
+                                    console.print(f"[cyan]   Press Alt+V to start voice recording![/cyan]")
+                                else:
+                                    console.print(f"[yellow]⚠️  Server responded but is not an achat server[/yellow]")
+                                    console.print(f"[yellow]   Received: {data}[/yellow]")
+                            else:
+                                console.print(f"[red]❌ Server returned HTTP {response.status_code}[/red]")
+                        except requests.exceptions.ConnectionError:
+                            console.print(f"[red]❌ Cannot connect to {voice_url}[/red]")
+                            console.print("[dim]   Make sure achat is running on your local machine[/dim]")
+                        except requests.exceptions.Timeout:
+                            console.print(f"[red]❌ Connection timed out[/red]")
+                        except Exception as e:
+                            console.print(f"[red]❌ Connection test failed: {str(e)}[/red]")
+
+                    except Exception as e:
+                        console.print(f"[red]❌ Error configuring voice server: {str(e)}[/red]")
+                        logger.error(f"Voice configuration error: {e}")
                     continue
                 elif user_input.strip() == '':
                     continue

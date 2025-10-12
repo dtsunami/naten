@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "achat-mcp"
+version = "0.1.0"
+description = "achat - Voice transcription MCP server for AI agents (clippy for voice)"
+authors = [
+    {name = "da_code", email = "daniel.tsunami@intel.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.9+",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: System :: Networking",
+]
+
+dependencies = [
+    "openai-whisper>=20231117",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.0",
+    "numpy>=1.24.0",
+    "pyperclip>=1.8.0",
+    "rich>=13.7.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "mypy>=1.7.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+achat = "server:main"
+da_chat = "server:main"
+
+[project.urls]
+Repository = "https://github.com/dtsunami/naten/mcp/achat"
+
+[tool.setuptools]
+py-modules = ["server", "voice"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
