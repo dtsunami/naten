@@ -532,7 +532,17 @@ class FileTool(Toolkit):
 
         # Build a glob rooted at the workspace to avoid expanding outside the project root
         root = get_workspace_root()
-        search_pattern = os.path.join(root, pattern)
+
+        # If pattern doesn't contain wildcards or path separators, make it recursive
+        if '**' not in pattern and '*' not in pattern and '/' not in pattern and '\\' not in pattern:
+            # Simple filename - search recursively
+            search_pattern = os.path.join(root, '**', pattern)
+        elif not ('/' in pattern or '\\' in pattern or pattern.startswith('**')):
+            # Pattern with wildcards but no path - search recursively
+            search_pattern = os.path.join(root, '**', pattern)
+        else:
+            # Pattern already contains path structure
+            search_pattern = os.path.join(root, pattern)
         for file_path in glob.glob(search_pattern, recursive=True):
             if os.path.isfile(file_path):
                 # Skip files ignored by .daignore

@@ -46,12 +46,12 @@ from .mcp_tool import mcp2tool
 agno_agent_tools = [
     TodoTool(),
     CommandTool(),
-    #WebSearchTool(),
     FileTool(),
+    HttpTool(),
+    #WebSearchTool(),
     #TimeTool(),
     #PythonTool(),
     #GitTool(),
-    HttpTool(),
 ]
 
 # TODO: delete or add to tools
