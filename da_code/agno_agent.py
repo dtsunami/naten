@@ -180,8 +180,8 @@ class AgnoAgent():
             instructions.append("")  # Blank separator
             instructions.append("📋 PROJECT-SPECIFIC INSTRUCTIONS:")
             instructions.extend(self.code_session.project_context.instructions)
-            logging.warning(f"📝 Loaded {len(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
-            logging.warning(f"📝 Loaded {' | '.join(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
+            logging.info(f"📝 Loaded {len(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
+            logging.info(f"📝 Loaded {' | '.join(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
 
         self.agent = Agent(
             name="da_code",
@@ -218,25 +218,25 @@ class AgnoAgent():
             if self.code_session.project_context.description:
                 context_parts.append(f"  + Description: {self.code_session.project_context.description}")
 
-        context_parts.append(f"\n\n📂 Working Directory: {self.code_session.working_directory}")
+        context_parts.append('''\n⚡ SYSTEM MESSAGE:
 
+You are a semi-autonomous coding agent that helps users create coding projects, debug issues and edit files.
+Always use available tools and if you encounter an error show the input you supplied to the tool and the output you got.
+Don't prompt the user before running tools, tools will ask user for confirmation themselves if it is needed.
+''')
+
+        context_parts.append(f"\n📂 Working Directory: {self.code_session.working_directory}\n")
         # Add current directory listing if available
         if self.cwd_context:
             context_parts.append(f"{self.cwd_context}\n\n")
-
+        
         context = "\n".join(context_parts) if context_parts else "No additional context available."
 
         return f"""🤖 You are da_code, an AI coding assistant with access to tools for command execution and file operations.
 
 📋 PROJECT CONTEXT:
+
 {context}
-
-⚡ SYSTEM MESSAGE:
-
-You are a semi-autonomous coding agent that helps users create coding projects, debug issues and edit files.
-Always use available tools and if you encounter an error show the input you supplied to the tool and the output you got.
-Don't prompt the user before running tools, tools will ask user for confirmation themselves if it is needed.
-
 """
 
 
