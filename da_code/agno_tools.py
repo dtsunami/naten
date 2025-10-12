@@ -383,6 +383,8 @@ class FileTool(Toolkit):
         except Exception as e:
             return json.dumps({"error": f"Invalid path: {str(e)}"})
 
+        daignore = get_daignore()
+
         def list_dir_recursive(dir_path, current_depth=0):
             """Recursively list directory contents"""
             items = []
@@ -391,12 +393,12 @@ class FileTool(Toolkit):
 
             try:
                 for item in sorted(Path(dir_path).iterdir()):
-                    # Skip hidden files unless requested
-                    if not show_hidden and item.name.startswith('.') and item.name not in {'.env', '.gitignore'}:
+                    # Check .daignore first
+                    if daignore.is_ignored(str(item)):
                         continue
 
-                    # Skip common ignored directories
-                    if item.name in {'.git', '__pycache__', '.vscode', 'node_modules'}:
+                    # Skip hidden files unless requested
+                    if not show_hidden and item.name.startswith('.'):
                         continue
 
                     rel_path = os.path.relpath(item, path)
@@ -541,7 +543,7 @@ class FileTool(Toolkit):
             return json.dumps({"error": f"Failed to delete file: {str(e)}"})
 
     def search_files(self, pattern: str = "**/*", content: Optional[str] = None, max_results: int = 50) -> str:
-        """Search for files by pattern and/or content.
+        """Search for files by pattern and/or content (respects .daignore).
 
         Args:
             pattern: Glob pattern for file matching (default: all files)
@@ -553,12 +555,17 @@ class FileTool(Toolkit):
         """
         import glob
         results = []
+        daignore = get_daignore()
 
         # Build a glob rooted at the workspace to avoid expanding outside the project root
         root = get_workspace_root()
         search_pattern = os.path.join(root, pattern)
         for file_path in glob.glob(search_pattern, recursive=True):
             if os.path.isfile(file_path):
+                # Skip files ignored by .daignore
+                if daignore.is_ignored(file_path):
+                    continue
+
                 if content:
                     try:
                         with open(file_path, "r", errors="ignore") as f:

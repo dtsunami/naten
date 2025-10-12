@@ -44,7 +44,12 @@ logger = logging.getLogger(__name__)
 
 
 def create_session(context_ldr: ContextLoader, session_id: str = None):
+    """Create a new code session.
 
+    Args:
+        context_ldr: Context loader for project configuration
+        session_id: Optional ObjectId string to restore/create a specific session
+    """
     if not os.path.exists(".da"):
         os.makedirs(".da")
 
@@ -59,17 +64,22 @@ def create_session(context_ldr: ContextLoader, session_id: str = None):
 
     # Initialize daignore for file filtering
     from .daignore import DaIgnore
+    from bson import ObjectId
     daignore = DaIgnore(project_root=working_dir)
 
-    # Create session with optional session_id for restart
+    # Create session with optional id for restart (pass as _id to use MongoDB ObjectId)
     if session_id:
-        code_session = CodeSession(
-            session_id=session_id,
-            working_directory=working_dir,
-            project_context=project_context,
-            mcp_servers=mcp_servers,
-            daignore=daignore,
-        )
+        # Validate and create with specific ObjectId
+        if ObjectId.is_valid(session_id):
+            code_session = CodeSession(
+                _id=session_id,  # This will set the id field
+                working_directory=working_dir,
+                project_context=project_context,
+                mcp_servers=mcp_servers,
+                daignore=daignore,
+            )
+        else:
+            raise ValueError(f"Invalid session ID format: {session_id}")
     else:
         code_session = CodeSession(
             working_directory=working_dir,
@@ -199,11 +209,18 @@ class ShellCompleter(Completer):
 class NudgeCompleter(Completer):
     """Custom completer for agent mode with symbol-triggered completions."""
 
-    def __init__(self, working_dir: str = None):
+    def __init__(self, working_dir: str = None, code_session=None, search_storage: dict = None, search_counter: list = None):
         self.nudge_phrases = NUDGE_PHRASES
         self.path_completer = PathCompleter(expanduser=True)
         self.working_dir = Path(working_dir) if working_dir else Path.cwd()
+        self.code_session = code_session  # Access to session snapshot for content search
         self._all_files_cache = None
+        self.search_storage = search_storage if search_storage is not None else {}
+        self.search_counter = search_counter if search_counter is not None else [0]
+        # Cache for current search to avoid incrementing on every keystroke
+        self._current_search_term = None
+        self._current_search_placeholder = None
+        self._current_search_files = None
 
     def _get_all_project_files(self):
         """Get all files in project recursively (cached)."""
@@ -234,55 +251,74 @@ class NudgeCompleter(Completer):
 
         return self._all_files_cache
 
-    def _grep_files(self, search_term: str):
-        """
-		Search file contents using ripgrep/grep with a Python fallback.
+    def _search_snapshot(self, search_term: str, include_lines: bool = True):
+        """Search file contents using the session snapshot index (respects .daignore).
 
-        Tries external fast search tools first (rg, then grep). If those
-        are missing or fail, falls back to a pure-Python scan of the project
-        files. This makes search reliable across different Linux environments.
+        Uses the session_start_snapshot which is already filtered by .daignore.
+
+        Args:
+            search_term: The term to search for
+            include_lines: If True, include line numbers and matching lines in results
+
+        Returns:
+            Dict mapping file paths to match details:
+            {
+                'file.py': {
+                    'line_numbers': [10, 25, 47],
+                    'matches': [
+                        {'line_num': 10, 'content': 'async def foo():'},
+                        ...
+                    ]
+                }
+            }
         """
         # Strip quotes if present
         search_term = search_term.strip('\'"')
         if not search_term:
-            return []
+            return {}
 
-        ignored_dirs = ['.git', '__pycache__',  'node_modules', '.venv', '.da']
-        glob_args = []
-        for igdir in ignored_dirs:
-            glob_args.append('--glob')
-            glob_args.append(f'!{igdir}')
+        # Use session snapshot if available
+        if self.code_session and self.code_session.filesystem_history:
+            snapshot = self.code_session.filesystem_history.session_start_snapshot
+            if not snapshot:
+                return {}
 
-        try:
-            # Try ripgrep first (faster)
-            result = subprocess.run(
-                ['rg', '--files-with-matches', '--no-heading', search_term] + glob_args,
-                cwd=self.working_dir,
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                return result.stdout.strip().split('\n')
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+            matching_files = {}
+            search_lower = search_term.lower()
 
-        # Fallback to grep
-        try:
-            grep_args = ['grep', '-rl'] + [f'--exclude-dir={d}' for d in ignored_dirs] + [search_term, '.']
-            result = subprocess.run(
-                grep_args,
-                cwd=str(self.working_dir),
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return [f.lstrip('./') for f in result.stdout.strip().split('\n')]
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+            # Search through snapshot content
+            for relative_path, file_snapshot in snapshot.items():
+                # Only search text files with content
+                if file_snapshot.is_binary or not file_snapshot.content:
+                    continue
 
-        return []
+                lines = file_snapshot.content.split('\n')
+                line_matches = []
+                line_numbers = []
+
+                for line_num, line in enumerate(lines, start=1):
+                    if search_lower in line.lower():
+                        line_numbers.append(line_num)
+                        if include_lines:
+                            # Trim long lines for display
+                            trimmed_line = line.strip()
+                            if len(trimmed_line) > 80:
+                                trimmed_line = trimmed_line[:77] + '...'
+                            line_matches.append({
+                                'line_num': line_num,
+                                'content': trimmed_line
+                            })
+
+                if line_numbers:
+                    matching_files[relative_path] = {
+                        'line_numbers': line_numbers,
+                        'matches': line_matches
+                    }
+
+            return matching_files
+
+        # Fallback if no snapshot available
+        return {}
 
     def get_completions(self, document, complete_event):
         """Provide completions based on trigger symbols: ! @ ~"""
@@ -313,22 +349,36 @@ class NudgeCompleter(Completer):
 
             # Always try to search (even if empty, to show an indicator)
             try:
-                matching_files = self._grep_files(search_text) if search_text else []
-                if matching_files:
-                    for file_path in matching_files[:20]:  # Limit to 20 results
+                if search_text:  # Only search if there's a search term
+                    matching_files_dict = self._search_snapshot(search_text, include_lines=True)
+                    if matching_files_dict:
+                        file_count = len(matching_files_dict)
+                        # Use search term as identifier instead of incrementing number
+                        # Format: [[search:term: N files]]
+                        placeholder = f"[[search:{search_text}: {file_count} file{'s' if file_count != 1 else ''}]]"
+
+                        # Store rich match data in search_storage
+                        # This allows the main loop to find it when user accepts
+                        self.search_storage[placeholder] = {
+                            'term': search_text,
+                            'files': matching_files_dict
+                        }
+
+                        # Offer the placeholder as completion
                         yield Completion(
-                            file_path + ", ",
+                            placeholder + ", ",
                             start_position=-(len(search_text) + 1),  # Remove ~ + search term
-                            display=file_path,
+                            display=f"{file_count} file{'s' if file_count != 1 else ''} containing '{search_text}'",
                             display_meta="🔍",
                         )
-                elif search_text:  # Show message if no results
-                    yield Completion(
-                        "",
-                        start_position=0,
-                        display=f"No files found containing '{search_text}'",
-                        display_meta="❌",
-                    )
+                    else:
+                        # No results found
+                        yield Completion(
+                            "",
+                            start_position=0,
+                            display=f"No files found containing '{search_text}'",
+                            display_meta="❌",
+                        )
             except Exception as e:
                 logger.error(f"Content search error: {e}")
                 yield Completion(
@@ -535,7 +585,7 @@ async def async_main(session_id: str = None):
                 raise ValueError("Failed to create code session!")
 
         # Store session ID globally for restart message
-        _current_session_id = code_session.session_id
+        _current_session_id = str(code_session.id)
 
         # Initialize filesystem history for tracking file changes
         code_session.init_filesystem_history()
@@ -602,14 +652,22 @@ async def async_main(session_id: str = None):
 
     # Set up completers
     shell_completer = ShellCompleter()
-    nudge_completer = NudgeCompleter(working_dir=code_session.working_directory)  # Nudge phrase autocomplete for agent mode
+
+    # Storage for pasted content and search results (maps placeholder to content)
+    pasted_content_storage = {}
+    paste_counter = [0]  # Mutable counter for unique paste IDs
+    search_content_storage = {}
+    search_counter = [0]  # Mutable counter for unique search IDs
+
+    nudge_completer = NudgeCompleter(
+        working_dir=code_session.working_directory,
+        code_session=code_session,
+        search_storage=search_content_storage,
+        search_counter=search_counter
+    )
 
     # Create key bindings for shell mode toggle and completion
     bindings = KeyBindings()
-
-    # Storage for pasted content (maps placeholder to content)
-    pasted_content_storage = {}
-    paste_counter = [0]  # Mutable counter for unique paste IDs
 
     # Use '#' (Shift+3) to toggle shell/agent mode and provide shell history navigation
     shell_history_index = [None]  # Mutable index for navigating shell_command_history
@@ -870,7 +928,7 @@ async def async_main(session_id: str = None):
             code_session.filesystem_history.changes.append(change)
 
             # Persist to MongoDB/disk
-            await da_mongo.save_file_change(code_session.session_id, change)
+            await da_mongo.save_file_change(str(code_session.id), change)
 
         except Exception as e:
             logger.error(f"Error processing file change: {e}")
@@ -965,7 +1023,7 @@ async def async_main(session_id: str = None):
                 if user_input.lower() in ['exit', 'quit', 'q']:
                     console.print("\n[bold green]👋 Goodbye![/bold green]")
                     console.print(f"\n[dim]To restart this session, run:[/dim]")
-                    console.print(f"[cyan]  da_code --session {code_session.session_id}[/cyan]")
+                    console.print(f"[cyan]  da_code --session {str(code_session.id)}[/cyan]")
                     console.print()
                     break
                 elif user_input.lower() == 'help':
@@ -1118,9 +1176,62 @@ async def async_main(session_id: str = None):
 
                             if pasted_sections:
                                 context_parts.append("\n\n".join(pasted_sections))
+                            
+                            logger.warning(f"Pasted content used: {' | '.join(pasted_sections)}")
 
                             # Clear pasted content after using it
                             pasted_content_storage.clear()
+                        
+
+                        # Add search results ONLY if placeholder still exists in user_input
+                        if search_content_storage:
+                            search_sections = []
+                            for placeholder, search_data in search_content_storage.items():
+                                # Only include if placeholder is still in the input
+                                if placeholder in user_input:
+                                    search_term = search_data.get('term', 'unknown')
+                                    files_dict = search_data.get('files', {})
+
+                                    # Build formatted output with line numbers and sample matches
+                                    file_lines = []
+                                    show_sample_lines = len(files_dict) <= 10  # Only show sample lines if few files
+
+                                    for file_path, match_data in sorted(files_dict.items())[:20]:  # Limit to 20 files
+                                        line_numbers = match_data['line_numbers']
+                                        matches = match_data.get('matches', [])
+
+                                        # Show first 12 line numbers, then "..."
+                                        show_line_number_matches = 12
+                                        if len(line_numbers) <= show_line_number_matches:
+                                            line_nums_str = ', '.join(map(str, line_numbers))
+                                        else:
+                                            line_nums_str = ', '.join(map(str, line_numbers[:show_line_number_matches])) + f', ... ({len(line_numbers)} total)'
+
+                                        file_line = f"  • {file_path}: lines {line_nums_str}"
+
+                                        # Optionally show sample matching lines (first 5)
+                                        show_line_matches = 5
+                                        if show_sample_lines and matches:
+                                            for match in matches[:show_line_matches]:  # Show first 5 matches
+                                                file_line += f"\n      L{match['line_num']}: {match['content']}"
+                                            if len(matches) > show_line_matches:
+                                                file_line += f"\n      ... {len(matches) - show_line_matches} more matches"
+
+                                        file_lines.append(file_line)
+
+                                    more_files = len(files_dict) - 20 if len(files_dict) > 20 else 0
+                                    more_str = f"\n  ... and {more_files} more files" if more_files > 0 else ""
+
+                                    search_section = f"Content search for '{search_term}' found {len(files_dict)} file{'s' if len(files_dict) != 1 else ''}:\n" + "\n".join(file_lines) + more_str
+                                    search_sections.append(search_section)
+
+                            if search_sections:
+                                search_str = "\n\n".join(search_sections)
+                                context_parts.append(search_str)
+                                logger.warning(f"Search content used: {search_str}")
+
+                            # Clear search content after using it
+                            search_content_storage.clear()
 
                         if dir_update:
                             context_parts.append(dir_update)

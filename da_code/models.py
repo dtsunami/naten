@@ -49,17 +49,6 @@ PyObjectId = Annotated[
     WithJsonSchema({"type": "string"}, mode="serialization"),
 ]
 
-'''
-class UPM(BaseModel):
-    
-    # created at timestamp
-    created_at: datetime = Field(default_factory=datetime.now)
-
-    # unique id
-    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
-'''
-# Agent framework removed - da_code now uses LangGraph exclusively
-
 
 class CommandStatus(str, Enum):
     """Status of command execution."""
@@ -586,8 +575,7 @@ class CodeSession(BaseModel):
         json_encoders = {ObjectId: str}
     )
 
-    # Session identification
-    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Session identification (id is the primary identifier, inherited from BaseModel)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -655,7 +643,7 @@ class CodeSession(BaseModel):
         """Initialize filesystem history for this session."""
         if not self.filesystem_history:
             self.filesystem_history = FileSystemHistory(
-                session_id=self.session_id,
+                session_id=str(self.id),
                 project_root=self.working_directory
             )
 
@@ -670,7 +658,7 @@ class CodeSession(BaseModel):
         duration = (self.updated_at - self.created_at).total_seconds()
 
         return {
-            "session_id": self.session_id,
+            "session_id": str(self.id),
             "duration_seconds": duration,
             "total_commands": self.total_commands,
             "successful_commands": self.successful_commands,
@@ -738,20 +726,24 @@ class DaMongoTracker:
 
         success = await self._save_to_mongo("sessions", session_dict)
         if not success:
-            self._save_to_file(f"{session.session_id}.json", session_dict)
+            self._save_to_file(f"{str(session.id)}.json", session_dict)
 
     async def load_session(self, session_id: str) -> Optional[CodeSession]:
-        """Load session from MongoDB or file."""
+        """Load session from MongoDB or file by ObjectId string.
+
+        Args:
+            session_id: String representation of ObjectId
+        """
         # Try MongoDB first
         if self.mongo_enabled and self.client:
             try:
                 db = self.client[self.database]
                 coll = db["sessions"]
-                session_dict = await coll.find_one({"session_id": session_id})
-                if session_dict:
-                    # Remove MongoDB _id field before creating CodeSession
-                    session_dict.pop('_id', None)
-                    return CodeSession(**session_dict)
+                # Query by _id field (the ObjectId)
+                if ObjectId.is_valid(session_id):
+                    session_dict = await coll.find_one({"_id": ObjectId(session_id)})
+                    if session_dict:
+                        return CodeSession(**session_dict)
             except Exception as e:
                 logger.warning(f"Failed to load from MongoDB: {e}")
 
