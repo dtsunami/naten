@@ -898,3 +898,166 @@ async def discover_mcp_tools(server: MCPServerInfo) -> List[str]:
         logger.error(f"Tool discovery failed for {server.name}: {e}")
 
     return []
+
+
+#====================================================================================================
+# Token and Context Tracking
+#====================================================================================================
+
+
+class ContextTracker:
+    """Track token usage and context window consumption."""
+
+    def __init__(self, model: str = "gpt-4o", max_tokens: int = 128000):
+        """Initialize context tracker.
+
+        Args:
+            model: Model name for tiktoken encoding
+            max_tokens: Maximum context window size
+        """
+        self.model = model
+        self.max_tokens = max_tokens
+
+        # Try to get encoding for the model
+        try:
+            import tiktoken
+            self.encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Fallback to cl100k_base (GPT-4 family)
+            logger.warning(f"Model {model} not recognized by tiktoken, using cl100k_base encoding")
+            import tiktoken
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+        except ImportError:
+            logger.warning("tiktoken not installed, token estimation will be approximate")
+            self.encoding = None
+
+    def estimate_tokens(self, text: str) -> int:
+        """Estimate token count for text.
+
+        Args:
+            text: Input text
+
+        Returns:
+            Estimated token count
+        """
+        if not text:
+            return 0
+
+        if self.encoding:
+            try:
+                return len(self.encoding.encode(text))
+            except Exception as e:
+                logger.debug(f"Token estimation error: {e}")
+
+        # Rough fallback: ~4 chars per token
+        return len(text) // 4
+
+    def get_usage_percentage(self, current_tokens: int) -> float:
+        """Calculate percentage of context window used.
+
+        Args:
+            current_tokens: Current token count
+
+        Returns:
+            Percentage (0-100)
+        """
+        return (current_tokens / self.max_tokens) * 100
+
+    def get_remaining_tokens(self, current_tokens: int) -> int:
+        """Calculate remaining tokens in context window.
+
+        Args:
+            current_tokens: Current token count
+
+        Returns:
+            Remaining tokens
+        """
+        return max(0, self.max_tokens - current_tokens)
+
+    def should_warn(self, current_tokens: int, threshold: float = 80.0) -> bool:
+        """Check if context usage exceeds warning threshold.
+
+        Args:
+            current_tokens: Current token count
+            threshold: Warning threshold percentage (default 80%)
+
+        Returns:
+            True if warning should be shown
+        """
+        return self.get_usage_percentage(current_tokens) >= threshold
+
+    def format_token_count(self, tokens: int) -> str:
+        """Format token count for display.
+
+        Args:
+            tokens: Token count
+
+        Returns:
+            Formatted string (e.g., "1.2k", "45k")
+        """
+        if tokens >= 1000:
+            return f"{tokens/1000:.1f}k"
+        return str(tokens)
+
+    def get_context_summary(self, current_tokens: int) -> Dict[str, any]:
+        """Get summary of context usage.
+
+        Args:
+            current_tokens: Current token count
+
+        Returns:
+            Dictionary with usage stats
+        """
+        usage_pct = self.get_usage_percentage(current_tokens)
+        remaining = self.get_remaining_tokens(current_tokens)
+
+        return {
+            'current': current_tokens,
+            'max': self.max_tokens,
+            'remaining': remaining,
+            'usage_pct': usage_pct,
+            'formatted_current': self.format_token_count(current_tokens),
+            'formatted_max': self.format_token_count(self.max_tokens),
+            'formatted_remaining': self.format_token_count(remaining),
+            'should_warn': self.should_warn(current_tokens)
+        }
+
+
+class StreamingTokenTracker:
+    """Track tokens during streaming output."""
+
+    def __init__(self, context_tracker: ContextTracker):
+        """Initialize streaming tracker.
+
+        Args:
+            context_tracker: Parent context tracker
+        """
+        self.context_tracker = context_tracker
+        self.output_tokens = 0
+        self.accumulated_text = ""
+
+    def add_chunk(self, chunk: str) -> int:
+        """Add streaming chunk and update token count.
+
+        Args:
+            chunk: Text chunk from stream
+
+        Returns:
+            Updated output token count
+        """
+        self.accumulated_text += chunk
+        self.output_tokens = self.context_tracker.estimate_tokens(self.accumulated_text)
+        return self.output_tokens
+
+    def get_estimated_output_tokens(self) -> int:
+        """Get current estimated output tokens.
+
+        Returns:
+            Estimated output token count
+        """
+        return self.output_tokens
+
+    def reset(self):
+        """Reset tracker for new stream."""
+        self.output_tokens = 0
+        self.accumulated_text = ""

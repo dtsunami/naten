@@ -17,6 +17,41 @@ from rich.status import Status
 # Global console for clean interaction
 console = Console()
 
+
+#====================================================================================================
+# Random Status Phrases
+#====================================================================================================
+
+THINKING_PHRASES = [
+    "🤔 Pondering",
+    "🧠 Analyzing",
+    "💭 Contemplating",
+    "🔍 Investigating",
+    "⚡ Processing",
+    "🎯 Strategizing",
+    "🔬 Examining",
+    "💡 Ideating",
+    "🌟 Evaluating",
+    "🚀 Computing",
+    "🎨 Crafting",
+    "🔧 Planning",
+    "📊 Assessing",
+    "🎪 Orchestrating",
+    "🌊 Flowing through",
+]
+
+SPINNERS = ["dots", "line", "simpleDots", "arc", "circle", "bouncingBar"]
+
+
+def get_random_thinking_phrase() -> str:
+    """Get a random thinking phrase for status messages."""
+    return random.choice(THINKING_PHRASES)
+
+
+def get_random_spinner() -> str:
+    """Get a random spinner style."""
+    return random.choice(SPINNERS)
+
 #====================================================================================================
 # Status Interface Class
 #====================================================================================================
@@ -31,9 +66,12 @@ class SimpleStatusInterface:
         self.llm_calls = 0
         self.tool_calls = 0
         self.total_tokens = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
         self.callback_handler = None
-        # Agent metrics (LangGraph only)
+        # Agent metrics
         self.agent_metrics = {'calls': 0, 'tokens': 0}
+        self.current_spinner = get_random_spinner()
 
     def start_execution(self, message: str):
         """Start execution with status message."""
@@ -41,9 +79,12 @@ class SimpleStatusInterface:
         self.llm_calls = 0
         self.tool_calls = 0
         self.total_tokens = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
         # Reset agent metrics
         self.agent_metrics = {'calls': 0, 'tokens': 0}
-        self.current_status = Status(f"🤖 {message}", spinner="dots")
+        self.current_spinner = get_random_spinner()
+        self.current_status = Status(f"🤖 {message}", spinner=self.current_spinner)
         self.current_status.start()
 
     def update_status(self, message: str):
@@ -52,19 +93,31 @@ class SimpleStatusInterface:
             elapsed = time.time() - self.start_time if self.start_time else 0
             status_text = f"🤖 {message} | {elapsed:.1f}s"
             if self.llm_calls > 0:
-                status_text += f" | LLM: {self.llm_calls}"
+                status_text += f" | 🧠 {self.llm_calls}"
             if self.tool_calls > 0:
-                status_text += f" | Tools: {self.tool_calls}"
+                status_text += f" | 🔧 {self.tool_calls}"
             if self.total_tokens > 0:
-                status_text += f" | Tokens: {self.total_tokens}"
+                # Format tokens nicely (e.g., 1.2k instead of 1234)
+                if self.total_tokens >= 1000:
+                    token_str = f"{self.total_tokens/1000:.1f}k"
+                else:
+                    token_str = str(self.total_tokens)
+                status_text += f" | 🎯 {token_str}"
+                # Add input/output breakdown if available
+                if self.input_tokens > 0 or self.output_tokens > 0:
+                    status_text += f" (↓{self.input_tokens}↑{self.output_tokens})"
             self.current_status.update(status_text)
 
-    def log_llm_call(self, tokens_used: int = 0):
+    def log_llm_call(self, tokens_used: int = 0, input_tokens: int = 0, output_tokens: int = 0):
         """Log an LLM call."""
         self.llm_calls += 1
         if tokens_used > 0:
             self.total_tokens += tokens_used
-        self.update_status("Processing...")
+        if input_tokens > 0:
+            self.input_tokens += input_tokens
+        if output_tokens > 0:
+            self.output_tokens += output_tokens
+        self.update_status("Thinking...")
 
     def log_tool_call(self, tool_name: str = ""):
         """Log a tool call."""
@@ -76,35 +129,37 @@ class SimpleStatusInterface:
         self.agent_metrics['calls'] += 1
         self.agent_metrics['tokens'] += tokens
 
-    def stop_execution(self, success: bool = True, final_message: str = None):
+    def stop_execution(self, success: bool = True, final_message: str = None, silent: bool = False):
         """Stop execution and show final result."""
         if self.current_status:
             self.current_status.stop()
 
-        elapsed = time.time() - self.start_time if self.start_time else 0
+        if not silent:
+            elapsed = time.time() - self.start_time if self.start_time else 0
 
-        if success:
-            result_text = "✅ Complete"
-        else:
-            result_text = "❌ Failed"
+            if success:
+                result_text = "✅ Complete"
+            else:
+                result_text = "❌ Failed"
 
-        result_text += f" {elapsed:.1f}s"
+            result_text += f" {elapsed:.1f}s"
 
-        # Add current directory
-        current_dir = os.path.basename(os.getcwd()) or "/"
-        result_text += f" | 📂 {current_dir}"
+            # Add current directory
+            current_dir = os.path.basename(os.getcwd()) or "/"
+            result_text += f" | 📂 {current_dir}"
 
-        if self.llm_calls > 0:
-            result_text += f" | LLM: {self.llm_calls}"
-        if self.tool_calls > 0:
-            result_text += f" | Tools: {self.tool_calls}"
-        if self.total_tokens > 0:
-            result_text += f" | Tokens: {self.total_tokens}"
+            if self.llm_calls > 0:
+                result_text += f" | LLM: {self.llm_calls}"
+            if self.tool_calls > 0:
+                result_text += f" | Tools: {self.tool_calls}"
+            if self.total_tokens > 0:
+                result_text += f" | Tokens: {self.total_tokens}"
 
-        if final_message:
-            result_text += f" | {final_message}"
+            if final_message:
+                result_text += f" | {final_message}"
 
-        console.print(result_text)
+            console.print(result_text)
+
         self.current_status = None
         self.callback_handler = None
 

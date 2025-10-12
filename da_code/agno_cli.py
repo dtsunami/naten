@@ -20,7 +20,7 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.application.current import get_app
 
 from .config import ConfigManager, setup_logging
-from .context import ContextLoader, DirectoryContext
+from .context import ContextLoader, DirectoryContext, ContextTracker, StreamingTokenTracker
 from .models import CodeSession, CommandExecution, UserResponse, ConfirmationResponse, FileChange, da_mongo
 from .agno_agent import AgnoAgent
 from .mcp_tool import mcp2tool
@@ -33,6 +33,7 @@ from .ux import (
     show_status_splash,
     SimpleStatusInterface,
     confirmation_handler,
+    get_random_thinking_phrase,
     console  # Import the shared console from ux
 )
 
@@ -215,6 +216,10 @@ async def async_main(session_id: str = None):
         dir_context = DirectoryContext(code_session.working_directory, daignore=code_session.daignore)
         directory_cache, cache_timestamp = dir_context.get_directory_listing()
         agent = AgnoAgent(code_session, directory_cache)
+
+        # Initialize token tracking with agent's model
+        context_tracker = ContextTracker(model=agent.config.deployment_name, max_tokens=128000)
+        streaming_token_tracker = None  # Will be created per agent run
 
         # Track dynamic MCP tools
         dynamic_mcp_tools = []
@@ -741,6 +746,8 @@ async def async_main(session_id: str = None):
         running_agent = None
         status_message = None
         output_message = None
+        input_tokens_est = 0  # Track input token estimate for current run
+        estimated_output_tokens = 0  # Track output token estimate for current run
         while True:
             try:
                 # Check for cancellation request
@@ -768,6 +775,8 @@ async def async_main(session_id: str = None):
                     cancel_agent[0] = False
                     output_message = None
                     status_message = None
+                    input_tokens_est = 0
+                    estimated_output_tokens = 0
                     continue
 
                 # If agent is not running then wait for input command
@@ -781,10 +790,69 @@ async def async_main(session_id: str = None):
                         final_response = running_agent.result()
                         status_message = None
                         running_agent = None
-                        status_interface.stop_execution(True)
+
+                        # Clear status silently
+                        status_interface.stop_execution(True, silent=True)
+
+                        # Print agent output
                         console.print()
                         console.print(output_message)
                         output_message = None
+
+                        # Fetch final metrics and print enhanced summary
+                        try:
+                            session_id = str(code_session.id)
+                            metrics = agent.agent.get_session_metrics(session_id=session_id)
+
+                            if metrics:
+                                # Extract metrics
+                                input_tokens = getattr(metrics, 'input_tokens', 0) or 0
+                                output_tokens = getattr(metrics, 'output_tokens', 0) or 0
+                                total_tokens = getattr(metrics, 'total_tokens', 0) or (input_tokens + output_tokens)
+                                reasoning_tokens = getattr(metrics, 'reasoning_tokens', 0) or 0
+                                cache_read = getattr(metrics, 'cache_read_tokens', 0) or 0
+                                duration = getattr(metrics, 'duration', None)
+
+                                # Build summary parts
+                                summary_parts = []
+
+                                # Timing
+                                if duration:
+                                    summary_parts.append(f"⏱️  {duration:.1f}s")
+                                elif hasattr(status_interface, 'start_time') and status_interface.start_time:
+                                    elapsed = time.time() - status_interface.start_time
+                                    summary_parts.append(f"⏱️  {elapsed:.1f}s")
+
+                                # Token breakdown
+                                if total_tokens > 0:
+                                    token_str = f"🎫 {total_tokens:,} tokens"
+                                    if input_tokens and output_tokens:
+                                        token_str += f" ({input_tokens:,} in / {output_tokens:,} out)"
+                                    summary_parts.append(token_str)
+
+                                # Reasoning tokens (if using o1/o3)
+                                if reasoning_tokens > 0:
+                                    summary_parts.append(f"🧠 {reasoning_tokens:,} reasoning")
+
+                                # Cache hits
+                                if cache_read > 0:
+                                    summary_parts.append(f"💾 {cache_read:,} cached")
+
+                                # Tool calls
+                                if hasattr(status_interface, 'tool_calls') and status_interface.tool_calls > 0:
+                                    summary_parts.append(f"🔧 {status_interface.tool_calls} tools")
+
+                                # Context usage percentage
+                                if total_tokens > 0:
+                                    context_usage_pct = (total_tokens / 128000) * 100
+                                    summary_parts.append(f"📊 {context_usage_pct:.0f}% context")
+
+                                # Print summary
+                                if summary_parts:
+                                    console.print(f"\n[dim]{' | '.join(summary_parts)}[/dim]")
+                        except Exception as e:
+                            logger.debug(f"Could not fetch session metrics: {e}")
+
                     except Exception as e:
                         # Handle agent execution errors
                         running_agent = None
@@ -796,9 +864,40 @@ async def async_main(session_id: str = None):
                     while output_queue.qsize() > 0:
                         chunk = await output_queue.get()
                         output_message += chunk
+
+                        # Track output tokens in real-time
+                        if streaming_token_tracker:
+                            estimated_output_tokens = streaming_token_tracker.add_chunk(chunk)
+
                     while status_queue.qsize() > 0:
-                        status_message = await status_queue.get()
-                    status_interface.update_status(f"{status_message}")
+                        status_update = await status_queue.get()
+
+                        # Check if it's a metrics update (dict) or status message (str)
+                        if isinstance(status_update, dict):
+                            # Metrics update from agent
+                            if 'type' in status_update:
+                                if status_update['type'] == 'llm_call':
+                                    status_interface.log_llm_call(
+                                        tokens_used=status_update.get('tokens', 0),
+                                        input_tokens=status_update.get('input_tokens', 0),
+                                        output_tokens=status_update.get('output_tokens', 0)
+                                    )
+                                elif status_update['type'] == 'tool_call':
+                                    status_interface.log_tool_call(status_update.get('tool_name', ''))
+                        else:
+                            # Regular status message
+                            status_message = status_update
+
+                    # Update status with base message plus token tracking
+                    if status_message and streaming_token_tracker:
+                        # Estimate total context usage (input + output so far)
+                        total_tokens_est = input_tokens_est + estimated_output_tokens
+                        context_summary = context_tracker.get_context_summary(total_tokens_est)
+
+                        # Build status with token info
+                        token_status = f"📝 ~{context_tracker.format_token_count(estimated_output_tokens)} out"
+                        context_status = f"📊 {context_summary['usage_pct']:.0f}%"
+                        status_interface.update_status(f"{status_message} | {token_status} | {context_status}")
                     await asyncio.sleep(0.01)
                     continue
 
@@ -1249,7 +1348,7 @@ async def async_main(session_id: str = None):
                         # Gather all context sources
                         shell_context = shell_manager.get_shell_context_for_agent()
                         file_changes = code_session.get_file_changes_summary()
-                        logger.warning(f"File changes summary: {file_changes}")
+                        logger.info(f"File changes summary: {file_changes}")
 
                         # Build enhanced input with all context
                         enhanced_input = build_agent_context(
@@ -1263,7 +1362,21 @@ async def async_main(session_id: str = None):
 
                         sanitized_input = enhanced_input.encode('utf-8', 'replace').decode('utf-8')
 
-                        status_message = f"Calculating: {user_input[:40]}..."
+                        # Estimate input tokens and check context usage
+                        input_tokens_est = context_tracker.estimate_tokens(sanitized_input)
+                        context_summary = context_tracker.get_context_summary(input_tokens_est)
+
+                        # Warn if context usage > 80%
+                        if context_summary['should_warn']:
+                            console.print(f"[yellow]⚠️  Context usage: {context_summary['usage_pct']:.1f}% ({context_summary['formatted_current']} / {context_summary['formatted_max']} tokens)[/yellow]")
+                            console.print(f"[dim]   Remaining: {context_summary['formatted_remaining']} tokens[/dim]")
+
+                        # Create streaming token tracker for this run
+                        streaming_token_tracker = StreamingTokenTracker(context_tracker)
+
+                        # Use random thinking phrase
+                        random_phrase = get_random_thinking_phrase()
+                        status_message = f"{random_phrase} your request"
                         status_interface.start_execution(status_message)
                         output_message = ""
                         logger.info(f"Input Context : {enhanced_input}")
@@ -1279,6 +1392,8 @@ async def async_main(session_id: str = None):
                         running_agent = None
                         status_message = None
                         output_message = None
+                        input_tokens_est = 0
+                        estimated_output_tokens = 0
 
             except KeyboardInterrupt:
                 if status_interface.current_status:

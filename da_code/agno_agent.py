@@ -228,7 +228,7 @@ Don't prompt the user before running tools, tools will ask user for confirmation
         context_parts.append(f"\n📂 Working Directory: {self.code_session.working_directory}\n")
         # Add current directory listing if available
         if self.cwd_context:
-            context_parts.append(f"{self.cwd_context}\n\n")
+            context_parts.append(self.cwd_context)
         
         context = "\n".join(context_parts) if context_parts else "No additional context available."
 
@@ -253,6 +253,9 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                 if self.active_run_id is None and hasattr(run_event, 'run_id'):
                     self.active_run_id = run_event.run_id
 
+                #logger.warning(f"Run Event: {run_event}")
+
+
                 if not run_event.is_paused:
                     if run_event.event in [RunEvent.run_started, RunEvent.run_completed, RunEvent.run_cancelled]:
                         await status_queue.put(f"Run: {run_event.event})")
@@ -263,6 +266,11 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                             return ('cancelled', None)
                     elif run_event.event in [RunEvent.tool_call_started]:
                         await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
+                        # Send tool call metric
+                        await status_queue.put({
+                            'type': 'tool_call',
+                            'tool_name': run_event.tool.tool_name
+                        })
                     elif run_event.event in [RunEvent.tool_call_completed]:
                         await status_queue.put(f"Tool Done: {run_event.tool.tool_name}")
                         #await output_queue.put(f"\n🔧 Tool Result:\n{run_event.tool.result}\n")
