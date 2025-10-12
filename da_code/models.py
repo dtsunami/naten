@@ -238,7 +238,7 @@ class ProjectContext(BaseModel):
 
     project_name: Optional[str] = Field(None, description="Project name")
     description: Optional[str] = Field(None, description="Project description")
-    instructions: Optional[str] = Field(None, description="Project instructions")
+    instructions: List[str] = Field(default_factory=list, description="Project instructions as list")
     file_content: str = Field(..., description="Full AGENTS.md content")
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

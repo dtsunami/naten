@@ -209,18 +209,13 @@ class ShellCompleter(Completer):
 class NudgeCompleter(Completer):
     """Custom completer for agent mode with symbol-triggered completions."""
 
-    def __init__(self, working_dir: str = None, code_session=None, search_storage: dict = None, search_counter: list = None):
+    def __init__(self, working_dir: str = None, code_session=None, search_storage: dict = None):
         self.nudge_phrases = NUDGE_PHRASES
         self.path_completer = PathCompleter(expanduser=True)
         self.working_dir = Path(working_dir) if working_dir else Path.cwd()
         self.code_session = code_session  # Access to session snapshot for content search
         self._all_files_cache = None
         self.search_storage = search_storage if search_storage is not None else {}
-        self.search_counter = search_counter if search_counter is not None else [0]
-        # Cache for current search to avoid incrementing on every keystroke
-        self._current_search_term = None
-        self._current_search_placeholder = None
-        self._current_search_files = None
 
     def _get_all_project_files(self):
         """Get all files in project recursively (cached)."""
@@ -350,9 +345,30 @@ class NudgeCompleter(Completer):
             # Always try to search (even if empty, to show an indicator)
             try:
                 if search_text:  # Only search if there's a search term
+                    # Minimum search term length validation
+                    if len(search_text) < 2:
+                        yield Completion(
+                            "",
+                            start_position=0,
+                            display="Type at least 2 characters to search",
+                            display_meta="⚠️",
+                        )
+                        return
+
                     matching_files_dict = self._search_snapshot(search_text, include_lines=True)
                     if matching_files_dict:
                         file_count = len(matching_files_dict)
+
+                        # Warn if too many matches (term too broad)
+                        if file_count > 100:
+                            yield Completion(
+                                "",
+                                start_position=0,
+                                display=f"⚠️ {file_count} files found - term too broad, refine search",
+                                display_meta="⚠️",
+                            )
+                            return
+
                         # Use search term as identifier instead of incrementing number
                         # Format: [[search:term: N files]]
                         placeholder = f"[[search:{search_text}: {file_count} file{'s' if file_count != 1 else ''}]]"
@@ -657,13 +673,11 @@ async def async_main(session_id: str = None):
     pasted_content_storage = {}
     paste_counter = [0]  # Mutable counter for unique paste IDs
     search_content_storage = {}
-    search_counter = [0]  # Mutable counter for unique search IDs
 
     nudge_completer = NudgeCompleter(
         working_dir=code_session.working_directory,
         code_session=code_session,
-        search_storage=search_content_storage,
-        search_counter=search_counter
+        search_storage=search_content_storage
     )
 
     # Create key bindings for shell mode toggle and completion
@@ -1200,12 +1214,13 @@ async def async_main(session_id: str = None):
                                         line_numbers = match_data['line_numbers']
                                         matches = match_data.get('matches', [])
 
-                                        # Show first 12 line numbers, then "..."
+                                        # Show line number range for better readability
                                         show_line_number_matches = 12
                                         if len(line_numbers) <= show_line_number_matches:
                                             line_nums_str = ', '.join(map(str, line_numbers))
                                         else:
-                                            line_nums_str = ', '.join(map(str, line_numbers[:show_line_number_matches])) + f', ... ({len(line_numbers)} total)'
+                                            # Show range instead of list: "1-12, ... (50 total)"
+                                            line_nums_str = f"{line_numbers[0]}-{line_numbers[show_line_number_matches-1]}, ... ({len(line_numbers)} total)"
 
                                         file_line = f"  • {file_path}: lines {line_nums_str}"
 
@@ -1276,7 +1291,6 @@ def main():
     parser = argparse.ArgumentParser(description="da_code - AI Coding Assistant")
     parser.add_argument('command', nargs='?', choices=['setup', 'status'],
                        help='Command to run (setup creates config files and exits, test checks connection)')
-    parser.add_argument('--working-dir', type=str, help='Working directory')
     parser.add_argument('--session', type=str, help='Resume a previous session by session ID')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        default='INFO', help='Logging level')

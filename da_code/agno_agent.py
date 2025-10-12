@@ -164,16 +164,25 @@ class AgnoAgent():
                 max_retries=self.config.max_retries,
             )
 
-        instructions = '''
-1. 🔧 Use available tools to help with coding tasks - ALWAYS properly **invoke** tools, never give tool inputs back to user
-2. 💻 For command execution, use execute_command tool - user confirmation is handled automatically
-3. 🚀 Invoke tools as needed WITHOUT reprompting user
-4. ✅ Always track and update todos to ensure you don't lose track of planned items
-5. 📝 Always use proper tool arguments as specified in tool descriptions
-6. ✍️ Always use the replace_text tool to update/edit files and re-read the file back after edit to ensure it worked properly!
-'''.split("\n")
+        # Build instructions list from AGENTS.md + defaults
+        default_instructions = [
+            "🔧 Use available tools to help with coding tasks - ALWAYS properly **invoke** tools, never give tool inputs back to user",
+            "💻 For command execution, use execute_command tool - user confirmation is handled automatically",
+            "🚀 Invoke tools as needed WITHOUT reprompting user",
+            "✅ Always track and update todos to ensure you don't lose track of planned items",
+            "📝 Always use proper tool arguments as specified in tool descriptions",
+            "✍️ Always use the replace_text tool to update/edit files and re-read the file back after edit to ensure it worked properly!",
+        ]
 
-        
+        # Merge with project-specific instructions from AGENTS.md
+        instructions = default_instructions.copy()
+        if self.code_session.project_context and self.code_session.project_context.instructions:
+            instructions.append("")  # Blank separator
+            instructions.append("📋 PROJECT-SPECIFIC INSTRUCTIONS:")
+            instructions.extend(self.code_session.project_context.instructions)
+            logging.warning(f"📝 Loaded {len(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
+            logging.warning(f"📝 Loaded {' | '.join(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
+
         self.agent = Agent(
             name="da_code",
             model=self.llm,

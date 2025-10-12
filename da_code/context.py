@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 NUDGE_PHRASES = [
     # Careful & thorough
+    "can you take a look and recommend any needed fixes or obvious improvements?",
     "be careful and check your work",
     "double-check before making changes",
     "verify your changes after editing",
@@ -705,31 +706,86 @@ class ContextLoader:
         description = '\n'.join(description_lines).strip()
         return description if description else None
 
-    def _extract_instructions(self, content: str) -> Optional[str]:
-        """Extract instructions from markdown content."""
-        # Look for sections with 'instruction' in the heading
+    def _extract_instructions(self, content: str) -> List[str]:
+        """Extract instructions from markdown content as a list.
+
+        Format: ## Text explaining the instruction to agent
+                  <- optional detail>
+
+        Each ## in .md becomes one instruction with detail combined.
+        """
         lines = content.split('\n')
-        instructions_lines = []
-        in_instructions = False
+        instructions = []
+        current_instruction = None
+        current_detail = []
+        in_description = True  # Skip lines until after project description
+        max_detail_length = 200  # Character limit for detail
 
         for line in lines:
-            line_lower = line.lower().strip()
+            stripped = line.strip()
 
-            # Check if this is an instructions heading
-            if line_lower.startswith('#') and 'instruction' in line_lower:
-                in_instructions = True
+            # Skip H1 (project title)
+            if stripped.startswith('# '):
+                in_description = True
                 continue
 
-            # Stop at next heading
-            if in_instructions and line.strip().startswith('#'):
-                break
+            # Check if this is a ## heading (instruction)
+            if stripped.startswith('## '):
+                # Now we're past the description
+                in_description = False
 
-            # Collect instruction lines
-            if in_instructions:
-                instructions_lines.append(line)
+                # Save previous instruction if exists
+                if current_instruction:
+                    detail = ' '.join(current_detail).strip()
+                    # Truncate if too long
+                    if len(detail) > max_detail_length:
+                        detail = detail[:max_detail_length].rsplit(' ', 1)[0] + '...'
 
-        instructions = '\n'.join(instructions_lines).strip()
-        return instructions if instructions else None
+                    if detail:
+                        instructions.append(f"{current_instruction}: {detail}")
+                    else:
+                        instructions.append(current_instruction)
+
+                # Start new instruction (remove '## ')
+                current_instruction = stripped[3:].strip()
+                current_detail = []
+                continue
+
+            # If we're in description section, skip
+            if in_description:
+                continue
+
+            # If we're collecting an instruction and hit another heading, stop
+            if current_instruction and stripped.startswith('#'):
+                # Save current instruction
+                detail = ' '.join(current_detail).strip()
+                if len(detail) > max_detail_length:
+                    detail = detail[:max_detail_length].rsplit(' ', 1)[0] + '...'
+
+                if detail:
+                    instructions.append(f"{current_instruction}: {detail}")
+                else:
+                    instructions.append(current_instruction)
+                current_instruction = None
+                current_detail = []
+                continue
+
+            # Collect detail lines for current instruction
+            if current_instruction and stripped:
+                current_detail.append(stripped)
+
+        # Save last instruction if exists
+        if current_instruction:
+            detail = ' '.join(current_detail).strip()
+            if len(detail) > max_detail_length:
+                detail = detail[:max_detail_length].rsplit(' ', 1)[0] + '...'
+
+            if detail:
+                instructions.append(f"{current_instruction}: {detail}")
+            else:
+                instructions.append(current_instruction)
+
+        return instructions
 
     def create_sample_da_json(self) -> None:
         """Create a sample DA.json file with common MCP servers."""
