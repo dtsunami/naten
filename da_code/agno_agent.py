@@ -46,11 +46,11 @@ from .mcp_tool import mcp2tool
 agno_agent_tools = [
     TodoTool(),
     CommandTool(),
-    WebSearchTool(),
+    #WebSearchTool(),
     FileTool(),
-    TimeTool(),
-    PythonTool(),
-    GitTool(),
+    #TimeTool(),
+    #PythonTool(),
+    #GitTool(),
     HttpTool(),
 ]
 
@@ -199,8 +199,8 @@ class AgnoAgent():
             add_history_to_context=True,
             num_history_runs=5,
             add_datetime_to_context=True,
-            read_chat_history=True,
-            read_tool_call_history=True,
+            #read_chat_history=True,
+            #read_tool_call_history=True,
             tools=self.agent_tools,
             debug_mode=False, # Display the agent's thought process
         )

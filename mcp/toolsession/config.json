@@ -9,7 +9,7 @@
   },
   "session": {
     "command": "python -i -u",
-    "working_directory": "/tmp",
+    "working_directory": ".",
     "prompt_string": ">>> ",
     "timeout": 30
   }

@@ -42,14 +42,14 @@ dev = [
 ]
 
 [project.scripts]
-achat = "server:main"
-da_chat = "server:main"
+achat = "achat_server:main"
+da_chat = "achat_server:main"
 
 [project.urls]
 Repository = "https://github.com/dtsunami/naten/mcp/achat"
 
 [tool.setuptools]
-py-modules = ["server", "voice"]
+py-modules = ["achat_server", "voice"]
 
 [tool.black]
 line-length = 100

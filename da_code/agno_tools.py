@@ -329,7 +329,7 @@ class FileTool(Toolkit):
             tools=[
                 self.list_directory,
                 self.read_file,
-                self.write_file,
+                #self.write_file,
                 self.create_file,
                 self.delete_file,
                 self.search_files,

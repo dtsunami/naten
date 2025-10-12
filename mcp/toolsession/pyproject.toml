@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "toolsession-mcp"
 version = "1.0.0"
-description = "Interactive tool session management with DB persistence"
+description = "Lightweight MCP server for persistent interactive tool sessions"
 authors = [{name = "ToolSession", email = "admin@toolsession.local"}]
 readme = "README.md"
 license = {text = "MIT"}
@@ -13,9 +13,8 @@ requires-python = ">=3.9"
 dependencies = [
     "fastapi",
     "uvicorn",
-    "motor",
-    "pymongo",
-    "pydantic"
+    "pydantic",
+    "pyperclip"
 ]
 
 [project.optional-dependencies]
@@ -36,11 +35,12 @@ test = [
 ]
 
 [project.scripts]
-toolsession-server = "server:main"
+toolsession = "toolsession_server:main"
+toolmcp = "toolsession_server:main"
 
 [tool.setuptools]
 packages = []
-py-modules = ["server", "models"]
+py-modules = ["toolsession_server", "models"]
 
 [tool.black]
 line-length = 88
