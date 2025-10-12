@@ -240,7 +240,7 @@ Don't prompt the user before running tools, tools will ask user for confirmation
 """
 
 
-    async def arun(self, task: str, confirmation_handler: callable, status_queue: asyncio.Queue, output_queue: asyncio.Queue, user_id: str="dang") -> str:
+    async def arun(self, task: str, confirmation_handler: callable, status_queue: asyncio.Queue, output_queue: asyncio.Queue, user_id: str="user") -> str:
         """Execute a task with streaming events and persistent run until completion (handles multiple confirmations)."""
         logging.debug("Entering arun")
         self.confirmation_handler = confirmation_handler

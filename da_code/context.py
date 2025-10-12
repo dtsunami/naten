@@ -713,16 +713,42 @@ class ContextLoader:
                   <- optional detail>
 
         Each ## in .md becomes one instruction with detail combined.
+
+        Ignored sections:
+        - Everything after '---' (horizontal rule)
+        - HTML comments <!-- ... -->
         """
         lines = content.split('\n')
         instructions = []
         current_instruction = None
         current_detail = []
         in_description = True  # Skip lines until after project description
+        in_comment = False  # Track HTML comment blocks
         max_detail_length = 200  # Character limit for detail
 
         for line in lines:
             stripped = line.strip()
+
+            # Check for horizontal rule - stop processing
+            if stripped.startswith('---'):
+                # Save current instruction before stopping
+                if current_instruction:
+                    detail = ' '.join(current_detail).strip()
+                    if len(detail) > max_detail_length:
+                        detail = detail[:max_detail_length].rsplit(' ', 1)[0] + '...'
+                    if detail:
+                        instructions.append(f"{current_instruction}: {detail}")
+                    else:
+                        instructions.append(current_instruction)
+                break  # Stop processing after ---
+
+            # Handle HTML comments
+            if '<!--' in stripped:
+                in_comment = True
+            if in_comment:
+                if '-->' in stripped:
+                    in_comment = False
+                continue  # Skip comment lines
 
             # Skip H1 (project title)
             if stripped.startswith('# '):
@@ -823,6 +849,21 @@ class ContextLoader:
         sample_content = """# Project Name
 
 Brief description of your project goes here.
+
+## Use consistent code style
+Follow the existing patterns in the codebase for naming and formatting
+
+## Write tests for new features
+All new functionality should include unit tests with good coverage
+
+## Document important decisions
+Add comments explaining why, not just what the code does
+
+---
+
+**Note:** Each `## heading` above becomes one instruction for the AI agent.
+You can add optional detail below each heading (limited to ~200 chars).
+The agent receives these as project-specific instructions along with default tool usage instructions.
 
 """
 

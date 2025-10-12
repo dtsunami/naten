@@ -215,13 +215,20 @@ class NudgeCompleter(Completer):
         self.working_dir = Path(working_dir) if working_dir else Path.cwd()
         self.code_session = code_session  # Access to session snapshot for content search
         self._all_files_cache = None
+        self._cache_timestamp = 0  # Timestamp of last cache refresh
+        self._cache_ttl = 30  # Cache TTL in seconds
         self.search_storage = search_storage if search_storage is not None else {}
 
     def _get_all_project_files(self):
-        """Get all files in project recursively (cached)."""
-        if self._all_files_cache is not None:
+        """Get all files in project recursively (cached with TTL)."""
+        import time
+        current_time = time.time()
+
+        # Check if cache is valid (exists and not expired)
+        if self._all_files_cache is not None and (current_time - self._cache_timestamp) < self._cache_ttl:
             return self._all_files_cache
 
+        # Cache expired or doesn't exist - refresh it
         all_files = []
         ignored = {'.git', '.env', '__pycache__', 'node_modules', '.venv', 'venv', '.da', 'dist', 'build', '*-egg-info'}
 
@@ -240,11 +247,106 @@ class NudgeCompleter(Completer):
                         continue
 
             self._all_files_cache = sorted(all_files)
+            self._cache_timestamp = current_time
         except Exception as e:
             logger.error(f"Error scanning project files: {e}")
             self._all_files_cache = []
+            self._cache_timestamp = current_time
 
         return self._all_files_cache
+
+    def invalidate_file_cache(self):
+        """Manually invalidate the file cache (e.g., after file system changes)."""
+        self._all_files_cache = None
+        self._cache_timestamp = 0
+
+    def _get_modified_files(self):
+        """Get list of files modified during this session."""
+        if not self.code_session or not self.code_session.filesystem_history:
+            return []
+
+        modified_files = set()
+        for change in self.code_session.filesystem_history.changes:
+            if change.relative_path:
+                modified_files.add(change.relative_path)
+
+        return sorted(modified_files)
+
+    def _get_file_revisions(self, relative_path: str):
+        """Get all revisions for a specific file with metadata.
+
+        Returns list of tuples: (revision_number, lines_changed, time_ago_str, timestamp)
+        Only includes revisions where content actually changed (deduplicates).
+        """
+        if not self.code_session or not self.code_session.filesystem_history:
+            return []
+
+        revisions = []
+        changes_for_file = []
+
+        # Collect all changes for this file
+        for change in self.code_session.filesystem_history.changes:
+            if change.relative_path == relative_path:
+                changes_for_file.append(change)
+
+        if not changes_for_file:
+            return []
+
+        # Deduplicate: only keep changes where content actually changed
+        unique_changes = []
+        last_content = None
+
+        for change in changes_for_file:
+            # Only include if content is different from last revision
+            if change.content_snapshot != last_content:
+                unique_changes.append(change)
+                last_content = change.content_snapshot
+
+        # Number revisions chronologically (#1 = oldest, #N = newest)
+        import time
+        current_time = time.time()
+
+        for idx, change in enumerate(unique_changes, start=1):
+            # Calculate lines changed
+            lines_changed = self._calculate_lines_changed(change)
+
+            # Calculate time delta
+            if hasattr(change, 'timestamp') and change.timestamp:
+                delta_seconds = current_time - change.timestamp.timestamp()
+            else:
+                delta_seconds = 0
+
+            time_str = self._format_time_ago(delta_seconds)
+
+            revisions.append((idx, lines_changed, time_str, change.timestamp if hasattr(change, 'timestamp') else None))
+
+        return revisions
+
+    def _calculate_lines_changed(self, change):
+        """Calculate number of lines changed in a FileChange."""
+        try:
+            if change.content_snapshot and change.pre_change_snapshot:
+                old_lines = change.pre_change_snapshot.count('\n') + 1
+                new_lines = change.content_snapshot.count('\n') + 1
+                return abs(new_lines - old_lines)
+            elif change.content_snapshot:
+                # New file or only have current content
+                return change.content_snapshot.count('\n') + 1
+            else:
+                return 0
+        except:
+            return 0
+
+    def _format_time_ago(self, seconds: float) -> str:
+        """Format seconds into human-readable time ago string."""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            return f"{int(seconds/60)}m"
+        elif seconds < 86400:
+            return f"{int(seconds/3600)}h"
+        else:
+            return f"{int(seconds/86400)}d"
 
     def _search_snapshot(self, search_term: str, include_lines: bool = True):
         """Search file contents using the session snapshot index (respects .daignore).
@@ -316,8 +418,45 @@ class NudgeCompleter(Completer):
         return {}
 
     def get_completions(self, document, complete_event):
-        """Provide completions based on trigger symbols: ! @ ~"""
+        """Provide completions based on trigger symbols: ! @ ~ and restore command"""
         text = document.text
+
+        # Check for "restore " command (file-specific restore)
+        if text.startswith('restore '):
+            restore_arg = text[8:document.cursor_position]  # Everything after "restore "
+
+            # Simple single-level completion - just show modified files
+            # User can manually type revision number after: "restore file.py #2"
+            file_prefix = restore_arg.strip()
+            modified_files = self._get_modified_files()
+
+            if modified_files:
+                for file_path in modified_files:
+                    if not file_prefix or file_path.lower().startswith(file_prefix.lower()):
+                        # Get revision info for display
+                        revisions = self._get_file_revisions(file_path)
+                        rev_count = len(revisions)
+
+                        # Build display metadata showing revision options
+                        if rev_count > 0:
+                            display_meta = f"📝 {rev_count} rev{'s' if rev_count != 1 else ''} (session start or #1-#{rev_count})"
+                        else:
+                            display_meta = f"📝 (session start only)"
+
+                        yield Completion(
+                            file_path,
+                            start_position=-len(file_prefix),
+                            display=file_path,
+                            display_meta=display_meta,
+                        )
+            else:
+                yield Completion(
+                    "",
+                    start_position=0,
+                    display="No modified files in this session",
+                    display_meta="ℹ️",
+                )
+            return  # Don't show other completions
 
         # Check for ! (nudge phrases)
         exclaim_pos = text.rfind('!')
@@ -558,6 +697,109 @@ commands = ['help', 'setup', 'status', 'add_mcp', 'shell', 'exit', 'quit', 'q']
 # Global session ID for restart message
 _current_session_id = None
 
+
+def build_agent_context(
+    user_input: str,
+    pasted_storage: dict,
+    search_storage: dict,
+    dir_update: str = None,
+    file_changes: str = None,
+    shell_context: str = None
+) -> str:
+    """Build enhanced context for agent from various sources.
+
+    Args:
+        user_input: The raw user input
+        pasted_storage: Dict mapping placeholders to pasted content
+        search_storage: Dict mapping placeholders to search results
+        dir_update: Directory change summary (optional)
+        file_changes: File changes summary (optional)
+        shell_context: Shell command history (optional)
+
+    Returns:
+        Enhanced input string with all context prepended
+    """
+    context_parts = []
+
+    # Add pasted content ONLY if placeholder still exists in user_input
+    if pasted_storage:
+        pasted_sections = []
+        for placeholder, pasted_text in pasted_storage.items():
+            if placeholder in user_input:
+                pasted_sections.append(f"Pasted content from {placeholder}:\n```\n{pasted_text}\n```")
+
+        if pasted_sections:
+            context_parts.append("\n\n".join(pasted_sections))
+            logger.warning(f"Pasted content used: {' | '.join(pasted_sections)}")
+
+        # Clear pasted content after using it
+        pasted_storage.clear()
+
+    # Add search results ONLY if placeholder still exists in user_input
+    if search_storage:
+        search_sections = []
+        for placeholder, search_data in search_storage.items():
+            if placeholder in user_input:
+                search_term = search_data.get('term', 'unknown')
+                files_dict = search_data.get('files', {})
+
+                # Build formatted output with line numbers and sample matches
+                file_lines = []
+                show_sample_lines = len(files_dict) <= 10
+
+                for file_path, match_data in sorted(files_dict.items())[:20]:  # Limit to 20 files
+                    line_numbers = match_data['line_numbers']
+                    matches = match_data.get('matches', [])
+
+                    # Show line number range for better readability
+                    show_line_number_matches = 12
+                    if len(line_numbers) <= show_line_number_matches:
+                        line_nums_str = ', '.join(map(str, line_numbers))
+                    else:
+                        line_nums_str = f"{line_numbers[0]}-{line_numbers[show_line_number_matches-1]}, ... ({len(line_numbers)} total)"
+
+                    file_line = f"  • {file_path}: lines {line_nums_str}"
+
+                    # Optionally show sample matching lines (first 5)
+                    show_line_matches = 5
+                    if show_sample_lines and matches:
+                        for match in matches[:show_line_matches]:
+                            file_line += f"\n      L{match['line_num']}: {match['content']}"
+                        if len(matches) > show_line_matches:
+                            file_line += f"\n      ... {len(matches) - show_line_matches} more matches"
+
+                    file_lines.append(file_line)
+
+                more_files = len(files_dict) - 20 if len(files_dict) > 20 else 0
+                more_str = f"\n  ... and {more_files} more files" if more_files > 0 else ""
+
+                search_section = f"Content search for '{search_term}' found {len(files_dict)} file{'s' if len(files_dict) != 1 else ''}:\n" + "\n".join(file_lines) + more_str
+                search_sections.append(search_section)
+
+        if search_sections:
+            search_str = "\n\n".join(search_sections)
+            context_parts.append(search_str)
+            logger.warning(f"Search content used: {search_str}")
+
+        # Clear search content after using it
+        search_storage.clear()
+
+    # Add other context
+    if dir_update:
+        context_parts.append(dir_update)
+    if file_changes:
+        context_parts.append(file_changes)
+    if shell_context:
+        context_parts.append(shell_context)
+
+    # Combine all context with user request
+    if context_parts:
+        context_str = "\n\n".join(context_parts)
+        return f"{context_str}\n\nUser request: {user_input}"
+
+    return user_input
+
+
 async def async_main(session_id: str = None):
     """Async main with simple status interface."""
     global _current_session_id
@@ -689,6 +931,26 @@ async def async_main(session_id: str = None):
     # Cancellation flag for agent interrupt
     cancel_agent = [False]  # Mutable flag for escape key interrupt
 
+    def handle_paste(pasted_text: str, buffer) -> None:
+        """Shared paste handling logic for both BracketedPaste and Ctrl+V."""
+        if not pasted_text:
+            return
+
+        pasted_text = pasted_text.rstrip('\n')
+        lines = pasted_text.split('\n')
+        line_count = len(lines)
+
+        # Create unique placeholder with ID
+        paste_counter[0] += 1
+        paste_id = paste_counter[0]
+        placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
+
+        # Store the actual pasted content with placeholder as key
+        pasted_content_storage[placeholder] = pasted_text
+
+        # Insert placeholder in buffer
+        buffer.insert_text(placeholder)
+
     @bindings.add('#')  # '#' (Shift+3)
     def _(event):
         """Toggle shell mode with '#' key (Shift+3)."""
@@ -753,23 +1015,7 @@ async def async_main(session_id: str = None):
     def _(event):
         """Intercept terminal paste: show placeholder in prompt, store actual content."""
         try:
-            pasted_text = event.data
-            if pasted_text:
-                pasted_text = pasted_text.rstrip('\n')
-                lines = pasted_text.split('\n')
-                line_count = len(lines)
-
-                # Create unique placeholder with ID
-                paste_counter[0] += 1
-                paste_id = paste_counter[0]
-                placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
-
-                # Store the actual pasted content with placeholder as key
-                pasted_content_storage[placeholder] = pasted_text
-
-                # Insert placeholder in buffer
-                event.current_buffer.insert_text(placeholder)
-
+            handle_paste(event.data, event.current_buffer)
         except Exception as e:
             logger.error(f"Paste error: {e}")
             # On error, do default paste if possible
@@ -793,16 +1039,7 @@ async def async_main(session_id: str = None):
                     data = None
 
             if data:
-                pasted_text = data.rstrip('\n')
-                lines = pasted_text.split('\n')
-                line_count = len(lines)
-
-                paste_counter[0] += 1
-                paste_id = paste_counter[0]
-                placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
-
-                pasted_content_storage[placeholder] = pasted_text
-                event.current_buffer.insert_text(placeholder)
+                handle_paste(data, event.current_buffer)
             else:
                 # Fallback to default paste behavior
                 event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
@@ -882,7 +1119,7 @@ async def async_main(session_id: str = None):
     if user_id is None:
         user_id = os.getenv('USERNAME', None)
     if user_id is None:
-        user_id = "dang"
+        user_id = "user"  # Generic fallback instead of hardcoded personal name
     
     
     # Create filesystem watcher callback
@@ -940,6 +1177,10 @@ async def async_main(session_id: str = None):
 
             # Add to session history
             code_session.filesystem_history.changes.append(change)
+
+            # Invalidate file cache when files are created or deleted
+            if event.event_type in ['created', 'deleted']:
+                nudge_completer.invalidate_file_cache()
 
             # Persist to MongoDB/disk
             await da_mongo.save_file_change(str(code_session.id), change)
@@ -1003,7 +1244,8 @@ async def async_main(session_id: str = None):
                 # If agent is not running then wait for input command
                 if running_agent is None:
                     if wait_for_input.done():
-                        console.print(f"ERROR: wait_for_input is done!! {wait_for_input.result()}")
+                        console.print(f"[red]ERROR: Input task exited unexpectedly: {wait_for_input.result()}[/red]")
+                        break  # Exit main loop - input is no longer available
                     user_input = await input_queue.get()
                 elif running_agent.done():
                     try:
@@ -1035,6 +1277,13 @@ async def async_main(session_id: str = None):
                     continue
 
                 if user_input.lower() in ['exit', 'quit', 'q']:
+                    # Save session before exit
+                    try:
+                        await da_mongo.save_session(code_session)
+                        logger.info(f"Session {code_session.id} saved on exit")
+                    except Exception as e:
+                        logger.warning(f"Failed to save session on exit: {e}")
+
                     console.print("\n[bold green]👋 Goodbye![/bold green]")
                     console.print(f"\n[dim]To restart this session, run:[/dim]")
                     console.print(f"[cyan]  da_code --session {str(code_session.id)}[/cyan]")
@@ -1075,42 +1324,291 @@ async def async_main(session_id: str = None):
                     shell_manager.toggle_shell_mode()
                     continue
                 elif user_input.lower().startswith('restore'):
-                    # Restore all changes back to session start
-                    console.print("[yellow]⚠️  This will revert ALL file changes since session start![/yellow]")
-                    console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
+                    # Check if it's a file-specific restore or full session restore
+                    if len(user_input.strip()) > len('restore') and user_input[7:].strip():
+                        # File-specific restore: "restore file.py"
+                        file_path = user_input[7:].strip()  # Everything after "restore "
 
-                    # Wait for confirmation
-                    confirm_input = await input_queue.get()
-                    if confirm_input.lower() != 'yes':
-                        console.print("[cyan]Restore cancelled[/cyan]")
-                        continue
+                        # Get file revisions
+                        revisions = nudge_completer._get_file_revisions(file_path)
 
-                    console.print("[cyan]Reverting all changes...[/cyan]")
-                    try:
-                        if code_session.filesystem_history:
-                            result = code_session.filesystem_history.revert_all_changes()
+                        # Show interactive revision selector
+                        from rich.table import Table
+                        from rich.panel import Panel
 
-                            if result["status"] == "no_changes":
-                                console.print("[green]✓ No changes to revert[/green]")
-                            else:
-                                stats = result["stats"]
-                                console.print(f"[green]✓ Restore complete![/green]")
-                                console.print(f"  • Files deleted: {stats['deleted']}")
-                                console.print(f"  • Files restored: {stats['restored']}")
-                                console.print(f"  • Total files affected: {stats['files_affected']}")
+                        table = Table(show_header=True, header_style="bold cyan")
+                        table.add_column("#", style="cyan", width=6)
+                        table.add_column("Lines Changed", style="yellow", width=15)
+                        table.add_column("Time Ago", style="green", width=12)
+                        table.add_column("Description", style="white")
 
-                                if stats['errors']:
-                                    console.print(f"\n[yellow]⚠️  Errors ({len(stats['errors'])}):[/yellow]")
-                                    for error in stats['errors'][:5]:  # Show first 5 errors
-                                        console.print(f"  • {error}")
-                                    if len(stats['errors']) > 5:
-                                        console.print(f"  ... and {len(stats['errors']) - 5} more")
+                        # Add session start option
+                        snapshot_entry = None
+                        if code_session.filesystem_history and code_session.filesystem_history.session_start_snapshot:
+                            snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
+
+                        if snapshot_entry:
+                            table.add_row("0", "-", "-", "Session start (original version)")
+                        elif revisions:
+                            # File was created during session
+                            table.add_row("0", "-", "-", "Session start (will DELETE file)")
                         else:
-                            console.print("[yellow]No filesystem history available[/yellow]")
-                    except Exception as e:
-                        console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
-                        logger.error(f"Restore error: {e}", exc_info=True)
-                    continue
+                            console.print(f"[red]No history found for {file_path}[/red]")
+                            continue
+
+                        # Add all revisions
+                        for rev_num, lines_changed, time_str, _ in revisions:
+                            table.add_row(
+                                str(rev_num),
+                                f"{lines_changed} lines",
+                                f"{time_str} ago",
+                                f"Revision #{rev_num}"
+                            )
+
+                        # Show the panel
+                        panel = Panel(
+                            table,
+                            title=f"[bold white]Select Revision for {file_path}[/bold white]",
+                            subtitle="[dim]Type revision number (0 for session start) or 'cancel'[/dim]",
+                            border_style="blue"
+                        )
+                        console.print()
+                        console.print(panel)
+                        console.print()
+
+                        # Get user selection (with escape support and hotkeys)
+                        console.print("[cyan]→[/cyan] [white]Enter revision # (0! for quick restore to session start):[/white] ", end="")
+                        try:
+                            revision_input = await input_queue.get()
+                        except (KeyboardInterrupt, EOFError):
+                            console.print("\n[cyan]↩ Restore cancelled[/cyan]")
+                            continue
+
+                        if revision_input.lower() in ['cancel', 'c', 'q', 'quit', '']:
+                            console.print("[cyan]↩ Restore cancelled[/cyan]")
+                            continue
+
+                        # Parse revision selection - check for auto-confirm hotkey (e.g., "0!", "1!")
+                        auto_confirm = revision_input.strip().endswith('!')
+                        revision_str = revision_input.strip().rstrip('!')
+
+                        try:
+                            revision_num = int(revision_str)
+                        except ValueError:
+                            console.print(f"[red]Invalid input: {revision_input}[/red]")
+                            continue
+
+                        # Validate revision number
+                        if revision_num < 0 or revision_num > len(revisions):
+                            console.print(f"[red]Invalid revision #{revision_num}. Valid range: 0-{len(revisions)}[/red]")
+                            continue
+
+                        # Helper function to calculate diff stats
+                        def calculate_diff_stats(current_content: str, target_content: str) -> dict:
+                            """Calculate diff statistics between current and target content."""
+                            if current_content is None:
+                                current_lines = []
+                            else:
+                                current_lines = current_content.split('\n')
+
+                            if target_content is None:
+                                target_lines = []
+                            else:
+                                target_lines = target_content.split('\n')
+
+                            # Simple line-based diff
+                            added = len(target_lines) - len(current_lines)
+                            return {
+                                'current_lines': len(current_lines),
+                                'target_lines': len(target_lines),
+                                'delta': added,
+                                'delta_str': f"+{added}" if added > 0 else str(added)
+                            }
+
+                        # Get current file content for diff comparison
+                        current_content = None
+                        try:
+                            full_path = Path(code_session.working_directory) / file_path
+                            if full_path.exists():
+                                with open(full_path, 'r', encoding='utf-8', newline='') as f:
+                                    current_content = f.read()
+                        except Exception:
+                            pass
+
+                        # Determine which content to restore
+                        if revision_num == 0:
+                            # Session start
+                            if snapshot_entry:
+                                # File existed at session start
+                                if snapshot_entry.is_binary:
+                                    console.print(f"[red]Cannot restore binary file {file_path}[/red]")
+                                    continue
+                                content_to_restore = snapshot_entry.content
+                                restore_description = "session start"
+
+                                # Show diff synopsis
+                                diff_stats = calculate_diff_stats(current_content, content_to_restore)
+                                console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
+                                console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
+                                console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
+                                console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
+                            else:
+                                # File was created during session - delete it
+                                console.print(f"\n[yellow]⚠️  This will DELETE {file_path}[/yellow]")
+                                console.print(f"[dim]File was created during this session[/dim]\n")
+
+                                if not auto_confirm:
+                                    console.print("[yellow]Confirm deletion? [y/N]:[/yellow] ", end="")
+                                    confirm_input = await input_queue.get()
+                                    if confirm_input.lower() not in ['y', 'yes']:
+                                        console.print("[cyan]↩ Restore cancelled[/cyan]")
+                                        continue
+
+                                try:
+                                    full_path = Path(code_session.working_directory) / file_path
+                                    if full_path.exists():
+                                        full_path.unlink()
+                                        console.print(f"[green]✓ Deleted {file_path} (restored to session start)[/green]")
+                                    else:
+                                        console.print(f"[yellow]File {file_path} already doesn't exist[/yellow]")
+                                except Exception as e:
+                                    console.print(f"[red]❌ Failed to delete {file_path}: {str(e)}[/red]")
+                                    logger.error(f"File delete error: {e}", exc_info=True)
+                                continue
+                        elif revision_num > 0:
+                            # Restore to specific revision
+                            if revision_num < 1 or revision_num > len(revisions):
+                                console.print(f"[red]Invalid revision #{revision_num}. Valid range: 1-{len(revisions)}[/red]")
+                                continue
+
+                            # Get the change at this revision (revisions are 1-indexed)
+                            target_change = None
+                            change_idx = 0
+                            for change in code_session.filesystem_history.changes:
+                                if change.relative_path == file_path:
+                                    change_idx += 1
+                                    if change_idx == revision_num:
+                                        target_change = change
+                                        break
+
+                            if not target_change or not target_change.content_snapshot:
+                                console.print(f"[red]No content snapshot for revision #{revision_num}[/red]")
+                                continue
+
+                            content_to_restore = target_change.content_snapshot
+                            restore_description = f"revision #{revision_num}"
+
+                            # Show diff synopsis for specific revision
+                            diff_stats = calculate_diff_stats(current_content, content_to_restore)
+                            console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
+                            console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
+                            console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
+                            console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
+                        else:
+                            # No revision specified - restore to session start
+                            if not code_session.filesystem_history or not code_session.filesystem_history.session_start_snapshot:
+                                console.print(f"[red]No session start snapshot available[/red]")
+                                continue
+
+                            snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
+                            if not snapshot_entry:
+                                # File not in session start snapshot - was it created during the session?
+                                # Check if this file has any history (meaning it was created this session)
+                                if revisions:
+                                    # File was created during session - deleting it restores to session start
+                                    console.print(f"[yellow]⚠️  {file_path} was created during this session[/yellow]")
+                                    console.print(f"[yellow]Restoring to session start will DELETE this file[/yellow]")
+                                    console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
+
+                                    confirm_input = await input_queue.get()
+                                    if confirm_input.lower() != 'yes':
+                                        console.print("[cyan]Restore cancelled[/cyan]")
+                                        continue
+
+                                    # Delete the file
+                                    try:
+                                        full_path = Path(code_session.working_directory) / file_path
+                                        if full_path.exists():
+                                            full_path.unlink()
+                                            console.print(f"[green]✓ Deleted {file_path} (restored to session start)[/green]")
+                                        else:
+                                            console.print(f"[yellow]File {file_path} already doesn't exist[/yellow]")
+                                    except Exception as e:
+                                        console.print(f"[red]❌ Failed to delete {file_path}: {str(e)}[/red]")
+                                        logger.error(f"File delete error: {e}", exc_info=True)
+                                    continue
+                                else:
+                                    # File has no history and wasn't in session start - shouldn't happen
+                                    console.print(f"[red]File {file_path} not found in session history[/red]")
+                                    continue
+
+                            if snapshot_entry.is_binary:
+                                console.print(f"[red]Cannot restore binary file {file_path}[/red]")
+                                continue
+
+                            content_to_restore = snapshot_entry.content
+                            restore_description = "session start"
+
+                        # Confirm restore (skip if auto_confirm hotkey was used)
+                        if not auto_confirm:
+                            console.print("[yellow]Confirm restore? [y/N]:[/yellow] ", end="")
+                            confirm_input = await input_queue.get()
+                            if confirm_input.lower() not in ['y', 'yes']:
+                                console.print("[cyan]↩ Restore cancelled[/cyan]")
+                                continue
+
+                        # Perform restore
+                        try:
+                            full_path = Path(code_session.working_directory) / file_path
+                            # Use open() with newline='' to preserve exact line endings without translation
+                            with open(full_path, 'w', encoding='utf-8', newline='') as f:
+                                f.write(content_to_restore)
+                            console.print(f"[green]✓ Restored {file_path} to {restore_description}[/green]")
+                        except Exception as e:
+                            console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
+                            logger.error(f"File restore error: {e}", exc_info=True)
+
+                        continue
+                    else:
+                        # Full session restore: "restore"
+                        console.print("[yellow]⚠️  This will revert ALL file changes since session start![/yellow]")
+                        console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
+
+                        # Wait for confirmation
+                        confirm_input = await input_queue.get()
+                        if confirm_input.lower() != 'yes':
+                            console.print("[cyan]Restore cancelled[/cyan]")
+                            continue
+
+                        console.print("[cyan]Reverting all changes...[/cyan]")
+                        try:
+                            if code_session.filesystem_history:
+                                result = code_session.filesystem_history.revert_all_changes()
+
+                                if result["status"] == "error":
+                                    console.print(f"[red]❌ Restore failed: {result.get('message', 'Unknown error')}[/red]")
+                                elif result["status"] == "completed":
+                                    stats = result["stats"]
+                                    if stats['files_affected'] == 0:
+                                        console.print("[green]✓ No changes to revert[/green]")
+                                    else:
+                                        console.print(f"[green]✓ Restore complete![/green]")
+                                        console.print(f"  • Files deleted: {stats['deleted']}")
+                                        console.print(f"  • Files restored: {stats['restored']}")
+                                        console.print(f"  • Total files affected: {stats['files_affected']}")
+
+                                        if stats['errors']:
+                                            console.print(f"\n[yellow]⚠️  Errors ({len(stats['errors'])}):[/yellow]")
+                                            for error in stats['errors'][:5]:  # Show first 5 errors
+                                                console.print(f"  • {error}")
+                                            if len(stats['errors']) > 5:
+                                                console.print(f"  ... and {len(stats['errors']) - 5} more")
+                            else:
+                                console.print("[yellow]No filesystem history available[/yellow]")
+                        except Exception as e:
+                            console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
+                            logger.error(f"Restore error: {e}", exc_info=True)
+                        continue
                 elif user_input.startswith('add_mcp '):
                     # Handle dynamic MCP server addition
                     try:
@@ -1162,103 +1660,27 @@ async def async_main(session_id: str = None):
 
                     # Beautiful unified streaming execution 🚀
                     try:
-                        # Check for directory changes and add to user input if needed
+                        # Check for directory changes
                         dir_update = dir_context.check_changes(cache_timestamp)
                         if dir_update:
-                            # Update cache with fresh listing
                             directory_cache, cache_timestamp = dir_context.get_directory_listing()
+                            logger.info(f"Directory updated - sending new listing to agent context")
 
-                        # Add shell context to the user input if available
+                        # Gather all context sources
                         shell_context = shell_manager.get_shell_context_for_agent()
-
-                        # Get file changes summary
                         file_changes = code_session.get_file_changes_summary()
                         logger.warning(f"File changes summary: {file_changes}")
 
-                        enhanced_input = user_input
+                        # Build enhanced input with all context
+                        enhanced_input = build_agent_context(
+                            user_input=user_input,
+                            pasted_storage=pasted_content_storage,
+                            search_storage=search_content_storage,
+                            dir_update=dir_update,
+                            file_changes=file_changes,
+                            shell_context=shell_context
+                        )
 
-                        # Prepend contexts in order: pasted content, directory updates, file changes, then shell context
-                        context_parts = []
-
-                        # Add pasted content ONLY if placeholder still exists in user_input
-                        if pasted_content_storage:
-                            pasted_sections = []
-                            for placeholder, pasted_text in pasted_content_storage.items():
-                                # Only include if placeholder is still in the input
-                                if placeholder in user_input:
-                                    pasted_sections.append(f"Pasted content from {placeholder}:\n```\n{pasted_text}\n```")
-
-                            if pasted_sections:
-                                context_parts.append("\n\n".join(pasted_sections))
-                            
-                            logger.warning(f"Pasted content used: {' | '.join(pasted_sections)}")
-
-                            # Clear pasted content after using it
-                            pasted_content_storage.clear()
-                        
-
-                        # Add search results ONLY if placeholder still exists in user_input
-                        if search_content_storage:
-                            search_sections = []
-                            for placeholder, search_data in search_content_storage.items():
-                                # Only include if placeholder is still in the input
-                                if placeholder in user_input:
-                                    search_term = search_data.get('term', 'unknown')
-                                    files_dict = search_data.get('files', {})
-
-                                    # Build formatted output with line numbers and sample matches
-                                    file_lines = []
-                                    show_sample_lines = len(files_dict) <= 10  # Only show sample lines if few files
-
-                                    for file_path, match_data in sorted(files_dict.items())[:20]:  # Limit to 20 files
-                                        line_numbers = match_data['line_numbers']
-                                        matches = match_data.get('matches', [])
-
-                                        # Show line number range for better readability
-                                        show_line_number_matches = 12
-                                        if len(line_numbers) <= show_line_number_matches:
-                                            line_nums_str = ', '.join(map(str, line_numbers))
-                                        else:
-                                            # Show range instead of list: "1-12, ... (50 total)"
-                                            line_nums_str = f"{line_numbers[0]}-{line_numbers[show_line_number_matches-1]}, ... ({len(line_numbers)} total)"
-
-                                        file_line = f"  • {file_path}: lines {line_nums_str}"
-
-                                        # Optionally show sample matching lines (first 5)
-                                        show_line_matches = 5
-                                        if show_sample_lines and matches:
-                                            for match in matches[:show_line_matches]:  # Show first 5 matches
-                                                file_line += f"\n      L{match['line_num']}: {match['content']}"
-                                            if len(matches) > show_line_matches:
-                                                file_line += f"\n      ... {len(matches) - show_line_matches} more matches"
-
-                                        file_lines.append(file_line)
-
-                                    more_files = len(files_dict) - 20 if len(files_dict) > 20 else 0
-                                    more_str = f"\n  ... and {more_files} more files" if more_files > 0 else ""
-
-                                    search_section = f"Content search for '{search_term}' found {len(files_dict)} file{'s' if len(files_dict) != 1 else ''}:\n" + "\n".join(file_lines) + more_str
-                                    search_sections.append(search_section)
-
-                            if search_sections:
-                                search_str = "\n\n".join(search_sections)
-                                context_parts.append(search_str)
-                                logger.warning(f"Search content used: {search_str}")
-
-                            # Clear search content after using it
-                            search_content_storage.clear()
-
-                        if dir_update:
-                            context_parts.append(dir_update)
-                        if file_changes:
-                            context_parts.append(file_changes)
-                        if shell_context:
-                            context_parts.append(shell_context)
-
-                        if context_parts:
-                            context_str = "\n\n".join(context_parts)
-                            enhanced_input = f"{context_str}\n\nUser request: {user_input}"
-                        
                         sanitized_input = enhanced_input.encode('utf-8', 'replace').decode('utf-8')
 
                         status_message = f"Calculating: {user_input[:40]}..."
@@ -1273,6 +1695,10 @@ async def async_main(session_id: str = None):
                         status_interface.stop_execution(False, str(e))
                         console.print(f"[red]Sorry, I encountered an error: {str(e)}[/red]")
                         logger.error(f"Agent chat error: {type(e).__name__}: {str(e)}", exc_info=True)
+                        # Clean up agent-related state variables
+                        running_agent = None
+                        status_message = None
+                        output_message = None
 
             except KeyboardInterrupt:
                 if status_interface.current_status:

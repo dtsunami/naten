@@ -338,17 +338,18 @@ class FileSystemHistory(BaseModel):
         if not new_changes:
             return None
 
-        # Group by event type
-        by_type = defaultdict(list)
+        # Group by event type (deduplicate file paths per event type)
+        by_type = defaultdict(set)
         for change in new_changes:
-            by_type[change.event_type].append(change.relative_path)
+            by_type[change.event_type].add(change.relative_path)
 
         # Format summary
         parts = []
         for event_type in ['created', 'modified', 'deleted', 'moved']:
             if by_type[event_type]:
-                files = ', '.join(by_type[event_type][:5])
-                more = f" (+{len(by_type[event_type]) - 5} more)" if len(by_type[event_type]) > 5 else ""
+                file_list = sorted(by_type[event_type])  # Sort for consistent ordering
+                files = ', '.join(file_list[:5])
+                more = f" (+{len(file_list) - 5} more)" if len(file_list) > 5 else ""
                 parts.append(f"{event_type.title()}: {files}{more}")
 
         return "📁 File changes: " + " | ".join(parts)
@@ -512,7 +513,9 @@ class FileSystemHistory(BaseModel):
                     if snapshot.content is not None:
                         # We have the content - restore it
                         full_path.parent.mkdir(parents=True, exist_ok=True)
-                        full_path.write_text(snapshot.content, encoding='utf-8')
+                        # Use open() with newline='' to preserve exact line endings without translation
+                        with open(full_path, 'w', encoding='utf-8', newline='') as f:
+                            f.write(snapshot.content)
                         stats["restored"] += 1
                         stats["files_affected"] += 1
                         logger.info(f"Restored file to session-start state: {rel_path}")
@@ -544,7 +547,9 @@ class FileSystemHistory(BaseModel):
                 try:
                     if snapshot.content is not None:
                         full_path.parent.mkdir(parents=True, exist_ok=True)
-                        full_path.write_text(snapshot.content, encoding='utf-8')
+                        # Use open() with newline='' to preserve exact line endings without translation
+                        with open(full_path, 'w', encoding='utf-8', newline='') as f:
+                            f.write(snapshot.content)
                         stats["restored"] += 1
                         stats["files_affected"] += 1
                         logger.info(f"Restored deleted file: {rel_path}")

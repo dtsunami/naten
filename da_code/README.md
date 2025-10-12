@@ -422,6 +422,7 @@ class AgnoAgent():
 - **MCP Integration Metrics**: Dynamic tool addition and execution timing
 
 ### **Agno Health Monitoring**
+TODO: I think all of this here is AI crap and totally wrong!
 ```bash
 # Agent status check
 python -m da_code --status
