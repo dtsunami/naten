@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Annotated, Dict, List, Optional, Union
+from typing import Any, Annotated, Dict, List, Optional, Union, Callable
 
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -391,16 +391,19 @@ class FileSystemHistory(BaseModel):
 
         return None
 
-    def capture_session_start_snapshot(self, daignore=None) -> None:
+    def capture_session_start_snapshot(self, daignore=None, timeout_seconds: int = 10, progress_callback: Optional[Callable[[str], None]] = None) -> None:
         """Capture complete snapshot of project directory at session start.
 
         Respects .daignore rules to avoid snapshotting sensitive/ignored files.
 
         Args:
             daignore: DaIgnore instance for filtering files (optional)
+            timeout_seconds: maximum seconds to spend indexing (default 10s)
+            progress_callback: optional callable called with current relative path or status message
         """
         import hashlib
         from pathlib import Path as PathLib
+        import time
 
         logger.info(f"Capturing session-start snapshot for {self.project_root}")
         project_path = PathLib(self.project_root)
@@ -409,7 +412,20 @@ class FileSystemHistory(BaseModel):
         always_ignore = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', '.da', 'dist', 'build'}
 
         file_count = 0
+        start_time = time.time()
+        deadline = start_time + timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+
         for item in project_path.rglob('*'):
+            # Check timeout early to avoid unnecessary work
+            if deadline and time.time() > deadline:
+                logger.warning("Snapshot timeout reached; stopping further indexing")
+                if progress_callback:
+                    try:
+                        progress_callback("Snapshot timeout reached; stopping")
+                    except Exception:
+                        pass
+                break
+
             # Skip directories
             if not item.is_file():
                 continue
@@ -421,6 +437,15 @@ class FileSystemHistory(BaseModel):
             try:
                 # Get relative path
                 relative_path = str(item.relative_to(project_path))
+
+                # Emit progress for this file
+                if progress_callback:
+                    try:
+                        progress_callback(relative_path)
+                    except Exception:
+                        pass
+                else:
+                    logger.debug(f"Indexing file: {relative_path}")
 
                 # Check .daignore if provided
                 if daignore and daignore.is_ignored(str(item)):
@@ -464,7 +489,8 @@ class FileSystemHistory(BaseModel):
                 logger.warning(f"Error processing {item}: {e}")
                 continue
 
-        logger.info(f"Captured snapshot of {file_count} files")
+        elapsed = time.time() - start_time
+        logger.info(f"Captured snapshot of {file_count} files in {elapsed:.2f}s")
 
     def get_first_change_per_file(self) -> Dict[str, FileChange]:
         """Get the first change for each file (session start state)."""

@@ -18,6 +18,41 @@ import os
 import logging
 logger = logging.getLogger(__name__)
 
+# Helper: prefer toolkit-level metadata for LLM-facing tool descriptions.
+# Some Agno Toolkit implementations derive tool descriptions from the bound
+# function docstrings. To ensure the toolkit metadata (class-level) is used
+# we set method __doc__ to a short, toolkit-based description before the
+# Toolkit base class registers the methods.
+def _apply_toolkit_doc(cls, method_names):
+    try:
+        toolkit_doc = (cls.__doc__ or '').strip().splitlines()[0]
+    except Exception:
+        toolkit_doc = ''
+    for name in method_names:
+        try:
+            func = getattr(cls, name, None)
+            if func is None:
+                continue
+            orig = (getattr(func, '__doc__', '') or '').strip().splitlines()[0]
+            if toolkit_doc:
+                if orig and orig not in toolkit_doc:
+                    new = f"{toolkit_doc} — {orig}"
+                else:
+                    new = toolkit_doc
+            else:
+                new = orig
+            # Set on the underlying function object (class attribute)
+            try:
+                setattr(func, '__doc__', new)
+            except Exception:
+                # Fallback: modify on the class attribute directly
+                try:
+                    setattr(getattr(cls, name), '__doc__', new)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
 #====================================================================================================
 # Utilities
 #====================================================================================================
@@ -75,12 +110,34 @@ def safe_path(path: str) -> str:
 
 
 class TodoTool(Toolkit):
-    """Todo.md file management tool."""
+    """Todo.md file management tool.
+
+    Tool functions exported by this Toolkit are:
+      - read_todo: Read current contents of todo.md file.
+      - check_exists: Check if todo.md file exists.
+      - create_todo: Create or replace todo.md with provided content.
+      - update_todo: Update todo.md by replacing its contents.
+
+    The Toolkit base class derives the tool's description from the method docstrings
+    when the Toolkit subclass is used as a tool provider. Ensuring the member
+    function docstrings are descriptive makes the tool descriptions appear in
+    the agent context instead of dumping the entire system prompt when the
+    context overlay is requested (Ctrl+O).
+    """
 
     def __init__(self, working_directory: str = None, **kwargs):
         """Initialize todo tool."""
         self.working_dir = working_directory or os.getcwd()
         self.todo_file = Path(self.working_dir) / "todo.md"
+
+        # Apply toolkit-level descriptions to member functions so the Toolkit
+        # metadata is the primary LLM-facing description. This avoids Agno
+        # default behavior where a bound function's docstring becomes the tool
+        # description when the Toolkit class is used as a provider.
+        try:
+            _apply_toolkit_doc(self.__class__, ['read_todo', 'check_exists', 'create_todo', 'update_todo'])
+        except Exception:
+            pass
 
         super().__init__(
             name="todo_tool",

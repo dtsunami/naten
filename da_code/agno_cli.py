@@ -41,6 +41,79 @@ from .ux import (
 logger = logging.getLogger(__name__)
 
 
+# Windows clipboard and VT helpers ---------------------------------------------------------------
+
+def enable_windows_vt():
+    """Try to enable Virtual Terminal Processing on Windows consoles so bracketed paste
+    and ANSI sequences behave more consistently. This is best-effort and will log failures.
+    """
+    try:
+        if not sys.platform.startswith('win'):
+            return False
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        STD_INPUT_HANDLE = -10
+        STD_OUTPUT_HANDLE = -11
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+
+        hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        modeOut = ctypes.c_uint()
+        modeIn = ctypes.c_uint()
+        if not kernel32.GetConsoleMode(hOut, ctypes.byref(modeOut)):
+            logger.debug("GetConsoleMode(out) failed when enabling VT")
+            return False
+        if not kernel32.GetConsoleMode(hIn, ctypes.byref(modeIn)):
+            logger.debug("GetConsoleMode(in) failed when enabling VT")
+            return False
+        kernel32.SetConsoleMode(hOut, modeOut.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+        kernel32.SetConsoleMode(hIn, modeIn.value | ENABLE_VIRTUAL_TERMINAL_INPUT)
+        logger.debug("Enabled Windows VT processing (best-effort)")
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to enable Windows VT processing: {e}")
+        return False
+
+
+def read_windows_clipboard():
+    """Read Unicode text from the Windows clipboard using Win32 APIs. Returns str or None.
+    This avoids depending on terminal bracketed paste and works even when the host
+    intercepts Ctrl+V.
+    """
+    try:
+        if not sys.platform.startswith('win'):
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        CF_UNICODETEXT = 13
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        if not user32.OpenClipboard(None):
+            logger.debug("OpenClipboard failed")
+            return None
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            user32.CloseClipboard()
+            return None
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            user32.CloseClipboard()
+            return None
+        try:
+            # wchar_t pointer
+            text = ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(handle)
+            user32.CloseClipboard()
+        return text
+    except Exception as e:
+        logger.debug(f"read_windows_clipboard failed: {e}")
+        return None
+
+
 #====================================================================================================
 # Context building and agent interaction
 #====================================================================================================
@@ -205,10 +278,38 @@ async def async_main(session_id: str = None):
 
         # Capture session-start snapshot for restore functionality
         if code_session.filesystem_history:
+            # Snapshotting can be expensive on large projects or when running on
+            # Windows with a drive root as the working directory. Run it in a
+            # background thread (non-blocking) and skip snapshotting when the
+            # working directory appears to be a drive root.
             from .daignore import DaIgnore
+            import functools
             daignore = DaIgnore(project_root=code_session.working_directory)
-            status_interface.update_status("Capturing session snapshot...")
-            code_session.filesystem_history.capture_session_start_snapshot(daignore=daignore)
+            project_root = Path(code_session.working_directory)
+
+            try:
+                # Don't attempt a full recursive snapshot if the project root is a drive root
+                # (e.g. C:\) which can be extremely large on Windows.
+                is_drive_root = str(project_root.resolve()) == str(Path(project_root.anchor).resolve())
+            except Exception:
+                is_drive_root = False
+
+            if is_drive_root:
+                logger.warning("Project root appears to be a drive root; skipping session snapshot for safety")
+                status_interface.update_status("Skipping session snapshot (drive root)")
+            else:
+                status_interface.update_status("Scheduling session snapshot (non-blocking)...")
+                # Offload the potentially expensive snapshot to a thread so the CLI stays responsive
+                loop = asyncio.get_running_loop()
+                # Provide a progress callback that updates the status interface with current file being indexed
+                def _progress_cb(msg: str):
+                    try:
+                        status_interface.update_status(f"Indexing: {msg}")
+                        logger.debug(f"Snapshot progress: {msg}")
+                    except Exception:
+                        pass
+
+                loop.run_in_executor(None, functools.partial(code_session.filesystem_history.capture_session_start_snapshot, daignore, 10, _progress_cb))
 
         status_interface.update_status("Initializing Agno agent...")
 
@@ -281,6 +382,13 @@ async def async_main(session_id: str = None):
         search_storage=search_content_storage
     )
 
+    # Try to enable Windows VT processing early so terminals that support it behave better
+    try:
+        if enable_windows_vt():
+            logger.debug("Windows VT enabled")
+    except Exception:
+        pass
+
     # Create key bindings for shell mode toggle and completion
     bindings = KeyBindings()
 
@@ -291,38 +399,63 @@ async def async_main(session_id: str = None):
     cancel_agent = [False]  # Mutable flag for escape key interrupt
 
     def handle_paste(pasted_text: str, buffer) -> None:
-        """Shared paste handling logic for both BracketedPaste and Ctrl+V."""
-        if not pasted_text:
-            return
+        """Shared paste handling logic for both BracketedPaste and Ctrl+V.
 
-        pasted_text = pasted_text.rstrip('\n')
-        lines = pasted_text.split('\n')
-        line_count = len(lines)
+        This function normalizes CRLF/CR-only line endings that can appear when
+        pasting from Windows/PowerShell hosts (bracketed-paste may deliver
+        text with '\r' characters, which previously caused the paste to be
+        treated as a single line). We normalize to '\n', trim trailing newlines,
+        and then make the same decisions about direct vs placeholder insertion.
+        """
+        try:
+            if not pasted_text:
+                logger.debug("handle_paste: empty pasted_text, nothing to do")
+                return
 
-        # Check if paste is a direct command - if so, paste directly without placeholder
-        first_line = lines[0].strip().lower()
-        direct_commands = ['add_mcp', 'add_voice']
+            # Normalize Windows CRLF and lone CR to \n so split() yields real lines
+            if '\r' in pasted_text:
+                logger.debug("handle_paste: normalizing CR/LF characters in pasted text")
+            pasted_text = pasted_text.replace('\r\n', '\n').replace('\r', '\n')
 
-        is_direct_command = any(first_line.startswith(cmd) for cmd in direct_commands)
+            # Trim trailing newline that often accompanies pasted blocks
+            pasted_text = pasted_text.rstrip('\n')
+            lines = pasted_text.split('\n')
+            line_count = len(lines)
 
-        # Also check if it's a single-line paste (likely a command or short text)
-        is_single_line = line_count == 1
+            # Check if paste is a direct command - if so, paste directly without placeholder
+            first_line = lines[0].strip()
+            first_line_l = first_line.lower()
+            direct_commands = ['add_mcp', 'add_voice']
 
-        # Paste directly if it's a command or single line
-        if is_direct_command or is_single_line:
-            buffer.insert_text(pasted_text)
-            return
+            is_direct_command = any(first_line_l.startswith(cmd) for cmd in direct_commands)
 
-        # Multi-line paste for agent context: create placeholder
-        paste_counter[0] += 1
-        paste_id = paste_counter[0]
-        placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
+            # Also check if it's a single-line paste (likely a command or short text)
+            is_single_line = line_count == 1
 
-        # Store the actual pasted content with placeholder as key
-        pasted_content_storage[placeholder] = pasted_text
+            logger.warning(
+                "handle_paste called: lines=%d, first_line=%r, direct=%s, single_line=%s",
+                line_count, first_line[:120], is_direct_command, is_single_line
+            )
 
-        # Insert placeholder in buffer
-        buffer.insert_text(placeholder)
+            # Paste directly if it's a command or single line
+            if is_direct_command or is_single_line:
+                buffer.insert_text(pasted_text)
+                return
+
+            # Multi-line paste for agent context: create placeholder
+            paste_counter[0] += 1
+            paste_id = paste_counter[0]
+            placeholder = f"[[paste#{paste_id}: {line_count} line{'s' if line_count != 1 else ''}]]"
+
+            # Store the actual pasted content with placeholder as key
+            pasted_content_storage[placeholder] = pasted_text
+
+            # Insert placeholder in buffer
+            buffer.insert_text(placeholder)
+        except Exception as e:
+            # Log exception and re-raise so callers can fallback if needed
+            logger.error(f"handle_paste exception: {e}", exc_info=True)
+            raise
 
     @bindings.add('#')  # '#' (Shift+3)
     def _(event):
@@ -388,7 +521,25 @@ async def async_main(session_id: str = None):
     def _(event):
         """Intercept terminal paste: show placeholder in prompt, store actual content."""
         try:
-            handle_paste(event.data, event.current_buffer)
+            data = getattr(event, 'data', None)
+            try:
+                logger.warning("BracketedPaste event: data_present=%s", bool(data))
+            except Exception:
+                pass
+
+            # If there's no data on Windows, attempt Win32 clipboard read as a fallback
+            if not data and sys.platform.startswith('win'):
+                try:
+                    logger.warning("BracketedPaste: no data, attempting Win32 clipboard fallback")
+                    wb = read_windows_clipboard()
+                    if wb:
+                        handle_paste(wb, event.current_buffer)
+                        return
+                except Exception as e:
+                    logger.warning(f"BracketedPaste Win32 fallback failed: {e}")
+
+            # Normal handling
+            handle_paste(data, event.current_buffer)
         except Exception as e:
             logger.error(f"Paste error: {e}")
             # On error, do default paste if possible
@@ -399,29 +550,253 @@ async def async_main(session_id: str = None):
 
     @bindings.add('c-v')  # Ctrl+V
     def _(event):
-        """Handle Ctrl+V paste from clipboard (desktop terminals)."""
+        """Handle Ctrl+V paste from clipboard (desktop terminals).
+
+        On Windows the terminal host or PSReadLine may intercept Ctrl+V, so we try
+        a few approaches in order, and we log diagnostics when things don't
+        return text so we can trace failures on PowerShell/Win32 hosts.
+        """
         try:
             data = None
             try:
-                data = event.app.clipboard.get_data().text
-            except Exception:
-                # Some clipboards return ClipboardData with 'data' attr
+                cb = event.app.clipboard
+                logger.debug("Ctrl+V: trying prompt_toolkit clipboard")
                 try:
-                    data = event.app.clipboard.get_data().data
-                except Exception:
+                    cd = cb.get_data()
+                    # Try common attributes
+                    data = getattr(cd, 'text', None) or getattr(cd, 'data', None) or None
+                    logger.debug("Ctrl+V: clipboard got data (type=%s) text_present=%s", type(cd), bool(data))
+                except Exception as e:
+                    logger.debug(f"Ctrl+V: prompt_toolkit clipboard.get_data() failed: {e}")
+                    data = None
+            except Exception as e:
+                logger.debug(f"Ctrl+V: event.app.clipboard access failed: {e}")
+                data = None
+
+            # If no data from prompt_toolkit clipboard and we're on Windows, try Win32 clipboard
+            if not data and sys.platform.startswith('win'):
+                try:
+                    logger.debug("Ctrl+V: trying Win32 clipboard fallback")
+                    data = read_windows_clipboard()
+                    logger.debug("Ctrl+V: Win32 clipboard returned text_present=%s", bool(data))
+                except Exception as e:
+                    logger.debug(f"Ctrl+V: Win32 fallback failed: {e}")
                     data = None
 
             if data:
                 handle_paste(data, event.current_buffer)
             else:
+                logger.debug("Ctrl+V: no data from clipboards, falling back to paste_clipboard_data")
                 # Fallback to default paste behavior
-                event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
+                try:
+                    event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
+                except Exception as e:
+                    logger.debug(f"Ctrl+V: paste_clipboard_data failed: {e}")
+                    # Last fallback: try to read Windows clipboard one more time
+                    try:
+                        data2 = read_windows_clipboard() if sys.platform.startswith('win') else None
+                        if data2:
+                            handle_paste(data2, event.current_buffer)
+                    except Exception as e:
+                        logger.error(f"Ctrl+V final fallback failed: {e}")
         except Exception as e:
             logger.error(f"Ctrl+V paste error: {e}")
             try:
                 event.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
             except Exception:
                 pass
+
+    @bindings.add('c-o')  # Ctrl+O - Context overlay
+    def _(event):
+        """Show context overlay breaking down estimated token usage by component."""
+        try:
+            # Gather component texts
+            system_prompt = ''
+            try:
+                system_prompt = agent.system_message if agent and hasattr(agent, 'system_message') else ''
+            except Exception:
+                system_prompt = ''
+
+            tools_text = ''
+            try:
+                # Build a richer tool description section by introspecting each toolkit
+                tools_lines = []
+                if agent and hasattr(agent, 'agent_tools'):
+                    for t in agent.agent_tools:
+                        t_name = getattr(t, 'name', None) or getattr(t, 'tool_name', None) or t.__class__.__name__
+                        # Prefer the class docstring (short first line) as the toolkit description
+                        class_doc = ''
+                        try:
+                            class_doc = (t.__class__.__doc__ or '').strip().splitlines()[0]
+                        except Exception:
+                            class_doc = ''
+
+                        # Collect up to a few public callable members and their first-line docstrings
+                        methods = []
+                        try:
+                            for attr in sorted(dir(t)):
+                                if attr.startswith('_'):
+                                    continue
+                                attr_val = getattr(t, attr)
+                                if callable(attr_val):
+                                    doc = getattr(attr_val, '__doc__', '') or ''
+                                    first_line = doc.strip().splitlines()[0] if doc.strip() else ''
+                                    if first_line:
+                                        methods.append(f"{attr} - {first_line}")
+                                    else:
+                                        methods.append(attr)
+                                if len(methods) >= 5:
+                                    break
+                        except Exception:
+                            methods = []
+
+                        mtext = "\n      ".join(methods) if methods else ''
+                        line = f"{t_name}: {class_doc}" if class_doc else f"{t_name}"
+                        if mtext:
+                            line += "\n      " + mtext
+                        tools_lines.append(line)
+                tools_text = "\n\n".join(tools_lines)
+            except Exception:
+                tools_text = ''
+
+            # Chat history: recent LLM calls in session
+            chat_history_text = ''
+            try:
+                calls = code_session.llm_calls if code_session and getattr(code_session, 'llm_calls', None) is not None else []
+                entries = []
+                for call in calls[-10:]:
+                    prompt = getattr(call, 'prompt', '') or ''
+                    resp = getattr(call, 'response', '') or ''
+                    if prompt or resp:
+                        entries.append(f"User: {prompt}\nAssistant: {resp}")
+                chat_history_text = "\n\n".join(entries)
+            except Exception:
+                chat_history_text = ''
+
+            # Directory listing / update
+            directory_text = ''
+            try:
+                if 'dir_update' in locals() and dir_update:
+                    directory_text = dir_update
+                elif 'directory_cache' in locals() and directory_cache:
+                    directory_text = directory_cache
+                else:
+                    # Fallback to fresh listing (may be expensive)
+                    directory_text, _ = dir_context.get_directory_listing()
+            except Exception:
+                directory_text = ''
+
+            # Pasted and search content
+            pasted_texts = ''
+            try:
+                if pasted_content_storage:
+                    pasted_parts = []
+                    for k, v in pasted_content_storage.items():
+                        pasted_parts.append(f"{k}:\n{v}")
+                    pasted_texts = "\n\n".join(pasted_parts)
+            except Exception:
+                pasted_texts = ''
+
+            search_texts = ''
+            try:
+                if search_content_storage:
+                    search_parts = []
+                    for k, v in search_content_storage.items():
+                        term = v.get('term', '') if isinstance(v, dict) else ''
+                        files = v.get('files', {}) if isinstance(v, dict) else {}
+                        search_parts.append(f"{k}: term={term} files={list(files.keys())}")
+                    search_texts = "\n\n".join(search_parts)
+            except Exception:
+                search_texts = ''
+
+            file_changes_text = ''
+            try:
+                file_changes_text = file_changes or (code_session.get_file_changes_summary() if code_session else '') or ''
+            except Exception:
+                file_changes_text = ''
+
+            shell_text = ''
+            try:
+                shell_text = shell_manager.get_shell_context_for_agent() if shell_manager else ''
+            except Exception:
+                shell_text = ''
+
+            components = {
+                'System prompt': system_prompt,
+                'Tools': tools_text,
+                'Chat history (last 10)': chat_history_text,
+                'Directory listing': directory_text,
+                'Pasted content': pasted_texts,
+                'Search results': search_texts,
+                'File changes': file_changes_text,
+                'Shell context': shell_text,
+            }
+
+            # Estimate tokens
+            estimates = {}
+            total_tokens = 0
+            for name, text in components.items():
+                try:
+                    tokens = context_tracker.estimate_tokens(text) if text else 0
+                except Exception:
+                    tokens = 0
+                estimates[name] = tokens
+                total_tokens += tokens
+
+            # Also include current buffer (current prompt)
+            try:
+                current_buffer_text = event.current_buffer.text if hasattr(event, 'current_buffer') else ''
+                current_tokens = context_tracker.estimate_tokens(current_buffer_text) if current_buffer_text else 0
+            except Exception:
+                current_tokens = 0
+            estimates['Current prompt'] = current_tokens
+            total_tokens += current_tokens
+
+            max_tokens = context_tracker.max_tokens if context_tracker else 128000
+
+            # Build output lines
+            lines = []
+            lines.append(f"Context overlay (max {context_tracker.format_token_count(max_tokens)} tokens):")
+            lines.append("")
+
+            # Sort by tokens desc
+            for name, tokens in sorted(estimates.items(), key=lambda x: -x[1]):
+                pct = (tokens / max_tokens) * 100 if max_tokens else 0
+                lines.append(f"  • {name}: {context_tracker.format_token_count(tokens)} tokens ({pct:.1f}%)")
+                preview = components.get(name, '')
+                if preview:
+                    preview_lines = [l.strip() for l in preview.splitlines() if l.strip()][:5]
+                    if preview_lines:
+                        lines.append("    " + " | ".join(preview_lines))
+
+            remaining = max_tokens - total_tokens
+            remaining_pct = (remaining / max_tokens) * 100 if max_tokens else 0
+            lines.append("")
+            lines.append(f"Estimated total tokens (context + current prompt): {context_tracker.format_token_count(total_tokens)}")
+            lines.append(f"Remaining tokens: {context_tracker.format_token_count(max(0, remaining))} ({remaining_pct:.1f}%)")
+
+            console.print("\n[bold cyan]=== Context Overlay ===[/bold cyan]")
+            for l in lines:
+                console.print(l)
+            # Use prompt_toolkit's run_in_terminal to pause and allow user to read overlay
+            def _term():
+                print("\n=== Context Overlay ===")
+                for l in lines:
+                    print(l)
+                try:
+                    input('\nPress Enter to continue...')
+                except Exception:
+                    pass
+
+            try:
+                event.app.run_in_terminal(_term)
+            except Exception:
+                # Fallback: just print
+                for l in lines:
+                    console.print(l)
+
+        except Exception as e:
+            logger.error(f"Context overlay failed: {e}")
 
     # Voice server URL (CLI feature, not agent tool)
     voice_server_url = [None]  # Mutable for inner function access

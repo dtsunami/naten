@@ -118,6 +118,43 @@ class AgnoAgent():
         self.agent_tools = agno_agent_tools + mcp_tools
         logging.info(f"🔧 Agent: Loaded {len(agno_agent_tools)} built-in tools + {len(mcp_tools)} MCP tools")
 
+        # Ensure the LLM-facing tool descriptions prefer toolkit-level metadata
+        # rather than the bound function docstrings defined on instances. Some
+        # Agno Toolkit integrations pick the callable's __doc__ at registration
+        # time; to make toolkit metadata primary we copy the class docstring
+        # (first line) onto the class member functions before creating the
+        # Agent. This ensures the tool description comes from the Toolkit
+        # metadata and not an instance-level function docstring.
+        def _prefer_toolkit_metadata(tool_obj):
+            try:
+                cls = tool_obj.__class__
+                toolkit_doc = (cls.__doc__ or '').strip().splitlines()[0]
+                if not toolkit_doc:
+                    return
+                for attr in dir(cls):
+                    if attr.startswith('_'):
+                        continue
+                    try:
+                        member = getattr(cls, attr, None)
+                        if member and callable(member):
+                            # Only update if member has a docstring or no docstring
+                            orig = (getattr(member, '__doc__', '') or '').strip().splitlines()[0]
+                            new = toolkit_doc if toolkit_doc else orig
+                            try:
+                                setattr(member, '__doc__', new)
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        for t in self.agent_tools:
+            try:
+                _prefer_toolkit_metadata(t)
+            except Exception:
+                pass
+
         self.system_message = self._build_system_prompt()
         logging.warning(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
 
@@ -229,6 +266,19 @@ Don't prompt the user before running tools, tools will ask user for confirmation
         # Add current directory listing if available
         if self.cwd_context:
             context_parts.append(self.cwd_context)
+
+        # Always include TODO.md contents if present in the project root so it's
+        # available to the agent and shown in the context overlay.
+        try:
+            todo_path = Path(self.code_session.working_directory) / "todo.md"
+            if todo_path.exists():
+                try:
+                    todo_text = todo_path.read_text(encoding='utf-8')
+                except Exception:
+                    todo_text = todo_path.read_text(encoding='utf-8', errors='ignore')
+                context_parts.append("\n📌 TODO.md:\n" + todo_text)
+        except Exception as e:
+            logging.debug(f"Could not read todo.md: {e}")
         
         context = "\n".join(context_parts) if context_parts else "No additional context available."
 
