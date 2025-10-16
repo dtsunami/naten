@@ -1,0 +1,284 @@
+{
+  "measurements": [
+    {
+      "name": "test_tool",
+      "num_functions": 1,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 197,
+      "tokens_per_function": 197.0,
+      "json_size_bytes": 572
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 2,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 393,
+      "tokens_per_function": 196.5,
+      "json_size_bytes": 1144
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 4,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 785,
+      "tokens_per_function": 196.25,
+      "json_size_bytes": 2288
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1569,
+      "tokens_per_function": 196.125,
+      "json_size_bytes": 4576
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 10,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1961,
+      "tokens_per_function": 196.1,
+      "json_size_bytes": 5720
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 15,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 2941,
+      "tokens_per_function": 196.06666666666666,
+      "json_size_bytes": 8590
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 20,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 3921,
+      "tokens_per_function": 196.05,
+      "json_size_bytes": 11460
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 20,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1473,
+      "tokens_per_function": 184.125,
+      "json_size_bytes": 3936
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 50,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1513,
+      "tokens_per_function": 189.125,
+      "json_size_bytes": 4176
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1569,
+      "tokens_per_function": 196.125,
+      "json_size_bytes": 4576
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 200,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1665,
+      "tokens_per_function": 208.125,
+      "json_size_bytes": 5376
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 500,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1969,
+      "tokens_per_function": 246.125,
+      "json_size_bytes": 7776
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 1000,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 2465,
+      "tokens_per_function": 308.125,
+      "json_size_bytes": 11776
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 0,
+      "param_description_length": 50,
+      "total_tokens": 473,
+      "tokens_per_function": 59.125,
+      "json_size_bytes": 1944
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 1,
+      "param_description_length": 50,
+      "total_tokens": 833,
+      "tokens_per_function": 104.125,
+      "json_size_bytes": 2800
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 2,
+      "param_description_length": 50,
+      "total_tokens": 1201,
+      "tokens_per_function": 150.125,
+      "json_size_bytes": 3688
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1569,
+      "tokens_per_function": 196.125,
+      "json_size_bytes": 4576
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 5,
+      "param_description_length": 50,
+      "total_tokens": 2305,
+      "tokens_per_function": 288.125,
+      "json_size_bytes": 6352
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 10,
+      "param_description_length": 50,
+      "total_tokens": 4145,
+      "tokens_per_function": 518.125,
+      "json_size_bytes": 10792
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 10,
+      "total_tokens": 1089,
+      "tokens_per_function": 136.125,
+      "json_size_bytes": 3616
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 25,
+      "total_tokens": 1281,
+      "tokens_per_function": 160.125,
+      "json_size_bytes": 3976
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 1569,
+      "tokens_per_function": 196.125,
+      "json_size_bytes": 4576
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 100,
+      "total_tokens": 2169,
+      "tokens_per_function": 271.125,
+      "json_size_bytes": 5776
+    },
+    {
+      "name": "test_tool",
+      "num_functions": 8,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 200,
+      "total_tokens": 3369,
+      "tokens_per_function": 421.125,
+      "json_size_bytes": 8176
+    },
+    {
+      "name": "TodoTool",
+      "num_functions": 4,
+      "docstring_length": 80,
+      "num_params": 1,
+      "param_description_length": 40,
+      "total_tokens": 385,
+      "tokens_per_function": 96.25,
+      "json_size_bytes": 1276
+    },
+    {
+      "name": "FileTool",
+      "num_functions": 8,
+      "docstring_length": 120,
+      "num_params": 3,
+      "param_description_length": 60,
+      "total_tokens": 1705,
+      "tokens_per_function": 213.125,
+      "json_size_bytes": 4968
+    },
+    {
+      "name": "CommandTool",
+      "num_functions": 1,
+      "docstring_length": 150,
+      "num_params": 2,
+      "param_description_length": 80,
+      "total_tokens": 187,
+      "tokens_per_function": 187.0,
+      "json_size_bytes": 573
+    },
+    {
+      "name": "HttpTool",
+      "num_functions": 1,
+      "docstring_length": 100,
+      "num_params": 3,
+      "param_description_length": 50,
+      "total_tokens": 197,
+      "tokens_per_function": 197.0,
+      "json_size_bytes": 571
+    }
+  ]
+}

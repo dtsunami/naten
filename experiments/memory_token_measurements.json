@@ -1,0 +1,47 @@
+[
+  {
+    "experiment": "user_memories",
+    "num_memories": 10,
+    "content_tokens": 72,
+    "total_tokens": 335,
+    "overhead_tokens": 263,
+    "avg_tokens_per_memory": 33.5
+  },
+  {
+    "experiment": "chat_history",
+    "scenario": "Short Q&A",
+    "num_messages": 2,
+    "total_tokens": 41,
+    "avg_tokens_per_message": 20.5
+  },
+  {
+    "experiment": "chat_history",
+    "scenario": "Medium conversation",
+    "num_messages": 4,
+    "total_tokens": 146,
+    "avg_tokens_per_message": 36.5
+  },
+  {
+    "experiment": "chat_history",
+    "scenario": "Code review",
+    "num_messages": 4,
+    "total_tokens": 245,
+    "avg_tokens_per_message": 61.25
+  },
+  {
+    "experiment": "combined_overhead",
+    "components": {
+      "System message (base)": 123,
+      "Todo.md": 509,
+      "Instructions": 111,
+      "Datetime context": 21,
+      "User memories (5 items)": 180,
+      "Chat history (5 runs, 10 msgs)": 1250,
+      "Tool schemas (15 tools)": 1217,
+      "Current user message": 50
+    },
+    "total_tokens": 3461,
+    "max_context": 128000,
+    "usage_pct": 2.7039062499999997
+  }
+]

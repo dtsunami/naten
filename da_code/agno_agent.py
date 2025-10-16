@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv(".env")
 
 import asyncio
+from pathlib import Path
 
 # Agno MCP infrastructure removed - using custom MCP implementation
 from datetime import timedelta
@@ -42,6 +43,7 @@ from .agno_tools import (
     TimeTool, PythonTool, GitTool, HttpTool
 )
 from .mcp_tool import mcp2tool
+from .context_telemetry import ModelStatsTracker, wrap_model_with_interceptor
 
 agno_agent_tools = [
     TodoTool(),
@@ -158,8 +160,6 @@ class AgnoAgent():
         self.system_message = self._build_system_prompt()
         logging.warning(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
 
-
-
         # 1. Configure the Azure OpenAI model
         
 
@@ -173,10 +173,15 @@ class AgnoAgent():
         #    provider="azure",
         #    id=self.config.deployment_name,
         #    base_url=self.config.azure_endpoint,
-        #    api_key=self.config.api_key, 
+        #    api_key=self.config.api_key,
         #)
 
-        self.llm = AzureOpenAI(
+        # Create central tracker for all models
+        self.model_stats_tracker = ModelStatsTracker()
+        logging.info("📊 Created ModelStatsTracker for multi-model telemetry")
+
+        # Create base model
+        base_llm = AzureOpenAI(
             id=self.config.deployment_name,
             #id="gpt-5-mini",
             api_key=self.config.api_key,
@@ -187,11 +192,20 @@ class AgnoAgent():
             max_retries=self.config.max_retries,
             #http_client=self.http,
         )
-        
+
+        # Wrap model with interceptor to log messages sent to LLM
+        self.llm = wrap_model_with_interceptor(
+            base_llm,
+            max_tokens=self.config.max_tokens or 128000,
+            model_type='main',
+            stats_tracker=self.model_stats_tracker
+        )
+        logging.info("✅ Main model wrapped with interceptor for context telemetry")
+
         self.reasoning = None
         if self.config.reasoning_deployment is not None:
             logging.info(f"Reasoning Deployment {self.config.reasoning_deployment}")
-            self.reasoning = AzureOpenAI(
+            base_reasoning = AzureOpenAI(
                 id=self.config.reasoning_deployment,
                 api_key=self.config.api_key,
                 api_version=self.config.api_version,
@@ -200,6 +214,14 @@ class AgnoAgent():
                 max_tokens=self.config.max_tokens,
                 max_retries=self.config.max_retries,
             )
+            # Wrap reasoning model with interceptor
+            self.reasoning = wrap_model_with_interceptor(
+                base_reasoning,
+                max_tokens=self.config.max_tokens or 128000,
+                model_type='reasoning',
+                stats_tracker=self.model_stats_tracker
+            )
+            logging.info("✅ Reasoning model wrapped with interceptor for context telemetry")
 
         # Build instructions list from AGENTS.md + defaults
         default_instructions = [
@@ -212,11 +234,11 @@ class AgnoAgent():
         ]
 
         # Merge with project-specific instructions from AGENTS.md
-        instructions = default_instructions.copy()
+        self.instructions = default_instructions.copy()
         if self.code_session.project_context and self.code_session.project_context.instructions:
-            instructions.append("")  # Blank separator
-            instructions.append("📋 PROJECT-SPECIFIC INSTRUCTIONS:")
-            instructions.extend(self.code_session.project_context.instructions)
+            self.instructions.append("")  # Blank separator
+            self.instructions.append("📋 PROJECT-SPECIFIC INSTRUCTIONS:")
+            self.instructions.extend(self.code_session.project_context.instructions)
             logging.info(f"📝 Loaded {len(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
             logging.info(f"📝 Loaded {' | '.join(self.code_session.project_context.instructions)} project-specific instructions from AGENTS.md")
 
@@ -227,7 +249,7 @@ class AgnoAgent():
             db=self.db,
             session_id=str(self.code_session.id),
             description=self.system_message,
-            instructions=instructions,
+            instructions=self.instructions,
             markdown=True,
             reasoning=self.reasoning is not None,
             enable_user_memories=True,
@@ -307,6 +329,13 @@ Don't prompt the user before running tools, tools will ask user for confirmation
 
 
                 if not run_event.is_paused:
+                    event_name = getattr(run_event, 'event', None)
+
+                    if event_name in ['PreHookStarted', 'PreHookCompleted', 'PostHookStarted', 'PostHookCompleted']:
+                        # Handle pre/post hook events silently (telemetry is in the hooks themselves)
+                        logger.debug(f"Hook event: {event_name}")
+                        continue
+
                     if run_event.event in [RunEvent.run_started, RunEvent.run_completed, RunEvent.run_cancelled]:
                         await status_queue.put(f"Run: {run_event.event})")
                         if run_event.event == RunEvent.run_completed:
@@ -314,6 +343,19 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                         elif run_event.event == RunEvent.run_cancelled:
                             logger.info(f"Run cancelled event received for run_id: {self.active_run_id}")
                             return ('cancelled', None)
+                    elif run_event.event in [RunEvent.reasoning_started]:
+                        await status_queue.put("Reasoning: Starting...")
+                    elif run_event.event in [RunEvent.reasoning_step]:
+                        # Update status with reasoning progress
+                        reasoning_content = getattr(run_event, 'reasoning_content', '')
+                        if reasoning_content:
+                            # Show truncated reasoning content in status
+                            truncated = reasoning_content[:50] + "..." if len(reasoning_content) > 50 else reasoning_content
+                            await status_queue.put(f"Reasoning: {truncated}")
+                        else:
+                            await status_queue.put("Reasoning: Thinking...")
+                    elif run_event.event in [RunEvent.reasoning_completed]:
+                        await status_queue.put("Reasoning: Complete")
                     elif run_event.event in [RunEvent.tool_call_started]:
                         await status_queue.put(f"Tool Started: {run_event.tool.tool_name}({run_event.tool.tool_args})")
                         # Send tool call metric

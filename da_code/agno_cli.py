@@ -20,7 +20,7 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.application.current import get_app
 
 from .config import ConfigManager, setup_logging
-from .context import ContextLoader, DirectoryContext, ContextTracker, StreamingTokenTracker
+from .context import ContextLoader, DirectoryContext
 from .models import CodeSession, CommandExecution, UserResponse, ConfirmationResponse, FileChange, da_mongo
 from .agno_agent import AgnoAgent
 from .mcp_tool import mcp2tool
@@ -318,10 +318,6 @@ async def async_main(session_id: str = None):
         directory_cache, cache_timestamp = dir_context.get_directory_listing()
         agent = AgnoAgent(code_session, directory_cache)
 
-        # Initialize token tracking with agent's model
-        context_tracker = ContextTracker(model=agent.config.deployment_name, max_tokens=128000)
-        streaming_token_tracker = None  # Will be created per agent run
-
         # Track dynamic MCP tools
         dynamic_mcp_tools = []
 
@@ -457,9 +453,9 @@ async def async_main(session_id: str = None):
             logger.error(f"handle_paste exception: {e}", exc_info=True)
             raise
 
-    @bindings.add('#')  # '#' (Shift+3)
+    @bindings.add('$')  # '$' (Shift+4) - moved from #
     def _(event):
-        """Toggle shell mode with '#' key (Shift+3)."""
+        """Toggle shell mode with '$' key (Shift+4)."""
         shell_manager.toggle_shell_mode()
         # Reset history navigation index when toggling modes
         shell_history_index[0] = None
@@ -606,197 +602,123 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
-    @bindings.add('c-o')  # Ctrl+O - Context overlay
+    @bindings.add('#')  # '#' (Shift+3) - Context window breakdown
     def _(event):
-        """Show context overlay breaking down estimated token usage by component."""
+        """Show clean progress bar breakdown of context window usage."""
         try:
-            # Gather component texts
-            system_prompt = ''
-            try:
-                system_prompt = agent.system_message if agent and hasattr(agent, 'system_message') else ''
-            except Exception:
-                system_prompt = ''
+            from rich.panel import Panel
+            from .context_telemetry import get_interceptor_stats, ContextManager, get_multi_model_stats
 
-            tools_text = ''
-            try:
-                # Build a richer tool description section by introspecting each toolkit
-                tools_lines = []
-                if agent and hasattr(agent, 'agent_tools'):
-                    for t in agent.agent_tools:
-                        t_name = getattr(t, 'name', None) or getattr(t, 'tool_name', None) or t.__class__.__name__
-                        # Prefer the class docstring (short first line) as the toolkit description
-                        class_doc = ''
-                        try:
-                            class_doc = (t.__class__.__doc__ or '').strip().splitlines()[0]
-                        except Exception:
-                            class_doc = ''
+            # Get ACTUAL stats from model interceptor
+            stats = get_interceptor_stats(agent)
+            mgr = ContextManager(agent)
+            max_tokens = 128000
 
-                        # Collect up to a few public callable members and their first-line docstrings
-                        methods = []
-                        try:
-                            for attr in sorted(dir(t)):
-                                if attr.startswith('_'):
-                                    continue
-                                attr_val = getattr(t, attr)
-                                if callable(attr_val):
-                                    doc = getattr(attr_val, '__doc__', '') or ''
-                                    first_line = doc.strip().splitlines()[0] if doc.strip() else ''
-                                    if first_line:
-                                        methods.append(f"{attr} - {first_line}")
-                                    else:
-                                        methods.append(attr)
-                                if len(methods) >= 5:
-                                    break
-                        except Exception:
-                            methods = []
+            console.print()
 
-                        mtext = "\n      ".join(methods) if methods else ''
-                        line = f"{t_name}: {class_doc}" if class_doc else f"{t_name}"
-                        if mtext:
-                            line += "\n      " + mtext
-                        tools_lines.append(line)
-                tools_text = "\n\n".join(tools_lines)
-            except Exception:
-                tools_text = ''
+            if not stats or stats.call_count == 0:
+                # Pre-call estimate - simple panel
+                from .token_estimator import TokenEstimator
+                estimator = TokenEstimator()
+                system_tokens = estimator.count_tokens(agent.system_message)
+                tool_tokens = sum(estimator.estimate_tool_from_toolkit(tool) for tool in agent.agent_tools)
+                est_total = system_tokens + tool_tokens + 1000
 
-            # Chat history: recent LLM calls in session
-            chat_history_text = ''
-            try:
-                calls = code_session.llm_calls if code_session and getattr(code_session, 'llm_calls', None) is not None else []
-                entries = []
-                for call in calls[-10:]:
-                    prompt = getattr(call, 'prompt', '') or ''
-                    resp = getattr(call, 'response', '') or ''
-                    if prompt or resp:
-                        entries.append(f"User: {prompt}\nAssistant: {resp}")
-                chat_history_text = "\n\n".join(entries)
-            except Exception:
-                chat_history_text = ''
+                panel = Panel(
+                    f"[yellow]⚠️  No LLM calls yet[/yellow]\n\n"
+                    f"[dim]Estimated starting context:[/dim] [cyan]~{est_total:,}[/cyan] tokens\n"
+                    f"[dim]Make a request to see actual usage[/dim]",
+                    title="[bold cyan]📊 Context Window[/bold cyan]",
+                    border_style="cyan"
+                )
+                console.print(panel)
+                console.print()
+                return
 
-            # Directory listing / update
-            directory_text = ''
-            try:
-                if 'dir_update' in locals() and dir_update:
-                    directory_text = dir_update
-                elif 'directory_cache' in locals() and directory_cache:
-                    directory_text = directory_cache
-                else:
-                    # Fallback to fresh listing (may be expensive)
-                    directory_text, _ = dir_context.get_directory_listing()
-            except Exception:
-                directory_text = ''
+            # Build progress bar display
+            multi_model_stats = get_multi_model_stats(agent)
+            total_tokens = sum(s.total_input_tokens for s in multi_model_stats.values()) if multi_model_stats else stats.total_input_tokens
 
-            # Pasted and search content
-            pasted_texts = ''
-            try:
-                if pasted_content_storage:
-                    pasted_parts = []
-                    for k, v in pasted_content_storage.items():
-                        pasted_parts.append(f"{k}:\n{v}")
-                    pasted_texts = "\n\n".join(pasted_parts)
-            except Exception:
-                pasted_texts = ''
+            # Calculate usage percentage
+            usage_pct = (total_tokens / max_tokens) * 100
 
-            search_texts = ''
-            try:
-                if search_content_storage:
-                    search_parts = []
-                    for k, v in search_content_storage.items():
-                        term = v.get('term', '') if isinstance(v, dict) else ''
-                        files = v.get('files', {}) if isinstance(v, dict) else {}
-                        search_parts.append(f"{k}: term={term} files={list(files.keys())}")
-                    search_texts = "\n\n".join(search_parts)
-            except Exception:
-                search_texts = ''
+            # Get breakdown from main model's last call
+            breakdown = stats.last_breakdown
+            if not breakdown:
+                console.print(Panel("No breakdown available", title="📊 Context Window", border_style="cyan"))
+                console.print()
+                return
 
-            file_changes_text = ''
-            try:
-                file_changes_text = file_changes or (code_session.get_file_changes_summary() if code_session else '') or ''
-            except Exception:
-                file_changes_text = ''
+            # Create progress bar visualization
+            def make_bar(value, total, width=40):
+                filled = int((value / total) * width) if total > 0 else 0
+                return "█" * filled + "░" * (width - filled)
 
-            shell_text = ''
-            try:
-                shell_text = shell_manager.get_shell_context_for_agent() if shell_manager else ''
-            except Exception:
-                shell_text = ''
-
-            components = {
-                'System prompt': system_prompt,
-                'Tools': tools_text,
-                'Chat history (last 10)': chat_history_text,
-                'Directory listing': directory_text,
-                'Pasted content': pasted_texts,
-                'Search results': search_texts,
-                'File changes': file_changes_text,
-                'Shell context': shell_text,
-            }
-
-            # Estimate tokens
-            estimates = {}
-            total_tokens = 0
-            for name, text in components.items():
-                try:
-                    tokens = context_tracker.estimate_tokens(text) if text else 0
-                except Exception:
-                    tokens = 0
-                estimates[name] = tokens
-                total_tokens += tokens
-
-            # Also include current buffer (current prompt)
-            try:
-                current_buffer_text = event.current_buffer.text if hasattr(event, 'current_buffer') else ''
-                current_tokens = context_tracker.estimate_tokens(current_buffer_text) if current_buffer_text else 0
-            except Exception:
-                current_tokens = 0
-            estimates['Current prompt'] = current_tokens
-            total_tokens += current_tokens
-
-            max_tokens = context_tracker.max_tokens if context_tracker else 128000
-
-            # Build output lines
+            # Build content
             lines = []
-            lines.append(f"Context overlay (max {context_tracker.format_token_count(max_tokens)} tokens):")
+
+            # Header with total
+            lines.append(f"[bold]📊 Context Window: {total_tokens:,} / {max_tokens:,} tokens[/bold]")
+            bar = make_bar(total_tokens, max_tokens, 50)
+            status_color = "green" if usage_pct < 50 else "yellow" if usage_pct < 70 else "red"
+            lines.append(f"[{status_color}]{bar}[/{status_color}] [bold]{usage_pct:.1f}%[/bold]")
             lines.append("")
 
-            # Sort by tokens desc
-            for name, tokens in sorted(estimates.items(), key=lambda x: -x[1]):
-                pct = (tokens / max_tokens) * 100 if max_tokens else 0
-                lines.append(f"  • {name}: {context_tracker.format_token_count(tokens)} tokens ({pct:.1f}%)")
-                preview = components.get(name, '')
-                if preview:
-                    preview_lines = [l.strip() for l in preview.splitlines() if l.strip()][:5]
-                    if preview_lines:
-                        lines.append("    " + " | ".join(preview_lines))
+            # Component breakdown with mini bars
+            components = [
+                ("System", breakdown['system_tokens'], "cyan"),
+                ("History", breakdown['assistant_tokens'], "blue"),
+                ("Tools", breakdown['tool_tokens'], "magenta"),
+                ("User", breakdown['user_tokens'], "yellow"),
+            ]
 
-            remaining = max_tokens - total_tokens
-            remaining_pct = (remaining / max_tokens) * 100 if max_tokens else 0
+            for label, tokens, color in components:
+                if tokens > 0:
+                    pct = (tokens / total_tokens) * 100
+                    bar = make_bar(tokens, total_tokens, 30)
+                    lines.append(f"{label:8} [{color}]{bar}[/{color}] {tokens:>6,} ([yellow]{pct:4.1f}%[/yellow])")
+
             lines.append("")
-            lines.append(f"Estimated total tokens (context + current prompt): {context_tracker.format_token_count(total_tokens)}")
-            lines.append(f"Remaining tokens: {context_tracker.format_token_count(max(0, remaining))} ({remaining_pct:.1f}%)")
 
-            console.print("\n[bold cyan]=== Context Overlay ===[/bold cyan]")
-            for l in lines:
-                console.print(l)
-            # Use prompt_toolkit's run_in_terminal to pause and allow user to read overlay
-            def _term():
-                print("\n=== Context Overlay ===")
-                for l in lines:
-                    print(l)
-                try:
-                    input('\nPress Enter to continue...')
-                except Exception:
-                    pass
-
+            # Try to get Azure billing info
             try:
-                event.app.run_in_terminal(_term)
-            except Exception:
-                # Fallback: just print
-                for l in lines:
-                    console.print(l)
+                session_id = str(agent.agent.session_id) if hasattr(agent.agent, 'session_id') else str(agent.code_session.id)
+                azure_metrics = agent.agent.get_session_metrics(session_id=session_id)
+
+                if azure_metrics:
+                    azure_input = getattr(azure_metrics, 'input_tokens', 0) or 0
+                    azure_cached = getattr(azure_metrics, 'cache_read_tokens', 0) or 0
+                    azure_reasoning = getattr(azure_metrics, 'reasoning_tokens', 0) or 0
+
+                    if azure_input > 0:
+                        lines.append("[bold]💰 Billing:[/bold]")
+                        lines.append(f"   Billed:  [green]{azure_input:,}[/green] tokens")
+                        if azure_cached > 0:
+                            savings = (azure_cached / total_tokens) * 100 if total_tokens > 0 else 0
+                            lines.append(f"   Cached:  [yellow]{azure_cached:,}[/yellow] tokens ([green]{savings:.0f}% saved[/green])")
+                        if azure_reasoning > 0:
+                            lines.append(f"   Reason:  [magenta]{azure_reasoning:,}[/magenta] tokens [dim](internal CoT)[/dim]")
+                        lines.append("")
+            except:
+                pass
+
+            # Tool summary
+            tool_functions = mgr.count_tool_functions()
+            lines.append(f"[bold]🔧 Tools:[/bold] {len(agent.agent_tools)} toolkits, {breakdown['tool_count']} functions sent")
+
+            panel = Panel(
+                "\n".join(lines),
+                title="[bold cyan]📊 Context Dashboard[/bold cyan]",
+                border_style="cyan"
+            )
+
+            console.print(panel)
+            console.print()
+            return
 
         except Exception as e:
-            logger.error(f"Context overlay failed: {e}")
+            logger.error(f"Context overlay failed: {e}", exc_info=True)
+            console.print(f"\n[red]Context overlay error: {e}[/red]")
 
     # Voice server URL (CLI feature, not agent tool)
     voice_server_url = [None]  # Mutable for inner function access
@@ -1121,8 +1043,6 @@ async def async_main(session_id: str = None):
         running_agent = None
         status_message = None
         output_message = None
-        input_tokens_est = 0  # Track input token estimate for current run
-        estimated_output_tokens = 0  # Track output token estimate for current run
         while True:
             try:
                 # Check for cancellation request
@@ -1150,8 +1070,6 @@ async def async_main(session_id: str = None):
                     cancel_agent[0] = False
                     output_message = None
                     status_message = None
-                    input_tokens_est = 0
-                    estimated_output_tokens = 0
                     continue
 
                 # If agent is not running then wait for input command
@@ -1240,10 +1158,6 @@ async def async_main(session_id: str = None):
                         chunk = await output_queue.get()
                         output_message += chunk
 
-                        # Track output tokens in real-time
-                        if streaming_token_tracker:
-                            estimated_output_tokens = streaming_token_tracker.add_chunk(chunk)
-
                     while status_queue.qsize() > 0:
                         status_update = await status_queue.get()
 
@@ -1260,19 +1174,26 @@ async def async_main(session_id: str = None):
                                 elif status_update['type'] == 'tool_call':
                                     status_interface.log_tool_call(status_update.get('tool_name', ''))
                         else:
-                            # Regular status message
+                            # Regular status message - update with actual telemetry if available
                             status_message = status_update
 
-                    # Update status with base message plus token tracking
-                    if status_message and streaming_token_tracker:
-                        # Estimate total context usage (input + output so far)
-                        total_tokens_est = input_tokens_est + estimated_output_tokens
-                        context_summary = context_tracker.get_context_summary(total_tokens_est)
+                            # Try to get real-time context stats from model interceptor
+                            try:
+                                from .context_telemetry import get_interceptor_stats
+                                stats = get_interceptor_stats(agent)
 
-                        # Build status with token info
-                        token_status = f"📝 ~{context_tracker.format_token_count(estimated_output_tokens)} out"
-                        context_status = f"📊 {context_summary['usage_pct']:.0f}%"
-                        status_interface.update_status(f"{status_message} | {token_status} | {context_status}")
+                                if stats and stats.call_count > 0:
+                                    # We have actual data - show context % from last call
+                                    max_tokens = 128000
+                                    context_pct = (stats.max_context_seen / max_tokens) * 100
+                                    status_interface.update_status(f"{status_message} | 📊 {context_pct:.0f}% context")
+                                else:
+                                    # No LLM calls yet, just show the status
+                                    status_interface.update_status(status_message)
+                            except Exception:
+                                # Fallback: just show the status message
+                                status_interface.update_status(status_message)
+
                     await asyncio.sleep(0.01)
                     continue
 
@@ -1315,13 +1236,13 @@ async def async_main(session_id: str = None):
                     console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁")
                     console.print("  • [cyan]@@[/cyan] - Fuzzy filename: '@@auth<Tab>' → all files with 'auth' in name 📁")
                     console.print("  • [cyan]~[/cyan] - Content search: '~async def<Tab>' → files containing 'async def' 🔍")
-                    console.print("  • [cyan]#[/cyan] - Toggle shell mode (Shift+3)")
-                    console.print("  • [cyan]$[/cyan] - Reserved for future use")
+                    console.print("  • [cyan]#[/cyan] - Context window breakdown (Shift+3) - Shows actual LLM token usage 📊")
+                    console.print("  • [cyan]$[/cyan] - Toggle shell mode (Shift+4)")
                     console.print("\n[bold]Clipboard:[/bold]")
                     console.print("  • [cyan]Ctrl+V or terminal paste[/cyan] - Paste shows '[[paste#N: X lines]]' placeholder, actual content sent to agent")
                     console.print("  • Delete placeholder to exclude that paste from context")
                     console.print("\n[bold]Shell Mode:[/bold]")
-                    console.print("  • Type [cyan]shell[/cyan] or press [cyan]#[/cyan] to toggle between modes")
+                    console.print("  • Type [cyan]shell[/cyan] or press [cyan]$[/cyan] to toggle between modes")
                     console.print("  • In shell mode, commands are executed directly")
                     console.print("  • [cyan]Tab[/cyan] completion for commands and file paths")
                     console.print("  • Shell output is automatically included in next agent prompt")
@@ -1737,22 +1658,24 @@ async def async_main(session_id: str = None):
 
                         sanitized_input = enhanced_input.encode('utf-8', 'replace').decode('utf-8')
 
-                        # Estimate input tokens and check context usage
-                        input_tokens_est = context_tracker.estimate_tokens(sanitized_input)
-                        context_summary = context_tracker.get_context_summary(input_tokens_est)
+                        # Optional: Estimate input tokens and warn if context is high (using TokenEstimator)
+                        # This is a pre-call estimate to warn user before making the LLM call
+                        try:
+                            from .token_estimator import TokenEstimator
+                            estimator = TokenEstimator()
+                            input_tokens_est = estimator.count_tokens(sanitized_input)
+                            max_tokens = 128000
+                            usage_pct = (input_tokens_est / max_tokens) * 100
 
-                        # Warn if context usage > 80%
-                        if context_summary['should_warn']:
-                            console.print(f"[yellow]⚠️  Context usage: {context_summary['usage_pct']:.1f}% ({context_summary['formatted_current']} / {context_summary['formatted_max']} tokens)[/yellow]")
-                            console.print(f"[dim]   Remaining: {context_summary['formatted_remaining']} tokens[/dim]")
-
-                        # Create streaming token tracker for this run
-                        streaming_token_tracker = StreamingTokenTracker(context_tracker)
+                            # Warn if estimated usage > 80%
+                            if usage_pct > 80:
+                                console.print(f"[yellow]⚠️  Estimated context usage: {usage_pct:.1f}% ({input_tokens_est:,} / {max_tokens:,} tokens)[/yellow]")
+                                console.print(f"[dim]   Remaining: {max_tokens - input_tokens_est:,} tokens[/dim]")
+                        except Exception as e:
+                            logger.debug(f"Token estimation failed: {e}")
 
                         # Use random thinking phrase
-                        random_phrase = get_random_thinking_phrase()
-                        status_message = f"{random_phrase} your request"
-                        status_interface.start_execution(status_message)
+                        status_interface.start_execution(get_random_thinking_phrase())
                         output_message = ""
                         logger.info(f"Input Context : {enhanced_input}")
                         running_agent = tg.create_task(
@@ -1767,8 +1690,6 @@ async def async_main(session_id: str = None):
                         running_agent = None
                         status_message = None
                         output_message = None
-                        input_tokens_est = 0
-                        estimated_output_tokens = 0
 
             except KeyboardInterrupt:
                 if status_interface.current_status:
