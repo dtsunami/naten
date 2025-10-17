@@ -190,4 +190,3 @@ Investigate why Agno's `ResponseMetrics` shows 2,067 tokens while interceptor sh
 - Different tokenizer
 - Cached tokens not being counted
 - Reasoning model tokens being excluded
-

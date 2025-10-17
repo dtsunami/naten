@@ -38,6 +38,7 @@ from .ux import (
 )
 from .textual_confirmation import show_confirmation_dialog
 from .textual_context_manager import show_context_manager_textual
+from .textual_restore import show_restore_menu
 
 
 logger = logging.getLogger(__name__)
@@ -1295,76 +1296,34 @@ async def async_main(session_id: str = None):
                         # Get file revisions
                         revisions = nudge_completer._get_file_revisions(file_path)
 
-                        # Show interactive revision selector
-                        from rich.table import Table
-                        from rich.panel import Panel
-
-                        table = Table(show_header=True, header_style="bold cyan")
-                        table.add_column("#", style="cyan", width=6)
-                        table.add_column("Lines Changed", style="yellow", width=15)
-                        table.add_column("Time Ago", style="green", width=12)
-                        table.add_column("Description", style="white")
-
-                        # Add session start option
+                        # Check if file existed at session start
                         snapshot_entry = None
                         if code_session.filesystem_history and code_session.filesystem_history.session_start_snapshot:
                             snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
 
-                        if snapshot_entry:
-                            table.add_row("0", "-", "-", "Session start (original version)")
-                        elif revisions:
-                            # File was created during session
-                            table.add_row("0", "-", "-", "Session start (will DELETE file)")
-                        else:
+                        # Validate we have something to restore
+                        has_session_start = snapshot_entry is not None or len(revisions) > 0
+                        if not has_session_start:
                             console.print(f"[red]No history found for {file_path}[/red]")
                             continue
 
-                        # Add all revisions
-                        for rev_num, lines_changed, time_str, _ in revisions:
-                            table.add_row(
-                                str(rev_num),
-                                f"{lines_changed} lines",
-                                f"{time_str} ago",
-                                f"Revision #{rev_num}"
-                            )
-
-                        # Show the panel
-                        panel = Panel(
-                            table,
-                            title=f"[bold white]Select Revision for {file_path}[/bold white]",
-                            subtitle="[dim]Type revision number (0 for session start) or 'cancel'[/dim]",
-                            border_style="blue"
+                        # Show Textual restore menu
+                        console.print()
+                        result = await show_restore_menu(
+                            file_path=file_path,
+                            revisions=revisions,
+                            has_session_start=(snapshot_entry is not None),
+                            console=console
                         )
-                        console.print()
-                        console.print(panel)
-                        console.print()
 
-                        # Get user selection (with escape support and hotkeys)
-                        console.print("[cyan]→[/cyan] [white]Enter revision # (0! for quick restore to session start):[/white] ", end="")
-                        try:
-                            revision_input = await input_queue.get()
-                        except (KeyboardInterrupt, EOFError):
-                            console.print("\n[cyan]↩ Restore cancelled[/cyan]")
-                            continue
-
-                        if revision_input.lower() in ['cancel', 'c', 'q', 'quit', '']:
+                        # Check if user cancelled
+                        if not result:
                             console.print("[cyan]↩ Restore cancelled[/cyan]")
                             continue
 
-                        # Parse revision selection - check for auto-confirm hotkey (e.g., "0!", "1!")
-                        auto_confirm = revision_input.strip().endswith('!')
-                        revision_str = revision_input.strip().rstrip('!')
-
-                        try:
-                            revision_num = int(revision_str)
-                        except ValueError:
-                            console.print(f"[red]Invalid input: {revision_input}[/red]")
-                            continue
-
-                        # Validate revision number
-                        if revision_num < 0 or revision_num > len(revisions):
-                            console.print(f"[red]Invalid revision #{revision_num}. Valid range: 0-{len(revisions)}[/red]")
-                            continue
+                        # Extract result
+                        revision_num = result['revision']
+                        auto_confirm = result['auto_confirm']
 
                         # Helper function to calculate diff stats
                         def calculate_diff_stats(current_content: str, target_content: str) -> dict:
