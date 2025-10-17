@@ -33,10 +33,11 @@ from .ux import (
     show_splash,
     show_status_splash,
     SimpleStatusInterface,
-    confirmation_handler,
     get_random_thinking_phrase,
     console  # Import the shared console from ux
 )
+from .textual_confirmation import show_confirmation_dialog
+from .textual_context_manager import show_context_manager_textual
 
 
 logger = logging.getLogger(__name__)
@@ -240,7 +241,16 @@ async def async_main(session_id: str = None):
     shell_manager = ShellModeManager()
 
     async def confirm_wrapper(execution: CommandExecution) -> ConfirmationResponse:
-        return await confirmation_handler(execution, status_interface)
+        # Stop status to show confirmation dialog cleanly
+        status_interface.stop_execution()
+
+        # Show Textual confirmation dialog
+        response = await show_confirmation_dialog(execution)
+
+        # Restart status interface for continued execution
+        status_interface.start_execution("Processing...")
+
+        return response
 
     show_splash("gradient")
 
@@ -734,13 +744,12 @@ async def async_main(session_id: str = None):
     def _(event):
         """Manage context components - delete or summarize to free tokens."""
         try:
-            from .context_manager_ui import show_context_manager
             import asyncio
 
             console.print()
 
             # Schedule the async function as a task in the running event loop
-            asyncio.create_task(show_context_manager(agent, console))
+            asyncio.create_task(show_context_manager_textual(agent, console))
 
         except Exception as e:
             logger.error(f"Context manager failed: {e}", exc_info=True)
