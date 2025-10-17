@@ -325,116 +325,33 @@ class NudgeCompleter(Completer):
                     )
             return
 
-        # Check for ~ (content search)
-        tilde_pos = text.rfind('~')
-        if tilde_pos != -1 and tilde_pos <= document.cursor_position:
-            search_start = tilde_pos + 1
-            search_text = text[search_start:document.cursor_position]
-
-            # Always try to search (even if empty, to show an indicator)
-            try:
-                if search_text:  # Only search if there's a search term
-                    # Minimum search term length validation
-                    if len(search_text) < 2:
-                        yield Completion(
-                            "",
-                            start_position=0,
-                            display="Type at least 2 characters to search",
-                            display_meta="⚠️",
-                        )
-                        return
-
-                    matching_files_dict = self._search_snapshot(search_text, include_lines=True)
-                    if matching_files_dict:
-                        file_count = len(matching_files_dict)
-
-                        # Warn if too many matches (term too broad)
-                        if file_count > 100:
-                            yield Completion(
-                                "",
-                                start_position=0,
-                                display=f"⚠️ {file_count} files found - term too broad, refine search",
-                                display_meta="⚠️",
-                            )
-                            return
-
-                        # Use search term as identifier instead of incrementing number
-                        # Format: [[search:term: N files]]
-                        placeholder = f"[[search:{search_text}: {file_count} file{'s' if file_count != 1 else ''}]]"
-
-                        # Store rich match data in search_storage
-                        # This allows the main loop to find it when user accepts
-                        self.search_storage[placeholder] = {
-                            'term': search_text,
-                            'files': matching_files_dict
-                        }
-
-                        # Offer the placeholder as completion
-                        yield Completion(
-                            placeholder + ", ",
-                            start_position=-(len(search_text) + 1),  # Remove ~ + search term
-                            display=f"{file_count} file{'s' if file_count != 1 else ''} containing '{search_text}'",
-                            display_meta="🔍",
-                        )
-                    else:
-                        # No results found
-                        yield Completion(
-                            "",
-                            start_position=0,
-                            display=f"No files found containing '{search_text}'",
-                            display_meta="❌",
-                        )
-            except Exception as e:
-                logger.error(f"Content search error: {e}")
-                yield Completion(
-                    "",
-                    start_position=0,
-                    display=f"Search error: {str(e)}",
-                    display_meta="❌",
-                )
-            return
-
         # Check for @ (file path mode)
         at_pos = text.rfind('@')
         if at_pos != -1 and at_pos <= document.cursor_position:
             path_start = at_pos + 1
             path_text = text[path_start:document.cursor_position]
 
-            # Check for @@ (fuzzy search all files)
-            if path_text.startswith('@'):
-                search_term = path_text[1:].lower()
-                all_files = self._get_all_project_files()
+            # Normal path completion
+            from prompt_toolkit.document import Document
+            path_doc = Document(path_text, len(path_text))
 
-                for file_path in all_files:
-                    if not search_term or search_term in file_path.lower():
-                        yield Completion(
-                            file_path + ", ",
-                            start_position=-(len(path_text)),  # Remove @@ + search term
-                            display=file_path,
-                            display_meta="📁",
-                        )
-            else:
-                # Normal path completion
-                from prompt_toolkit.document import Document
-                path_doc = Document(path_text, len(path_text))
+            for completion in self.path_completer.get_completions(path_doc, complete_event):
+                # PathCompleter gives us the right start_position for the path part
+                # Add comma only for files, not directories
+                # Directories end with / or \
+                completed_path = "@" + path_text[:len(path_text) + completion.start_position] + completion.text
 
-                for completion in self.path_completer.get_completions(path_doc, complete_event):
-                    # PathCompleter gives us the right start_position for the path part
-                    # Add comma only for files, not directories
-                    # Directories end with / or \
-                    completed_path = "@" + path_text[:len(path_text) + completion.start_position] + completion.text
+                # Check if it's a directory (ends with path separator)
+                if completed_path.endswith('/') or completed_path.endswith('\\'):
+                    # Directory - no comma, allow continued navigation
+                    suffix = ""
+                else:
+                    # File - add comma and space
+                    suffix = ", "
 
-                    # Check if it's a directory (ends with path separator)
-                    if completed_path.endswith('/') or completed_path.endswith('\\'):
-                        # Directory - no comma, allow continued navigation
-                        suffix = ""
-                    else:
-                        # File - add comma and space
-                        suffix = ", "
-
-                    yield Completion(
-                        completed_path + suffix,
-                        start_position=-(len(path_text) + 1),  # Remove @ + entire path_text
-                        display=completion.display,
-                        display_meta=completion.display_meta,
-                    )
+                yield Completion(
+                    completed_path + suffix,
+                    start_position=-(len(path_text) + 1),  # Remove @ + entire path_text
+                    display=completion.display,
+                    display_meta=completion.display_meta,
+                )

@@ -10,53 +10,18 @@ from .models import (
     AgentConfig, CodeSession, CommandExecution, CommandStatus,
     LLMCall, LLMCallStatus, ToolCall, ToolCallStatus, UserResponse, da_mongo
 )
-from .file_utils import get_file_emoji
 from .daignore import DaIgnore
 import subprocess
 import os
+import re
+import glob
 
 import logging
 logger = logging.getLogger(__name__)
 
-# Helper: prefer toolkit-level metadata for LLM-facing tool descriptions.
-# Some Agno Toolkit implementations derive tool descriptions from the bound
-# function docstrings. To ensure the toolkit metadata (class-level) is used
-# we set method __doc__ to a short, toolkit-based description before the
-# Toolkit base class registers the methods.
-def _apply_toolkit_doc(cls, method_names):
-    try:
-        toolkit_doc = (cls.__doc__ or '').strip().splitlines()[0]
-    except Exception:
-        toolkit_doc = ''
-    for name in method_names:
-        try:
-            func = getattr(cls, name, None)
-            if func is None:
-                continue
-            orig = (getattr(func, '__doc__', '') or '').strip().splitlines()[0]
-            if toolkit_doc:
-                if orig and orig not in toolkit_doc:
-                    new = f"{toolkit_doc} — {orig}"
-                else:
-                    new = toolkit_doc
-            else:
-                new = orig
-            # Set on the underlying function object (class attribute)
-            try:
-                setattr(func, '__doc__', new)
-            except Exception:
-                # Fallback: modify on the class attribute directly
-                try:
-                    setattr(getattr(cls, name), '__doc__', new)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
 #====================================================================================================
 # Utilities
 #====================================================================================================
-
 
 # Global daignore instance (lazily initialized)
 _daignore_instance = None
@@ -108,54 +73,25 @@ def safe_path(path: str) -> str:
 # TODO Tool
 #====================================================================================================
 
-
 class TodoTool(Toolkit):
-    """Todo.md file management tool.
-
-    Tool functions exported by this Toolkit are:
-      - read_todo: Read current contents of todo.md file.
-      - check_exists: Check if todo.md file exists.
-      - create_todo: Create or replace todo.md with provided content.
-      - update_todo: Update todo.md by replacing its contents.
-
-    The Toolkit base class derives the tool's description from the method docstrings
-    when the Toolkit subclass is used as a tool provider. Ensuring the member
-    function docstrings are descriptive makes the tool descriptions appear in
-    the agent context instead of dumping the entire system prompt when the
-    context overlay is requested (Ctrl+O).
-    """
+    """Todo.md file management tool."""
 
     def __init__(self, working_directory: str = None, **kwargs):
         """Initialize todo tool."""
         self.working_dir = working_directory or os.getcwd()
         self.todo_file = Path(self.working_dir) / "todo.md"
 
-        # Apply toolkit-level descriptions to member functions so the Toolkit
-        # metadata is the primary LLM-facing description. This avoids Agno
-        # default behavior where a bound function's docstring becomes the tool
-        # description when the Toolkit class is used as a provider.
-        try:
-            _apply_toolkit_doc(self.__class__, ['read_todo', 'check_exists', 'create_todo', 'update_todo'])
-        except Exception:
-            pass
-
         super().__init__(
             name="todo_tool",
             tools=[
                 self.read_todo,
-                self.check_exists,
-                self.create_todo,
                 self.update_todo,
             ],
             **kwargs
         )
 
     def read_todo(self) -> str:
-        """Read current contents of todo.md file.
-
-        Returns:
-            Contents of todo.md file or status message
-        """
+        """Read current contents of todo.md file."""
         try:
             if not self.todo_file.exists():
                 return "No todo.md file exists in the current directory."
@@ -165,36 +101,11 @@ class TodoTool(Toolkit):
                 return "todo.md file exists but is empty."
 
             return content.strip()
-
         except Exception as e:
             return f"Error reading todo file: {str(e)}"
 
-    def check_exists(self) -> str:
-        """Check if todo.md file exists.
-
-        Returns:
-            Status message indicating if file exists and its size
-        """
-        try:
-            exists = self.todo_file.exists()
-            if exists:
-                size = self.todo_file.stat().st_size
-                return f"✅ todo.md exists ({size} bytes)"
-            else:
-                return "� todo.md does not exist"
-
-        except Exception as e:
-            return f"Error checking file existence: {str(e)}"
-
-    def create_todo(self, content: str) -> str:
-        """Create or completely replace todo.md file with provided content.
-
-        Args:
-            content: Content to write to todo.md file
-
-        Returns:
-            Success message
-        """
+    def update_todo(self, content: str) -> str:
+        """Create or update todo.md file with provided content."""
         try:
             # Ensure content follows proper markdown format
             if not content.strip().startswith('# '):
@@ -202,26 +113,13 @@ class TodoTool(Toolkit):
 
             self.todo_file.write_text(content.strip() + '\n', encoding='utf-8')
             return f"✅ Created/updated todo.md file"
-
         except Exception as e:
-            return f"Error creating todo file: {str(e)}"
-
-    def update_todo(self, content: str) -> str:
-        """Update todo.md file by replacing its contents.
-
-        Args:
-            content: New content for the todo.md file
-
-        Returns:
-            Success message
-        """
-        return self.create_todo(content)
+            return f"Error updating todo file: {str(e)}"
 
 
 #====================================================================================================
 # Command Tool
 #====================================================================================================
-
 
 class CommandTool(Toolkit):
     """Command execution tool."""
@@ -235,16 +133,7 @@ class CommandTool(Toolkit):
         )
 
     def execute_command(self, command: str, working_directory: str = None, explanation: str = None) -> str:
-        """Execute shell/bash commands with user confirmation.
-
-        Args:
-            command: The shell command to execute
-            working_directory: Directory to run in (optional)
-            explanation: What the command does (optional)
-
-        Returns:
-            Command execution result with stdout/stderr
-        """
+        """Execute shell/bash commands with user confirmation."""
         logger.warning(f"🔧 SHELL_COMMAND TOOL CALLED with command: {command}")
 
         try:
@@ -274,103 +163,16 @@ class CommandTool(Toolkit):
                     output += "No output"
                 return output
             else:
-                output = f"� Command failed (exit code: {result.returncode})\n"
+                output = f"❌ Command failed (exit code: {result.returncode})\n"
                 if result.stderr:
                     stderr = result.stderr.strip()
                     output += f"Error:\n{stderr[:1000]}" + ("...\n(truncated)" if len(stderr) > 1000 else "")
                 return output
 
         except subprocess.TimeoutExpired:
-            return "� Command timed out after 5 minutes"
+            return "❌ Command timed out after 5 minutes"
         except Exception as e:
-            return f"� Command execution failed: {str(e)}"
-
-
-#====================================================================================================
-# Web Search Tool
-#====================================================================================================
-
-
-class WebSearchTool(Toolkit):
-    """Web search toolkit using DuckDuckGo."""
-
-    def __init__(self, **kwargs):
-        super().__init__(
-            name="web_search",
-            tools=[self.search],
-            requires_confirmation_tools=["search"],
-            **kwargs
-        )
-
-    def search(self, query: str, num_results: int = 5) -> str:
-        """Search web using DuckDuckGo.
-
-        Args:
-            query: Search terms
-            num_results: Number of results to return (default: 5)
-
-        Returns:
-            Search results with instant answers, related topics, and source links
-        """
-        try:
-            import urllib.parse
-
-            result = f"� Search results for: {query}\n\n"
-
-            try:
-                # Primary: DuckDuckGo instant answers
-                encoded_query = urllib.parse.quote(query)
-                url = f"https://api.duckduckgo.com/?q={encoded_query}&format=json&no_redirect=1&no_html=1"
-
-                with httpx.Client(timeout=10) as client:
-                    response = client.get(url)
-
-                if response.status_code == 200:
-                    data = response.json()
-
-                    # Add instant answer if available
-                    if data.get("AbstractText"):
-                        result += f"📖 Summary: {data['AbstractText']}\n"
-                        if data.get("AbstractURL"):
-                            result += f"   Source: {data['AbstractURL']}\n\n"
-
-                    # Add related topics
-                    if data.get("RelatedTopics"):
-                        result += "🔗 Related topics:\n"
-                        for i, topic in enumerate(data["RelatedTopics"][:num_results]):
-                            if isinstance(topic, dict) and topic.get("Text"):
-                                result += f"{i+1}. {topic['Text'][:200]}...\n"
-                                if topic.get("FirstURL"):
-                                    result += f"   Source: {topic['FirstURL']}\n"
-                        result += "\n"
-
-                    # Add definition if available
-                    if data.get("Definition"):
-                        result += f"📚 Definition: {data['Definition']}\n"
-                        if data.get("DefinitionURL"):
-                            result += f"   Source: {data['DefinitionURL']}\n\n"
-
-                    # Add answer if available
-                    if data.get("Answer"):
-                        result += f"💡 Answer: {data['Answer']}\n"
-                        if data.get("AnswerType"):
-                            result += f"   Type: {data['AnswerType']}\n\n"
-
-                    # Check if we got meaningful results
-                    if len(result) > 100:  # More than just the header
-                        return result
-                    else:
-                        # Fallback: provide helpful search suggestion
-                        return f"� Search: {query}\n\nNo instant results available. This query might work better with:\n• More specific terms\n• Different keywords\n• Academic or technical search engines\n\nNote: This tool provides instant answers and definitions. For general web results, consider using a browser."
-
-                else:
-                    return f"� Search: {query}\n\n� Search service unavailable (status {response.status_code})"
-
-            except Exception as e:
-                return f"� Search: {query}\n\n� Search error: {str(e)}\n\nNote: This tool provides instant answers and definitions from DuckDuckGo's API."
-
-        except Exception as e:
-            return f"Web search error: {str(e)}"
+            return f"❌ Command execution failed: {str(e)}"
 
 
 #====================================================================================================
@@ -378,162 +180,68 @@ class WebSearchTool(Toolkit):
 #====================================================================================================
 
 class FileTool(Toolkit):
-    """File operations tool with separate methods for each operation."""
+    """File operations tool - focused on core file operations."""
 
     def __init__(self, **kwargs):
         super().__init__(
             name="file_tool",
             tools=[
-                self.list_directory,
                 self.read_file,
-                #self.write_file,
                 self.create_file,
-                self.delete_file,
-                self.search_files,
                 self.replace_text,
                 self.copy_file,
-                self.move_file,
+                self.glob_files,
+                self.grep_content,
             ],
             **kwargs
         )
 
-    def list_directory(self, path: str = ".", max_depth: int = 1, show_hidden: bool = False) -> str:
-        """List directory contents with emoji file types.
-
-        Args:
-            path: Directory path to list (default: current directory)
-            max_depth: Maximum recursion depth for subdirectories (default: 1)
-            show_hidden: Include hidden files (default: False)
-
-        Returns:
-            JSON string with directory listing including file types, sizes, and emojis
-        """
-        try:
-            path = safe_path(path)
-        except Exception as e:
-            return json.dumps({"error": f"Invalid path: {str(e)}"})
-
-        daignore = get_daignore()
-
-        def list_dir_recursive(dir_path, current_depth=0):
-            """Recursively list directory contents"""
-            items = []
-            if current_depth >= max_depth:
-                return items
-
-            try:
-                for item in sorted(Path(dir_path).iterdir()):
-                    # Check .daignore first
-                    if daignore.is_ignored(str(item)):
-                        continue
-
-                    # Skip hidden files unless requested
-                    if not show_hidden and item.name.startswith('.'):
-                        continue
-
-                    rel_path = os.path.relpath(item, path)
-                    if item.is_dir():
-                        items.append({
-                            "name": rel_path + "/",
-                            "type": "directory",
-                            "emoji": "�",
-                            "size": None
-                        })
-                        # Recursively list subdirectories if depth allows
-                        if current_depth + 1 < max_depth:
-                            subitems = list_dir_recursive(item, current_depth + 1)
-                            items.extend(subitems)
-                    else:
-                        size = item.stat().st_size
-                        if size < 1024:
-                            size_str = f"{size}B"
-                        elif size < 1024*1024:
-                            size_str = f"{size//1024}KB"
-                        else:
-                            size_str = f"{size//(1024*1024)}MB"
-
-                        items.append({
-                            "name": rel_path,
-                            "type": "file",
-                            "emoji": get_file_emoji(item.name),
-                            "size": size_str
-                        })
-            except (OSError, PermissionError) as e:
-                return [{"error": f"Cannot access {dir_path}: {str(e)}"}]
-
-            return items
-
-        if not os.path.exists(path):
-            return json.dumps({"error": f"Path does not exist: {path}"})
-
-        if not os.path.isdir(path):
-            return json.dumps({"error": f"Path is not a directory: {path}"})
-
-        results = list_dir_recursive(path)
-        return json.dumps({
-            "path": path,
-            "items": results,
-            "total_items": len(results)
-        })
-
     def read_file(self, path: str, start_line: int = 1, end_line: Optional[int] = None) -> str:
-        """Read file contents.
+        """Read file contents (or specific line range).
 
         Args:
-            path: File path to read
-            start_line: Starting line number (default: 1)
-            end_line: Ending line number, reads to end if not specified
+            path: Relative or absolute file path within workspace
+            start_line: First line to read (1-indexed, default: 1)
+            end_line: Last line to read (inclusive, default: None = read to end)
 
         Returns:
-            File contents as string
+            File contents as string (UTF-8, with fallback error handling)
+
+        Example:
+            read_file("src/main.py")           # Read entire file
+            read_file("src/main.py", 10, 20)   # Read lines 10-20
         """
         path = safe_path(path)
         with open(path, "r", encoding='utf-8', errors="ignore") as f:
             lines = f.readlines()
         return "".join(lines[start_line-1:end_line]) if end_line else "".join(lines[start_line-1:])
 
-    def write_file(self, path: str, content: str) -> str:
-        """Write or overwrite a file with content.
-
-        Args:
-            path: File path to write
-            content: Content to write to the file
-
-        Returns:
-            Success message with file path and size
-        """
-        path = safe_path(path)
-
-        # Create parent directories if they don't exist
-        parent_dir = os.path.dirname(path)
-        if parent_dir and not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
-
-        # Write the file
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-        except Exception as e:
-            return json.dumps({"error": f"Failed to write file: {str(e)}"})
-
-        file_exists_msg = "Updated" if os.path.exists(path) else "Created"
-        return f"{file_exists_msg} file: {path} ({len(content)} bytes)"
-
     def create_file(self, path: str, content: str = "") -> str:
-        """Create a new file (fails if file already exists).
+        """Create a new file with the specified content.
 
         Args:
-            path: File path to create
-            content: Initial content for the file (default: empty string)
+            path: Relative or absolute path to the file. Relative paths are resolved
+                  from workspace root. Path must be within workspace and not .daignored.
+            content: File content (default: empty string).
 
         Returns:
-            Success message or error if file exists
+            Success: "Created file: {path} ({size} bytes)"
+            Error: JSON object with "error" key
+
+        Behavior:
+            - Fails if file already exists (use replace_text to modify existing files)
+            - Creates parent directories if they don't exist
+            - Only accepts 'path' and 'content' parameters (no 'explanation' kwarg)
+
+        Example:
+            create_file("tests/test.txt", "line1\\nline2\\n")
+            => "Created file: F:\\workspace\\tests\\test.txt (12 bytes)"
         """
         path = safe_path(path)
 
         # Check if file already exists
         if os.path.exists(path):
-            return json.dumps({"error": f"File already exists: {path}. Use write_file to overwrite."})
+            return json.dumps({"error": f"File already exists: {path}. Use replace_text to modify."})
 
         # Create parent directories if they don't exist
         parent_dir = os.path.dirname(path)
@@ -544,99 +252,220 @@ class FileTool(Toolkit):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
+            return f"Created file: {path} ({len(content)} bytes)"
         except Exception as e:
             return json.dumps({"error": f"Failed to write file: {str(e)}"})
 
-        return f"Created file: {path} ({len(content)} bytes)"
-
-    def delete_file(self, path: str) -> str:
-        """Delete a file.
+    def glob_files(self, pattern: str, path: Optional[str] = None, max_results: int = 100) -> str:
+        """Find files matching glob pattern (respects .daignore).
 
         Args:
-            path: File path to delete
+            pattern: Glob pattern (e.g., "**/*.txt", "src/**/*.py")
+            path: Search root directory (default: workspace root)
+            max_results: Maximum files to return (default: 100)
 
         Returns:
-            Success message or error
+            JSON object containing:
+            - pattern: The glob pattern used
+            - search_root: Directory searched
+            - matches: Number of files found
+            - files: Array of file paths (sorted by modification time, newest first)
+
+        Example:
+            glob_files("**/*.txt", max_results=50)
         """
-        path = safe_path(path)
-
-        if not os.path.exists(path):
-            return json.dumps({"error": f"File does not exist: {path}"})
-
-        if os.path.isdir(path):
-            return json.dumps({"error": f"Cannot delete directory: {path}. This operation only deletes files."})
+        daignore = get_daignore()
+        search_root = path if path else get_workspace_root()
 
         try:
-            os.remove(path)
-            return f"Deleted file: {path}"
+            search_root = safe_path(search_root)
         except Exception as e:
-            return json.dumps({"error": f"Failed to delete file: {str(e)}"})
+            return json.dumps({"error": f"Invalid path: {str(e)}"})
 
-    def search_files(self, pattern: str = "**/*", content: Optional[str] = None, max_results: int = 50) -> str:
-        """Search for files by pattern and/or content (respects .daignore).
+        # Build full glob pattern
+        full_pattern = os.path.join(search_root, pattern)
+
+        results = []
+        try:
+            for file_path in glob.glob(full_pattern, recursive=True):
+                if os.path.isfile(file_path):
+                    # Skip files ignored by .daignore
+                    if daignore.is_ignored(file_path):
+                        continue
+
+                    try:
+                        stat = Path(file_path).stat()
+                        results.append({
+                            "path": file_path,
+                            "size": stat.st_size,
+                            "modified": stat.st_mtime
+                        })
+
+                        if len(results) >= max_results:
+                            break
+                    except Exception:
+                        continue
+
+            # Sort by modification time (newest first)
+            results.sort(key=lambda x: x['modified'], reverse=True)
+
+            return json.dumps({
+                "pattern": pattern,
+                "search_root": search_root,
+                "matches": len(results),
+                "files": [r["path"] for r in results]
+            })
+        except Exception as e:
+            return json.dumps({"error": f"Glob failed: {str(e)}"})
+
+    def grep_content(self, pattern: str, path: Optional[str] = None,
+                     file_pattern: Optional[str] = None, case_insensitive: bool = False,
+                     context_lines: int = 0, max_results: int = 100) -> str:
+        """Search file contents using regex pattern (respects .daignore).
 
         Args:
-            pattern: Glob pattern for file matching (default: all files)
-            content: Text content to search for in files (optional)
-            max_results: Maximum number of results to return (default: 50)
+            pattern: Regular expression pattern to search for
+            path: Search root directory (default: workspace root)
+            file_pattern: Glob pattern to filter files (e.g., "*.txt", "*.{py,js}")
+            case_insensitive: Perform case-insensitive search (default: False)
+            context_lines: Number of lines to include before/after matches (default: 0)
+            max_results: Maximum number of matches to return (default: 100)
 
         Returns:
-            JSON string with search results including file paths, line numbers, and matches
+            JSON object containing:
+            - pattern: The search pattern used
+            - search_root: Directory searched
+            - files_searched: Number of files examined
+            - matches: Number of matches found (after deduplication)
+            - results: Array of match objects with file, line, content, and optional context
+
+        Behavior:
+            - Stops searching after max_results matches
+            - Deduplicates matches by (file, line_number) to prevent duplicates
+            - Skips binary files and .daignored paths
+
+        Example:
+            grep_content("TODO", file_pattern="**/*.py", case_insensitive=True, max_results=10)
         """
-        import glob
-        results = []
         daignore = get_daignore()
+        search_root = path if path else get_workspace_root()
 
-        # Build a glob rooted at the workspace to avoid expanding outside the project root
-        root = get_workspace_root()
+        try:
+            search_root = safe_path(search_root)
+        except Exception as e:
+            return json.dumps({"error": f"Invalid path: {str(e)}"})
 
-        # If pattern doesn't contain wildcards or path separators, make it recursive
-        if '**' not in pattern and '*' not in pattern and '/' not in pattern and '\\' not in pattern:
-            # Simple filename - search recursively
-            search_pattern = os.path.join(root, '**', pattern)
-        elif not ('/' in pattern or '\\' in pattern or pattern.startswith('**')):
-            # Pattern with wildcards but no path - search recursively
-            search_pattern = os.path.join(root, '**', pattern)
+        # Compile regex pattern
+        try:
+            flags = re.IGNORECASE if case_insensitive else 0
+            regex = re.compile(pattern, flags)
+        except re.error as e:
+            return json.dumps({"error": f"Invalid regex pattern: {str(e)}"})
+
+        # Determine files to search
+        if file_pattern:
+            glob_pattern = os.path.join(search_root, '**', file_pattern)
         else:
-            # Pattern already contains path structure
-            search_pattern = os.path.join(root, pattern)
-        for file_path in glob.glob(search_pattern, recursive=True):
-            if os.path.isfile(file_path):
+            glob_pattern = os.path.join(search_root, '**', '*')
+
+        results = []
+        seen_matches = set()  # Track (file_path, line_number) to prevent duplicates
+        files_searched = 0
+
+        try:
+            for file_path in glob.glob(glob_pattern, recursive=True):
+                if not os.path.isfile(file_path):
+                    continue
+
                 # Skip files ignored by .daignore
                 if daignore.is_ignored(file_path):
                     continue
 
-                if content:
-                    try:
-                        with open(file_path, "r", errors="ignore") as f:
-                            for i, line in enumerate(f, start=1):
-                                if content in line:
-                                    results.append({"file": file_path, "line": i, "text": line.strip()})
-                                    if len(results) >= max_results:
-                                        return json.dumps(results)
-                    except Exception as e:
-                        results.append({"file": file_path, "error": str(e)})
-                else:
-                    results.append({"file": file_path, "size": os.path.getsize(file_path)})
+                files_searched += 1
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        lines = f.readlines()
+
+                    for i, line in enumerate(lines, start=1):
+                        if regex.search(line):
+                            # Deduplicate: skip if we've already seen this file:line combination
+                            match_key = (file_path, i)
+                            if match_key in seen_matches:
+                                continue
+                            seen_matches.add(match_key)
+
+                            match_result = {
+                                "file": file_path,
+                                "line": i,
+                                "content": line.rstrip('\n')
+                            }
+
+                            # Add context lines if requested
+                            if context_lines > 0:
+                                context_before = []
+                                context_after = []
+
+                                for j in range(1, context_lines + 1):
+                                    if i - j > 0:
+                                        context_before.insert(0, {
+                                            "line": i - j,
+                                            "content": lines[i - j - 1].rstrip('\n')
+                                        })
+                                    if i + j <= len(lines):
+                                        context_after.append({
+                                            "line": i + j,
+                                            "content": lines[i + j - 1].rstrip('\n')
+                                        })
+
+                                if context_before:
+                                    match_result["context_before"] = context_before
+                                if context_after:
+                                    match_result["context_after"] = context_after
+
+                            results.append(match_result)
+
+                            if len(results) >= max_results:
+                                break
+
                     if len(results) >= max_results:
-                        return json.dumps(results)
-        return json.dumps(results)
+                        break
+
+                except Exception:
+                    continue
+
+            return json.dumps({
+                "pattern": pattern,
+                "search_root": search_root,
+                "files_searched": files_searched,
+                "matches": len(results),
+                "results": results
+            })
+        except Exception as e:
+            return json.dumps({"error": f"Grep failed: {str(e)}"})
 
     def replace_text(self, path: str, search_text: str, replace_text: str,
                      use_regex: bool = False, case_sensitive: bool = True) -> str:
-        """Replace text in a file.
+        """Replace text in a file (literal or regex).
 
         Args:
-            path: File path to modify
-            search_text: Text to search for
-            replace_text: Text to replace with
-            use_regex: Use regular expression for search (default: False)
-            case_sensitive: Case-sensitive search (default: True)
+            path: File path within workspace
+            search_text: Text to find (literal string or regex if use_regex=True)
+            replace_text: Replacement text
+            use_regex: Treat search_text as regex pattern (default: False)
+            case_sensitive: Case-sensitive matching (default: True)
 
         Returns:
-            Success message with number of replacements
+            "Replaced {count} occurrence(s) in {path}" or
+            "No matches found — {path} left unchanged"
+
+        Behavior:
+            - Only writes file if at least one replacement made
+            - For regex mode: supports capture groups in replace_text
+
+        Example:
+            replace_text("test.txt", "old", "new", case_sensitive=True)
         """
-        import re
         path = safe_path(path)
 
         with open(path, "r", encoding='utf-8', errors="ignore") as f:
@@ -661,16 +490,23 @@ class FileTool(Toolkit):
         else:
             return f"No matches found — {path} left unchanged"
 
-
     def copy_file(self, source_path: str, destination_path: str) -> str:
-        """Copy a file to a new location.
+        """Copy a file to a new location (preserves metadata).
 
         Args:
-            source_path: Source file path
-            destination_path: Destination file path
+            source_path: Source file path within workspace
+            destination_path: Destination file path within workspace
 
         Returns:
-            Success message with source and destination paths
+            Success: "Copied {src} to {dst}"
+            Error: JSON object with "error" key
+
+        Behavior:
+            - Uses shutil.copy2 (preserves metadata: timestamps, permissions)
+            - Both paths must be within workspace and not .daignored
+
+        Example:
+            copy_file("src/file.txt", "backup/file.txt")
         """
         import shutil
         try:
@@ -680,319 +516,6 @@ class FileTool(Toolkit):
             return f"Copied {src} to {dst}"
         except Exception as e:
             return json.dumps({"error": f"Failed to copy file: {str(e)}"})
-
-    def move_file(self, source_path: str, destination_path: str) -> str:
-        """Move or rename a file.
-
-        Args:
-            source_path: Source file path
-            destination_path: Destination file path
-
-        Returns:
-            Success message with source and destination paths
-        """
-        import shutil
-        try:
-            src = safe_path(source_path)
-            dst = safe_path(destination_path)
-            shutil.move(src, dst)
-            return f"Moved {src} to {dst}"
-        except Exception as e:
-            return json.dumps({"error": f"Failed to move file: {str(e)}"})
-
-
-#====================================================================================================
-# Time Toolkit
-#====================================================================================================
-
-class TimeTool(Toolkit):
-    """Time operations toolkit."""
-
-    def __init__(self, **kwargs):
-        super().__init__(
-            name="time_toolkit",
-            tools=[
-                self.current_time,
-            ],
-            **kwargs
-        )
-
-    def current_time(self, format: str = "iso") -> str:
-        """Get current time in various formats.
-
-        Args:
-            format: Time format - iso, human, timestamp, date, time, or custom strftime
-
-        Returns:
-            Formatted current time
-        """
-        from datetime import datetime, timezone
-
-        now = datetime.now(timezone.utc)
-
-        if format == "iso":
-            return now.isoformat()
-        elif format == "human":
-            return now.strftime("%B %d, %Y %I:%M %p UTC")
-        elif format == "timestamp":
-            return str(int(now.timestamp()))
-        elif format == "date":
-            return now.strftime("%Y-%m-%d")
-        elif format == "time":
-            return now.strftime("%H:%M:%S")
-        else:
-            # Custom strftime format
-            try:
-                return now.strftime(format)
-            except:
-                return f"Invalid time format: {format}"
-
-
-#====================================================================================================
-# Python Toolkit
-#====================================================================================================
-
-class PythonTool(Toolkit):
-    """Python code execution toolkit."""
-
-    def __init__(self, **kwargs):
-        super().__init__(
-            name="python_toolkit",
-            tools=[
-                self.execute_code,
-            ],
-            **kwargs
-        )
-
-    def execute_code(self, code: str, timeout: int = 30) -> str:
-        """Execute Python code safely with timeout.
-
-        Args:
-            code: Python code to execute
-            timeout: Timeout in seconds (default: 30, max: 300)
-
-        Returns:
-            Execution result with stdout/stderr or error message
-        """
-        import sys
-        import io
-        import threading
-
-        # Capture output
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        stdout_capture = io.StringIO()
-        stderr_capture = io.StringIO()
-
-        # Use threading for timeout (cross-platform)
-        execution_complete = threading.Event()
-        execution_error = None
-        stdout_result = ""
-        stderr_result = ""
-
-        def execute_with_timeout():
-            nonlocal execution_error, stdout_result, stderr_result
-            try:
-                # Redirect output
-                sys.stdout = stdout_capture
-                sys.stderr = stderr_capture
-
-                # Execute code
-                exec(code)
-
-                # Get results
-                stdout_result = stdout_capture.getvalue()
-                stderr_result = stderr_capture.getvalue()
-
-            except Exception as e:
-                execution_error = e
-            finally:
-                execution_complete.set()
-
-        try:
-            # Start execution in thread
-            exec_thread = threading.Thread(target=execute_with_timeout)
-            exec_thread.daemon = True
-            exec_thread.start()
-
-            # Wait for completion or timeout
-            if execution_complete.wait(timeout):
-                if execution_error:
-                    raise execution_error
-
-                result = "✅ Python code executed successfully\n"
-                if stdout_result:
-                    result += f"Output:\n{stdout_result}"
-                if stderr_result:
-                    result += f"Errors:\n{stderr_result}"
-                if not stdout_result and not stderr_result:
-                    result += "No output"
-
-                return result
-            else:
-                return f"� Code execution timed out after {timeout} seconds"
-
-        except Exception as e:
-            return f"� Python execution error: {str(e)}"
-        finally:
-            # Restore output
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
-
-
-#====================================================================================================
-# Git Toolkit
-#====================================================================================================
-
-class GitTool(Toolkit):
-    """Git operations toolkit."""
-
-    def __init__(self, **kwargs):
-        super().__init__(
-            name="git_toolkit",
-            tools=[
-                self.status,
-                self.diff,
-                self.log,
-                self.branch,
-                self.commit,
-            ],
-            **kwargs
-        )
-
-    def status(self) -> str:
-        """Show git status.
-
-        Returns:
-            Git status output or clean working directory message
-        """
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-        except Exception as e:
-            return f"� Git status failed: {str(e)}"
-        if result.returncode == 0:
-            if result.stdout:
-                return f"📋 Git Status:\n{result.stdout}"
-            else:
-                return "✅ Working directory clean"
-        else:
-            return f"� Git status failed: {result.stderr}"
-
-    def diff(self, files: Optional[List[str]] = None) -> str:
-        """Show git diff.
-
-        Args:
-            files: Specific files to diff (optional)
-
-        Returns:
-            Git diff output
-        """
-        cmd = ["git", "diff"]
-        if files:
-            cmd.extend(files)
-
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        except Exception as e:
-            return f"� Git diff failed: {str(e)}"
-
-        if result.returncode == 0:
-            if result.stdout:
-                output = result.stdout
-                return f"� Git Diff:\n{output[:2000]}" + ("...\n(truncated)" if len(output) > 2000 else "")
-            else:
-                return "No changes to show"
-        else:
-            return f"� Git diff failed: {result.stderr}"
-
-    def log(self, limit: int = 10) -> str:
-        """Show git log.
-
-        Args:
-            limit: Number of log entries to show (default: 10)
-
-        Returns:
-            Git log output
-        """
-        try:
-            result = subprocess.run(
-                ["git", "log", f"--max-count={limit}", "--oneline"],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-        except Exception as e:
-            return f"� Git log failed: {str(e)}"
-
-        if result.returncode == 0:
-            return f"📜 Recent Commits:\n{result.stdout}"
-        else:
-            return f"� Git log failed: {result.stderr}"
-
-    def branch(self, branch_name: str = None) -> str:
-        """Show current branch or create new branch.
-
-        Args:
-            branch_name: Branch name to create (optional)
-
-        Returns:
-            Current branch name or branch creation result
-        """
-        try:
-            if branch_name:
-                result = subprocess.run(
-                    ["git", "checkout", "-b", branch_name],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                if result.returncode == 0:
-                    return f"✅ Created and switched to branch: {branch_name}"
-                else:
-                    return f"� Branch creation failed: {result.stderr}"
-            else:
-                result = subprocess.run(
-                    ["git", "branch", "--show-current"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                if result.returncode == 0:
-                    return f"🌿 Current branch: {result.stdout.strip()}"
-                else:
-                    return f"� Branch check failed: {result.stderr}"
-        except Exception as e:
-            return f"� Branch operation failed: {str(e)}"
-
-    def commit(self, message: str, **kwargs) -> str:
-        """Commit changes.
-
-        Args:
-            message: Commit message
-            **kwargs: Additional arguments (ignored for compatibility)
-
-        Returns:
-            Commit result
-        """
-        try:
-            result = subprocess.run(
-                ["git", "commit", "-m", message],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-        except Exception as e:
-            return f"� Commit failed: {str(e)}"
-
-        if result.returncode == 0:
-            return f"✅ Commit successful: {message}"
-        else:
-            return f"� Commit failed: {result.stderr}"
 
 
 #====================================================================================================
@@ -1005,23 +528,12 @@ class HttpTool(Toolkit):
     def __init__(self, **kwargs):
         super().__init__(
             name="http_toolkit",
-            tools=[
-                self.fetch,
-            ],
+            tools=[self.fetch],
             **kwargs
         )
 
     def fetch(self, url: str, method: str = "GET", timeout: int = 10) -> str:
-        """Fetch content from HTTP/HTTPS URLs.
-
-        Args:
-            url: URL to fetch
-            method: HTTP method - GET or HEAD (default: GET)
-            timeout: Request timeout in seconds (default: 10)
-
-        Returns:
-            HTTP response with status, headers, and content
-        """
+        """Fetch content from HTTP/HTTPS URLs."""
         # Validate URL
         if not (url.startswith("http://") or url.startswith("https://")):
             return "Error: URL must start with http:// or https://"
@@ -1041,7 +553,7 @@ class HttpTool(Toolkit):
                 else:
                     return f"Error: Unsupported HTTP method: {method} (only GET, HEAD allowed)"
 
-            result = f"� HTTP {method.upper()} {url}\n"
+            result = f"🌐 HTTP {method.upper()} {url}\n"
             result += f"Status: {response.status_code} {response.reason_phrase}\n\n"
 
             # Add key response headers
@@ -1078,8 +590,8 @@ class HttpTool(Toolkit):
             return result
 
         except httpx.TimeoutException:
-            return f"� HTTP request timed out after {timeout} seconds"
+            return f"❌ HTTP request timed out after {timeout} seconds"
         except httpx.RequestError as e:
-            return f"� HTTP request failed: {str(e)}"
+            return f"❌ HTTP request failed: {str(e)}"
         except Exception as e:
-            return f"� HTTP fetch error: {str(e)}"
+            return f"❌ HTTP fetch error: {str(e)}"

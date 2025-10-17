@@ -1010,6 +1010,7 @@ class ContextManager:
         # 1. System Prompt
         if breakdown.get('system_tokens', 0) > 0:
             components.append({
+                'id': 'system',
                 'name': 'System Prompt',
                 'tokens': breakdown['system_tokens'],
                 'type': 'system',
@@ -1021,6 +1022,7 @@ class ContextManager:
         if breakdown.get('assistant_tokens', 0) > 0:
             num_runs = getattr(self.agent, 'num_history_runs', '?')
             components.append({
+                'id': 'history',
                 'name': 'Chat History',
                 'tokens': breakdown['assistant_tokens'],
                 'type': 'history',
@@ -1032,6 +1034,7 @@ class ContextManager:
         if breakdown.get('tool_tokens', 0) > 0:
             tool_count = breakdown.get('tool_count', 0)
             components.append({
+                'id': 'tools',
                 'name': 'Tool Schemas',
                 'tokens': breakdown['tool_tokens'],
                 'type': 'tools',
@@ -1042,6 +1045,7 @@ class ContextManager:
         # 4. Current User Message
         if breakdown.get('user_tokens', 0) > 0:
             components.append({
+                'id': 'user',
                 'name': 'Current Input',
                 'tokens': breakdown['user_tokens'],
                 'type': 'user',
@@ -1052,6 +1056,7 @@ class ContextManager:
         # 5. Tool Results (if any)
         if breakdown.get('tool_result_tokens', 0) > 0:
             components.append({
+                'id': 'tool_results',
                 'name': 'Tool Results',
                 'tokens': breakdown['tool_result_tokens'],
                 'type': 'tool_results',
@@ -1075,6 +1080,164 @@ class ContextManager:
             'max_tokens': max_tokens,
             'usage_pct': (total_tokens / max_tokens * 100) if max_tokens > 0 else 0
         }
+
+    def delete_component(self, component_id: str) -> bool:
+        """
+        Delete/clear a context component.
+
+        Args:
+            component_id: Component identifier ('history', 'system', 'tools', etc.)
+
+        Returns:
+            True if component was deleted successfully, False otherwise
+        """
+        try:
+            logger.info(f"🗑️  Deleting context component: {component_id}")
+
+            if component_id == 'history':
+                # Clear conversation history
+                if hasattr(self.agent, 'agent') and hasattr(self.agent.agent, 'run_response'):
+                    # Access internal AgentRun and clear history
+                    if hasattr(self.agent.agent, 'run_response'):
+                        # Try to clear conversation history from AgentRun
+                        # This is framework-specific and may need adjustment
+                        logger.info("   Clearing conversation history...")
+                        # For now, just reduce to 0 history runs
+                        if hasattr(self.agent, 'num_history_runs'):
+                            self.agent.num_history_runs = 0
+                            logger.info("   ✓ Set num_history_runs = 0")
+                        return True
+
+            elif component_id == 'system':
+                # Clear system prompt (not recommended, but allowed)
+                if hasattr(self.agent, 'system_message'):
+                    logger.warning("   ⚠️  Clearing system prompt - agent may behave unexpectedly!")
+                    self.agent.system_message = ""
+                    return True
+
+            elif component_id == 'tools':
+                # Disable all tools
+                if hasattr(self.agent, 'agent_tools'):
+                    logger.info(f"   Disabling all {len(self.agent.agent_tools)} tools...")
+                    self.agent.agent.set_tools([])
+                    return True
+
+            elif component_id in ['tool_results', 'user']:
+                # These are transient and can't be "deleted"
+                logger.warning(f"   ⚠️  Cannot delete transient component: {component_id}")
+                return False
+
+            else:
+                logger.warning(f"   ⚠️  Unknown component: {component_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to delete component {component_id}: {e}", exc_info=True)
+            return False
+
+    def summarize_component(self, component_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Summarize/compress a context component to reduce token usage.
+
+        NOTE: This is currently stubbed with simple truncation.
+        Future: Will use LLM to intelligently summarize content.
+
+        Args:
+            component_id: Component identifier ('history', 'system', 'tools', etc.)
+
+        Returns:
+            Dict with before_tokens, after_tokens, saved_tokens, reduction_pct,
+            or None if summarization failed
+        """
+        try:
+            logger.info(f"📝 Summarizing context component: {component_id} (STUB - using truncation)")
+
+            # Get current breakdown for before/after comparison
+            breakdown = self.get_full_context_breakdown()
+            if not breakdown or not breakdown.get('components'):
+                logger.warning("   No context data available for summarization")
+                return None
+
+            # Find the component
+            component = next((c for c in breakdown['components'] if c['type'] == component_id), None)
+            if not component:
+                logger.warning(f"   Component not found: {component_id}")
+                return None
+
+            before_tokens = component['tokens']
+
+            if component_id == 'history':
+                # STUB: Reduce history depth by half
+                if hasattr(self.agent, 'num_history_runs'):
+                    original_runs = self.agent.num_history_runs
+                    new_runs = max(1, original_runs // 2)
+                    self.agent.num_history_runs = new_runs
+
+                    # Estimate token savings (rough)
+                    estimated_after = before_tokens // 2
+                    saved_tokens = before_tokens - estimated_after
+
+                    logger.info(f"   ✓ Reduced history: {original_runs} → {new_runs} runs")
+                    logger.info(f"   ⚠️  STUB: Using simple reduction, not LLM summarization")
+
+                    return {
+                        'before_tokens': before_tokens,
+                        'after_tokens': estimated_after,
+                        'saved_tokens': saved_tokens,
+                        'reduction_pct': (saved_tokens / before_tokens * 100) if before_tokens > 0 else 0
+                    }
+
+            elif component_id == 'system':
+                # STUB: Truncate system prompt
+                if hasattr(self.agent, 'system_message'):
+                    original = self.agent.system_message
+                    truncated = original[:len(original)//2] + "\n\n[...truncated for context management...]"
+                    self.agent.system_message = truncated
+
+                    logger.warning("   ⚠️  STUB: Truncated system prompt - may affect behavior!")
+                    logger.warning("   ⚠️  Future: Will use LLM to intelligently summarize")
+
+                    # Rough estimate
+                    estimated_after = before_tokens // 2
+                    saved_tokens = before_tokens - estimated_after
+
+                    return {
+                        'before_tokens': before_tokens,
+                        'after_tokens': estimated_after,
+                        'saved_tokens': saved_tokens,
+                        'reduction_pct': (saved_tokens / before_tokens * 100) if before_tokens > 0 else 0
+                    }
+
+            elif component_id == 'tools':
+                # STUB: Disable half of the tools (largest first)
+                toolkits = self.get_toolkit_breakdown()
+                if toolkits:
+                    # Disable the largest half
+                    to_disable = toolkits[:len(toolkits)//2]
+                    disable_names = [t['name'] for t in to_disable]
+                    self.disable_tools(disable_names)
+
+                    # Estimate savings
+                    estimated_after = before_tokens // 2
+                    saved_tokens = before_tokens - estimated_after
+
+                    logger.info(f"   ✓ Disabled {len(disable_names)} tools")
+                    logger.warning("   ⚠️  STUB: Disabled tools, not summarized")
+
+                    return {
+                        'before_tokens': before_tokens,
+                        'after_tokens': estimated_after,
+                        'saved_tokens': saved_tokens,
+                        'reduction_pct': (saved_tokens / before_tokens * 100) if before_tokens > 0 else 0
+                    }
+
+            else:
+                logger.warning(f"   Cannot summarize component: {component_id}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to summarize component {component_id}: {e}", exc_info=True)
+            return None
 
 
 # Convenience functions for CLI integration

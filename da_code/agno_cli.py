@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+import shlex
 import sys
 import time
 import subprocess
@@ -163,51 +164,55 @@ def build_agent_context(
         # Clear pasted content after using it
         pasted_storage.clear()
 
-    # Add search results ONLY if placeholder still exists in user_input
+    # Add search results automatically (grep/glob results from previous commands)
     if search_storage:
+        logger.warning(f"🔍 build_agent_context: search_storage has {len(search_storage)} items: {list(search_storage.keys())}")
+        logger.warning(f"🔍 build_agent_context: user_input = {user_input[:200]}")
+
         search_sections = []
         for placeholder, search_data in search_storage.items():
-            if placeholder in user_input:
-                search_term = search_data.get('term', 'unknown')
-                files_dict = search_data.get('files', {})
+            logger.warning(f"🔍 Auto-injecting search results from: '{placeholder}'")
 
-                # Build formatted output with line numbers and sample matches
-                file_lines = []
-                show_sample_lines = len(files_dict) <= 10
+            search_term = search_data.get('term', 'unknown')
+            files_dict = search_data.get('files', {})
 
-                for file_path, match_data in sorted(files_dict.items())[:20]:  # Limit to 20 files
-                    line_numbers = match_data['line_numbers']
-                    matches = match_data.get('matches', [])
+            # Build formatted output with line numbers and sample matches
+            file_lines = []
+            show_sample_lines = len(files_dict) <= 10
 
-                    # Show line number range for better readability
-                    show_line_number_matches = 12
-                    if len(line_numbers) <= show_line_number_matches:
-                        line_nums_str = ', '.join(map(str, line_numbers))
-                    else:
-                        line_nums_str = f"{line_numbers[0]}-{line_numbers[show_line_number_matches-1]}, ... ({len(line_numbers)} total)"
+            for file_path, match_data in sorted(files_dict.items())[:20]:  # Limit to 20 files
+                line_numbers = match_data['line_numbers']
+                matches = match_data.get('matches', [])
 
-                    file_line = f"  • {file_path}: lines {line_nums_str}"
+                # Show line number range for better readability
+                show_line_number_matches = 12
+                if len(line_numbers) <= show_line_number_matches:
+                    line_nums_str = ', '.join(map(str, line_numbers))
+                else:
+                    line_nums_str = f"{line_numbers[0]}-{line_numbers[show_line_number_matches-1]}, ... ({len(line_numbers)} total)"
 
-                    # Optionally show sample matching lines (first 5)
-                    show_line_matches = 5
-                    if show_sample_lines and matches:
-                        for match in matches[:show_line_matches]:
-                            file_line += f"\n      L{match['line_num']}: {match['content']}"
-                        if len(matches) > show_line_matches:
-                            file_line += f"\n      ... {len(matches) - show_line_matches} more matches"
+                file_line = f"  • {file_path}: lines {line_nums_str}"
 
-                    file_lines.append(file_line)
+                # Optionally show sample matching lines (first 5)
+                show_line_matches = 5
+                if show_sample_lines and matches:
+                    for match in matches[:show_line_matches]:
+                        file_line += f"\n      L{match['line_num']}: {match['content']}"
+                    if len(matches) > show_line_matches:
+                        file_line += f"\n      ... {len(matches) - show_line_matches} more matches"
 
-                more_files = len(files_dict) - 20 if len(files_dict) > 20 else 0
-                more_str = f"\n  ... and {more_files} more files" if more_files > 0 else ""
+                file_lines.append(file_line)
 
-                search_section = f"Content search for '{search_term}' found {len(files_dict)} file{'s' if len(files_dict) != 1 else ''}:\n" + "\n".join(file_lines) + more_str
-                search_sections.append(search_section)
+            more_files = len(files_dict) - 20 if len(files_dict) > 20 else 0
+            more_str = f"\n  ... and {more_files} more files" if more_files > 0 else ""
+
+            search_section = f"Content search for '{search_term}' found {len(files_dict)} file{'s' if len(files_dict) != 1 else ''}:\n" + "\n".join(file_lines) + more_str
+            search_sections.append(search_section)
 
         if search_sections:
             search_str = "\n\n".join(search_sections)
             context_parts.append(search_str)
-            logger.warning(f"Search content used: {search_str}")
+            logger.warning(f"✅ Search content injected: {len(search_sections)} result(s)")
 
         # Clear search content after using it
         search_storage.clear()
@@ -356,8 +361,20 @@ async def async_main(session_id: str = None):
             if len(agent.mcp_servers) > 0:
                 mcp_servers = f"\n✨ MCP Servers ([green]{'[/green]/[green]'.join([v.name for v in agent.mcp_servers])}[/green])"
 
-            # Combined status line
-            status_interface.stop_execution(True, f"🤖 {deployment_name} | 🤔 {reasoning_deployment} | 💾 {memory_status} | 📡 {mongo_status_str}{mcp_servers}")
+            # Count total tools by summing functions in each toolkit
+            function_count = 0
+            for toolkit in agent.agent_tools:
+                try:
+                    # Each Toolkit has a 'tools' attribute with list of functions
+                    if hasattr(toolkit, 'tools'):
+                        function_count += len(toolkit.tools)
+                    else:
+                        function_count += 1  # Fallback for non-toolkit tools
+                except Exception:
+                    function_count += 1
+
+            # Combined status line with tool count
+            status_interface.stop_execution(True, f"🤖 {deployment_name} | 🤔 {reasoning_deployment} | 💾 {memory_status} | 📡 {mongo_status_str} | 🔧 {function_count} tools{mcp_servers}")
 
     # Set up history files
     agent_history = FileHistory(agent.config.history_file_path)
@@ -712,6 +729,22 @@ async def async_main(session_id: str = None):
         except Exception as e:
             logger.error(f"Context overlay failed: {e}", exc_info=True)
             console.print(f"\n[red]Context overlay error: {e}[/red]")
+
+    @bindings.add('~')  # '~' - Context management (delete/summarize)
+    def _(event):
+        """Manage context components - delete or summarize to free tokens."""
+        try:
+            from .context_manager_ui import show_context_manager
+            import asyncio
+
+            console.print()
+
+            # Schedule the async function as a task in the running event loop
+            asyncio.create_task(show_context_manager(agent, console))
+
+        except Exception as e:
+            logger.error(f"Context manager failed: {e}", exc_info=True)
+            console.print(f"\n[red]Context manager error: {e}[/red]\n")
 
     # Voice server URL (CLI feature, not agent tool)
     voice_server_url = [None]  # Mutable for inner function access
@@ -1206,47 +1239,44 @@ async def async_main(session_id: str = None):
                     console.print(f"[cyan]  da_code --session {str(code_session.id)}[/cyan]")
                     console.print()
                     break
+
                 elif user_input.lower() == 'help':
                     console.print("[bold]Available commands:[/bold]")
-                    console.print("  • help - Show this help message")
-                    console.print("  • setup - Create configuration files")
-                    console.print("  • status - Show current configuration status")
-                    console.print("  • add_mcp <url> [name] - Add MCP server dynamically")
-                    console.print("  • add_voice <url> - Configure voice server (CLI feature)")
-                    console.print("  • restore - Revert ALL file changes since session start")
-                    console.print("  • exit/quit/q - Exit the application")
+                    console.print("  • [cyan]help[/cyan] - Show this help message")
+                    console.print("  • [cyan]help glob[/cyan] - Show glob command how-to")
+                    console.print("  • [cyan]help grep[/cyan] - Show grep command how-to")
+                    console.print("  • [cyan]setup[/cyan] - Create configuration files")
+                    console.print("  • [cyan]status[/cyan] - Show current configuration status")
+                    console.print("  • [cyan]glob <pattern>[/cyan] - Find files matching pattern (results sent to next prompt)")
+                    console.print("  • [cyan]grep <pattern>[/cyan] - Search file contents (results sent to next prompt)")
+                    console.print("  • [cyan]restore[/cyan] - Revert ALL file changes since session start")
+                    console.print("  • [cyan]exit/quit/q[/cyan] - Exit the application")
                     console.print("\n[bold]Agent Control:[/bold]")
                     console.print("  • [cyan]Escape[/cyan] - Cancel running agent execution 🛑")
-                    console.print("  • [cyan]restore[/cyan] - Undo all session changes (requires confirmation) ↩️")
                     console.print("\n[bold]Voice Input:[/bold]")
                     console.print("  • [cyan]Alt+V[/cyan] - Start streaming voice recording with live transcript 🎤")
                     console.print("  • [cyan]Space[/cyan] - Stop recording (or auto-stops on silence)")
-                    console.print("    Records up to 25s, transcribes in real-time chunks")
-                    console.print("    Requires achat server running on local machine")
-                    console.print("    Setup: Run [cyan]achat[/cyan] locally, then [cyan]add_voice http://localhost:8765[/cyan]")
                     console.print("\n[bold]Agent Mode - Left-hand Ergonomic Triggers:[/bold]")
                     console.print("  • [cyan]![/cyan] - AI nudge phrases: '!be<Tab>' → 'be careful and check your work' 💡")
                     console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁")
-                    console.print("  • [cyan]@@[/cyan] - Fuzzy filename: '@@auth<Tab>' → all files with 'auth' in name 📁")
-                    console.print("  • [cyan]~[/cyan] - Content search: '~async def<Tab>' → files containing 'async def' 🔍")
                     console.print("  • [cyan]#[/cyan] - Context window breakdown (Shift+3) - Shows actual LLM token usage 📊")
                     console.print("  • [cyan]$[/cyan] - Toggle shell mode (Shift+4)")
+                    console.print("  • [cyan]~[/cyan] - Context manager - Delete or summarize components to free tokens 🗑️")
                     console.print("\n[bold]Clipboard:[/bold]")
                     console.print("  • [cyan]Ctrl+V or terminal paste[/cyan] - Paste shows '[[paste#N: X lines]]' placeholder, actual content sent to agent")
-                    console.print("  • Delete placeholder to exclude that paste from context")
-                    console.print("\n[bold]Shell Mode:[/bold]")
-                    console.print("  • Type [cyan]shell[/cyan] or press [cyan]$[/cyan] to toggle between modes")
-                    console.print("  • In shell mode, commands are executed directly")
-                    console.print("  • [cyan]Tab[/cyan] completion for commands and file paths")
-                    console.print("  • Shell output is automatically included in next agent prompt")
+                    console.print("\n[bold]Tip:[/bold] Use [cyan]glob[/cyan] and [cyan]grep[/cyan] to prepare context, then ask agent about results!")
+ 
                 elif user_input.lower() == 'setup':
                     create_example_configuration(config_mgr=ConfigManager(), context_ldr=ContextLoader())
                     console.print("[green]Edit files and reload to update agent context[/green]")
+
                 elif user_input.lower() == 'status':
                     show_status(config_mgr=ConfigManager(), context_ldr=ContextLoader())
+
                 elif user_input.lower() == 'shell':
                     shell_manager.toggle_shell_mode()
                     continue
+
                 elif user_input.lower().startswith('restore'):
                     # Check if it's a file-specific restore or full session restore
                     if len(user_input.strip()) > len('restore') and user_input[7:].strip():
@@ -1533,6 +1563,7 @@ async def async_main(session_id: str = None):
                             console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
                             logger.error(f"Restore error: {e}", exc_info=True)
                         continue
+
                 elif user_input.startswith('add_mcp '):
                     # Handle dynamic MCP server addition
                     try:
@@ -1568,6 +1599,7 @@ async def async_main(session_id: str = None):
                         console.print(f"[red]❌ Error adding MCP server: {str(e)}[/red]")
                         logger.error(f"MCP addition error: {e}")
                     continue
+                
                 elif user_input.startswith('add_voice '):
                     # Handle voice server configuration (CLI feature, not agent tool)
                     try:
@@ -1612,6 +1644,209 @@ async def async_main(session_id: str = None):
                         console.print(f"[red]❌ Error configuring voice server: {str(e)}[/red]")
                         logger.error(f"Voice configuration error: {e}")
                     continue
+
+
+
+                elif user_input.lower().startswith('help glob'):
+                    console.print("\n[bold cyan]📁 GLOB Command - Find Files by Pattern[/bold cyan]\n")
+                    console.print("[bold]Usage:[/bold]")
+                    console.print("  [cyan]glob <pattern>[/cyan]\n")
+                    console.print("[bold]Examples:[/bold]")
+                    console.print("  [cyan]glob *.py[/cyan]           - All Python files in current dir")
+                    console.print("  [cyan]glob **/*.py[/cyan]        - All Python files recursively")
+                    console.print("  [cyan]glob src/**/*.ts[/cyan]    - All TypeScript files in src/")
+                    console.print("  [cyan]glob **/test_*.py[/cyan]   - All test files\n")
+                    console.print("[bold]How it works:[/bold]")
+                    console.print("  1. Runs the search immediately")
+                    console.print("  2. Shows you the results")
+                    console.print("  3. Results are automatically added to your NEXT agent prompt\n")
+                    console.print("[bold]Workflow:[/bold]")
+                    console.print("  [cyan]glob **/*.py[/cyan]")
+                    console.print("  📁 Found 42 files...")
+                    console.print("  [cyan]refactor all these files to use async[/cyan]  ← Results included!\n")
+
+                elif user_input.lower().startswith('help grep'):
+                    console.print("\n[bold cyan]🔍 GREP Command - Search File Contents[/bold cyan]\n")
+                    console.print("[bold]Usage:[/bold]")
+                    console.print("  [cyan]grep <pattern> [options][/cyan]\n")
+                    console.print("[bold]Examples:[/bold]")
+                    console.print("  [cyan]grep 'async def'[/cyan]           - Find async function definitions")
+                    console.print("  [cyan]grep TODO[/cyan]                  - Find all TODO comments")
+                    console.print("  [cyan]grep 'class.*Test'[/cyan]         - Find test classes (regex)\n")
+                    console.print("[bold]How it works:[/bold]")
+                    console.print("  1. Searches file contents for the pattern")
+                    console.print("  2. Shows matching files with line numbers")
+                    console.print("  3. Results automatically added to NEXT agent prompt\n")
+                    console.print("[bold]Workflow:[/bold]")
+                    console.print("  [cyan]grep 'async def'[/cyan]")
+                    console.print("  🔍 Found 12 matches in 5 files...")
+                    console.print("  [cyan]document all these async functions[/cyan]  ← Results included!\n")
+                    console.print("[bold]Tip:[/bold] Results respect .daignore - ignored files are skipped")
+
+                elif user_input.lower().startswith('glob '):
+                    # Extract pattern
+                    pattern = user_input[5:].strip()
+                    if not pattern:
+                        console.print("[red]Usage: glob <pattern>[/red]")
+                        console.print("[dim]Example: glob **/*.py[/dim]")
+                        continue
+
+                    # Strip shell-style quotes (single or double) for consistency
+                    try:
+                        pattern = shlex.split(pattern)[0] if pattern else ""
+                    except (ValueError, IndexError):
+                        if pattern and len(pattern) >= 2 and pattern[0] in ('"', "'") and pattern[-1] == pattern[0]:
+                            pattern = pattern[1:-1]
+
+                    try:
+                        # Use agent's FileTool
+                        import json
+                        file_tool = None
+                        for toolkit in agent.agent_tools:
+                            if hasattr(toolkit, 'name') and toolkit.name == 'file_tool':
+                                file_tool = toolkit
+                                break
+
+                        if not file_tool:
+                            console.print("[red]FileTool not available[/red]")
+                            continue
+
+                        # Call glob_files
+                        result_json = file_tool.glob_files(pattern=pattern)
+                        result = json.loads(result_json)
+
+                        if 'error' in result:
+                            console.print(f"[red]❌ {result['error']}[/red]")
+                            continue
+
+                        files = result.get('files', [])
+                        matches = result.get('matches', 0)
+
+                        if matches == 0:
+                            console.print(f"[yellow]No files found matching '{pattern}'[/yellow]")
+                            continue
+
+                        # Show results
+                        console.print(f"\n[bold cyan]📁 Found {matches} file{'s' if matches != 1 else ''} matching '{pattern}':[/bold cyan]")
+                        for i, file_path in enumerate(files[:20], 1):
+                            console.print(f"  {i}. {file_path}")
+
+                        if matches > 20:
+                            console.print(f"  [dim]... and {matches - 20} more[/dim]")
+
+                        console.print(f"\n[green]✓ Results will be included in your next agent prompt[/green]")
+
+                        # Store results in search_content_storage for next prompt
+                        placeholder = f"[[glob:{pattern}]]"
+                        search_content_storage[placeholder] = {
+                            'term': pattern,
+                            'files': {f: {'line_numbers': [], 'matches': []} for f in files}  # Glob doesn't have line matches
+                        }
+                        logger.warning(f"📦 STORED glob results: placeholder='{placeholder}', {len(files)} files")
+                        logger.warning(f"📦 search_content_storage keys: {list(search_content_storage.keys())}")
+
+                    except Exception as e:
+                        console.print(f"[red]❌ Glob error: {str(e)}[/red]")
+                        logger.error(f"Glob command error: {e}", exc_info=True)
+                    continue
+
+                elif user_input.lower().startswith('grep '):
+                    # Extract pattern
+                    pattern = user_input[5:].strip()
+                    if not pattern:
+                        console.print("[red]Usage: grep <pattern>[/red]")
+                        console.print("[dim]Example: grep 'async def'[/dim]")
+                        continue
+
+                    # Strip shell-style quotes (single or double)
+                    try:
+                        # shlex.split handles quote stripping like a shell
+                        pattern = shlex.split(pattern)[0] if pattern else ""
+                    except (ValueError, IndexError):
+                        # If shlex fails (unclosed quotes), just strip outer quotes manually
+                        if pattern and len(pattern) >= 2 and pattern[0] in ('"', "'") and pattern[-1] == pattern[0]:
+                            pattern = pattern[1:-1]
+
+                    try:
+                        # Use agent's FileTool
+                        import json
+                        file_tool = None
+                        for toolkit in agent.agent_tools:
+                            if hasattr(toolkit, 'name') and toolkit.name == 'file_tool':
+                                file_tool = toolkit
+                                break
+
+                        if not file_tool:
+                            console.print("[red]FileTool not available[/red]")
+                            continue
+
+                        # Call grep_content
+                        result_json = file_tool.grep_content(pattern=pattern, context_lines=0, max_results=100)
+                        result = json.loads(result_json)
+
+                        if 'error' in result:
+                            console.print(f"[red]❌ {result['error']}[/red]")
+                            continue
+
+                        results_list = result.get('results', [])
+                        matches = result.get('matches', 0)
+                        files_searched = result.get('files_searched', 0)
+
+                        if matches == 0:
+                            console.print(f"[yellow]No matches found for '{pattern}' (searched {files_searched} files)[/yellow]")
+                            continue
+
+                        # Group by file
+                        files_dict = {}
+                        for match in results_list:
+                            file_path = match['file']
+                            if file_path not in files_dict:
+                                files_dict[file_path] = {'line_numbers': [], 'matches': []}
+                            files_dict[file_path]['line_numbers'].append(match['line'])
+                            files_dict[file_path]['matches'].append({
+                                'line_num': match['line'],
+                                'content': match['content']
+                            })
+
+                        # Show results
+                        console.print(f"\n[bold cyan]🔍 Found {matches} match{'es' if matches != 1 else ''} for '{pattern}' in {len(files_dict)} file{'s' if len(files_dict) != 1 else ''}:[/bold cyan]")
+                        for file_path, match_data in list(files_dict.items())[:10]:
+                            line_nums = match_data['line_numbers']
+                            if len(line_nums) <= 5:
+                                line_str = ', '.join(map(str, line_nums))
+                            else:
+                                line_str = f"{line_nums[0]}-{line_nums[-1]} ({len(line_nums)} matches)"
+                            console.print(f"  • {file_path}: lines {line_str}")
+
+                            # Show first match as preview
+                            if match_data['matches']:
+                                first_match = match_data['matches'][0]
+                                preview = first_match['content'][:80]
+                                if len(first_match['content']) > 80:
+                                    preview += "..."
+                                console.print(f"    [dim]L{first_match['line_num']}: {preview}[/dim]")
+
+                        if len(files_dict) > 10:
+                            console.print(f"  [dim]... and {len(files_dict) - 10} more files[/dim]")
+
+                        console.print(f"\n[green]✓ Results will be included in your next agent prompt[/green]")
+
+                        # Store results for next prompt
+                        placeholder = f"[[grep:{pattern}]]"
+                        search_content_storage[placeholder] = {
+                            'term': pattern,
+                            'files': files_dict
+                        }
+                        logger.warning(f"📦 STORED grep results: placeholder='{placeholder}', {len(files_dict)} files, {matches} matches")
+                        logger.warning(f"📦 search_content_storage keys: {list(search_content_storage.keys())}")
+
+                    except Exception as e:
+                        console.print(f"[red]❌ Grep error: {str(e)}[/red]")
+                        logger.error(f"Grep command error: {e}", exc_info=True)
+                    continue
+
+
+
                 elif user_input.strip() == '':
                     continue
                 elif shell_manager.is_shell_mode:
@@ -1668,7 +1903,8 @@ async def async_main(session_id: str = None):
                             logger.debug(f"Token estimation failed: {e}")
 
                         # Use random thinking phrase
-                        status_interface.start_execution(get_random_thinking_phrase())
+                        thinking_str = get_random_thinking_phrase()
+                        status_interface.start_execution(f"{thinking_str}")
                         output_message = ""
                         logger.info(f"Input Context : {enhanced_input}")
                         running_agent = tg.create_task(

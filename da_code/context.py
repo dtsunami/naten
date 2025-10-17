@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import time
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -852,52 +851,6 @@ The agent receives these as project-specific instructions along with default too
             print("💡 Edit this file to provide context and instructions for the AI agent")
         except Exception as e:
             logger.error(f"Failed to create sample AGENTS.md: {e}")
-
-
-#====================================================================================================
-# MCP Server Health Check and Tool Discovery, TODO: should these be deleted?
-#====================================================================================================
-
-
-async def check_mcp_server_health(server: MCPServerInfo) -> bool:
-    """Check if an MCP server is healthy and responsive."""
-    try:
-        import aiohttp
-
-        async with aiohttp.ClientSession() as session:
-            health_url = f"{server.url.rstrip('/')}/health"
-            async with session.get(health_url, timeout=5) as response:
-                return response.status == 200
-
-    except Exception as e:
-        logger.error(f"Health check failed for {server.name}: {e}")
-        return False
-
-
-async def discover_mcp_tools(server: MCPServerInfo) -> List[str]:
-    """Discover available tools from an MCP server."""
-    try:
-        import aiohttp
-
-        async with aiohttp.ClientSession() as session:
-            tools_url = f"{server.url.rstrip('/')}/mcp"
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/list"
-            }
-
-            async with session.post(tools_url, json=payload, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    result = data.get('result', {})
-                    tools = result.get('tools', [])
-                    return [tool.get('name', '') for tool in tools if tool.get('name')]
-
-    except Exception as e:
-        logger.error(f"Tool discovery failed for {server.name}: {e}")
-
-    return []
 
 
 #====================================================================================================

@@ -445,3 +445,162 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Status**: ✅ Production Ready | **Last Updated**: 2025-09-25 | **Version**: v2.0
+
+
+```python
+
+#====================================================================================================
+# Git Toolkit
+#====================================================================================================
+
+class GitTool(Toolkit):
+    """Git operations toolkit."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="git_toolkit",
+            tools=[
+                self.status,
+                self.diff,
+                self.log,
+                self.branch,
+                self.commit,
+            ],
+            **kwargs
+        )
+
+    def status(self) -> str:
+        """Show git status.
+
+        Returns:
+            Git status output or clean working directory message
+        """
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            return f"� Git status failed: {str(e)}"
+        if result.returncode == 0:
+            if result.stdout:
+                return f"📋 Git Status:\n{result.stdout}"
+            else:
+                return "✅ Working directory clean"
+        else:
+            return f"� Git status failed: {result.stderr}"
+
+    def diff(self, files: Optional[List[str]] = None) -> str:
+        """Show git diff.
+
+        Args:
+            files: Specific files to diff (optional)
+
+        Returns:
+            Git diff output
+        """
+        cmd = ["git", "diff"]
+        if files:
+            cmd.extend(files)
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            return f"� Git diff failed: {str(e)}"
+
+        if result.returncode == 0:
+            if result.stdout:
+                output = result.stdout
+                return f"� Git Diff:\n{output[:2000]}" + ("...\n(truncated)" if len(output) > 2000 else "")
+            else:
+                return "No changes to show"
+        else:
+            return f"� Git diff failed: {result.stderr}"
+
+    def log(self, limit: int = 10) -> str:
+        """Show git log.
+
+        Args:
+            limit: Number of log entries to show (default: 10)
+
+        Returns:
+            Git log output
+        """
+        try:
+            result = subprocess.run(
+                ["git", "log", f"--max-count={limit}", "--oneline"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            return f"� Git log failed: {str(e)}"
+
+        if result.returncode == 0:
+            return f"📜 Recent Commits:\n{result.stdout}"
+        else:
+            return f"� Git log failed: {result.stderr}"
+
+    def branch(self, branch_name: str = None) -> str:
+        """Show current branch or create new branch.
+
+        Args:
+            branch_name: Branch name to create (optional)
+
+        Returns:
+            Current branch name or branch creation result
+        """
+        try:
+            if branch_name:
+                result = subprocess.run(
+                    ["git", "checkout", "-b", branch_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    return f"✅ Created and switched to branch: {branch_name}"
+                else:
+                    return f"� Branch creation failed: {result.stderr}"
+            else:
+                result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    return f"🌿 Current branch: {result.stdout.strip()}"
+                else:
+                    return f"� Branch check failed: {result.stderr}"
+        except Exception as e:
+            return f"� Branch operation failed: {str(e)}"
+
+    def commit(self, message: str, **kwargs) -> str:
+        """Commit changes.
+
+        Args:
+            message: Commit message
+            **kwargs: Additional arguments (ignored for compatibility)
+
+        Returns:
+            Commit result
+        """
+        try:
+            result = subprocess.run(
+                ["git", "commit", "-m", message],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            return f"� Commit failed: {str(e)}"
+
+        if result.returncode == 0:
+            return f"✅ Commit successful: {message}"
+        else:
+            return f"� Commit failed: {result.stderr}"
+
+```

@@ -20,8 +20,6 @@ from agno.tools.reasoning import ReasoningTools
 from agno.tools.duckduckgo import DuckDuckGoTools
 # Agno MCPTools removed - will implement custom MCP solution
 
-#from agno.tools.duckduckgo import DuckDuckGoTools
-
 import logging
 logger = logging.getLogger(__name__)
 
@@ -39,8 +37,7 @@ from .context import ContextLoader
 from .execution_events import ExecutionEvent, EventType, ConfirmationResponse
 from .telemetry import TelemetryManager, PerformanceTracker
 from .agno_tools import (
-    TodoTool, CommandTool, WebSearchTool, FileTool,
-    TimeTool, PythonTool, GitTool, HttpTool
+    TodoTool, CommandTool, FileTool, HttpTool
 )
 from .mcp_tool import mcp2tool
 from .context_telemetry import ModelStatsTracker, wrap_model_with_interceptor
@@ -50,19 +47,7 @@ agno_agent_tools = [
     CommandTool(),
     FileTool(),
     HttpTool(),
-    #WebSearchTool(),
-    #TimeTool(),
-    #PythonTool(),
-    #GitTool(),
 ]
-
-# TODO: delete or add to tools
-ReasoningTools(
-        enable_think=True,
-        enable_analyze=True,
-        add_instructions=True,
-        add_few_shot=True,
-),
 
 class AgnoAgent():
     """Agno agent with correct async HIL pattern."""
@@ -160,21 +145,7 @@ class AgnoAgent():
         self.system_message = self._build_system_prompt()
         logging.warning(f"🔧 Agent: system_mesage\n\n{self.system_message}\n\n")
 
-        # 1. Configure the Azure OpenAI model
-        
-
-        
-        #SSL_CA_CERTS = "/etc/ca-certificates"
-        #self.http =  httpx.AsyncClient(verify=SSL_CA_CERTS)
-        # Agno uses the AzureOpenAI class to interface with Azure's service
-        #self.llm = AzureAIFoundry(
         logging.info(f"Deployment Name {self.config.deployment_name}")
-        #self.respllm = OpenAIResponses(
-        #    provider="azure",
-        #    id=self.config.deployment_name,
-        #    base_url=self.config.azure_endpoint,
-        #    api_key=self.config.api_key,
-        #)
 
         # Create central tracker for all models
         self.model_stats_tracker = ModelStatsTracker()
@@ -183,14 +154,12 @@ class AgnoAgent():
         # Create base model
         base_llm = AzureOpenAI(
             id=self.config.deployment_name,
-            #id="gpt-5-mini",
             api_key=self.config.api_key,
             api_version=self.config.api_version,
             azure_endpoint=self.config.azure_endpoint,
             max_tokens=self.config.max_tokens,
             timeout=self.config.agent_timeout,
             max_retries=self.config.max_retries,
-            #http_client=self.http,
         )
 
         # Wrap model with interceptor to log messages sent to LLM
@@ -258,8 +227,6 @@ class AgnoAgent():
             add_history_to_context=True,
             num_history_runs=5,
             add_datetime_to_context=True,
-            #read_chat_history=True,
-            #read_tool_call_history=True,
             tools=self.agent_tools,
             debug_mode=False, # Display the agent's thought process
         )
@@ -413,5 +380,4 @@ def main():
 
 
 if __name__ == '__main__':
-    #main()
     pass

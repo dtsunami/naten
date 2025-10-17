@@ -1,2 +1,2 @@
 initial content
-replaced line2
+was replaced line2

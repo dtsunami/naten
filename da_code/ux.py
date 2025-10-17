@@ -63,6 +63,7 @@ class SimpleStatusInterface:
     def __init__(self):
         self.start_time = None
         self.current_status = None
+        self._timer_task = None
         self.llm_calls = 0
         self.tool_calls = 0
         self.total_tokens = 0
@@ -74,7 +75,7 @@ class SimpleStatusInterface:
         self.current_spinner = get_random_spinner()
 
     def start_execution(self, message: str):
-        """Start execution with status message."""
+        """Start execution with status message and start background timer for updates."""
         self.start_time = time.time()
         self.llm_calls = 0
         self.tool_calls = 0
@@ -86,6 +87,47 @@ class SimpleStatusInterface:
         self.current_spinner = get_random_spinner()
         self.current_status = Status(f"🤖 {message}", spinner=self.current_spinner)
         self.current_status.start()
+
+        # Start a lightweight background timer task that periodically refreshes the status text.
+        # We keep it synchronous-friendly by using threading.Timer so it works both in sync and
+        # asyncio contexts where the event loop may not be running.
+        try:
+            import threading
+
+            # Cancel any previous timer
+            if getattr(self, '_timer_task', None):
+                try:
+                    self._timer_task.cancel()
+                except Exception:
+                    pass
+
+            def _tick():
+                try:
+                    # Only update if status is still active
+                    if self.current_status:
+                        # Compute a short status label without heavy formatting
+                        elapsed = time.time() - self.start_time if self.start_time else 0
+                        status_text = f"🤖 {message} | {elapsed:.1f}s"
+                        if self.llm_calls > 0:
+                            status_text += f" | 🧠 {self.llm_calls}"
+                        if self.tool_calls > 0:
+                            status_text += f" | 🔧 {self.tool_calls}"
+                        self.current_status.update(status_text)
+                        # Schedule next tick
+                        self._timer_task = threading.Timer(0.8, _tick)
+                        self._timer_task.daemon = True
+                        self._timer_task.start()
+                except Exception as e:
+                    import logging
+                    logging.debug(f"Timer tick failed: {e}")
+
+            # Start the first tick
+            self._timer_task = threading.Timer(0.8, _tick)
+            self._timer_task.daemon = True
+            self._timer_task.start()
+        except Exception:
+            # If threading isn't available for some reason, silently skip the timer.
+            pass
 
     def update_status(self, message: str):
         """Update the current status message."""
@@ -131,8 +173,20 @@ class SimpleStatusInterface:
 
     def stop_execution(self, success: bool = True, final_message: str = None, silent: bool = False):
         """Stop execution and show final result."""
+        # Cancel any background timer task we started
+        if getattr(self, '_timer_task', None):
+            try:
+                self._timer_task.cancel()
+            except Exception:
+                pass
+            finally:
+                self._timer_task = None
+
         if self.current_status:
-            self.current_status.stop()
+            try:
+                self.current_status.stop()
+            except Exception:
+                pass
 
         if not silent:
             elapsed = time.time() - self.start_time if self.start_time else 0
