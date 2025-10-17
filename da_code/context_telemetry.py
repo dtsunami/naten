@@ -635,7 +635,10 @@ class ModelInterceptor:
             'id', 'name', 'provider', 'metrics',  # Common model attributes
             'api_key', 'api_version', 'azure_endpoint', 'base_url', 'azure_deployment',  # Config attributes
             'max_tokens', 'timeout', 'max_retries',  # Model config
-            'reasoning_effort', 'temperature', 'top_p', 'frequency_penalty', 'presence_penalty'  # LLM parameters
+            'reasoning_effort', 'temperature', 'top_p', 'frequency_penalty', 'presence_penalty',  # LLM parameters
+            # Agno framework internal methods (don't need interception)
+            'get_function_call_to_run_from_tool_execution', 'arun_function_calls',
+            'run_function_calls', 'get_function_call', 'parse_function_call', 'create_function_call_result'
         }
 
         if name not in known_safe:
@@ -931,6 +934,147 @@ class ContextManager:
         """
         func_counts = self.count_tool_functions()
         return sum(func_counts.values()) * 2000
+
+    def get_toolkit_breakdown(self) -> List[Dict[str, Any]]:
+        """
+        Get detailed breakdown of tokens per toolkit.
+
+        Returns:
+            List of dicts with toolkit stats, sorted by token usage (descending)
+        """
+        from .token_estimator import TokenEstimator
+
+        if not hasattr(self.agent, 'agent_tools'):
+            return []
+
+        estimator = TokenEstimator()
+        toolkits = []
+
+        for tool in self.agent.agent_tools:
+            tool_name = getattr(tool, 'name', tool.__class__.__name__)
+
+            # Get function count
+            if hasattr(tool, 'functions'):
+                func_count = len(tool.functions)
+            else:
+                func_count = 1
+
+            # Estimate tokens for this toolkit
+            estimated_tokens = estimator.estimate_tool_from_toolkit(tool)
+
+            toolkits.append({
+                'name': tool_name,
+                'functions': func_count,
+                'estimated_tokens': estimated_tokens,
+                'toolkit': tool  # Store reference for enable/disable
+            })
+
+        # Sort by token usage (descending)
+        toolkits.sort(key=lambda x: x['estimated_tokens'], reverse=True)
+
+        return toolkits
+
+    def get_full_context_breakdown(self) -> Dict[str, Any]:
+        """
+        Get complete breakdown of ALL context components (not just tools).
+
+        This provides a Pareto-style view of what's consuming context tokens,
+        suitable for interactive management and optimization.
+
+        Returns:
+            Dict with:
+                - components: List of dicts with name, tokens, percentage, type, actions
+                - total_tokens: Total actual tokens from last call
+                - max_tokens: Maximum context window
+        """
+        from .token_estimator import TokenEstimator
+
+        estimator = TokenEstimator()
+        components = []
+        max_tokens = 128000
+
+        # Get actual stats if available
+        stats = get_interceptor_stats(self.agent)
+        breakdown = stats.last_breakdown if stats and stats.last_breakdown else None
+
+        # If no actual data, return empty
+        if not breakdown:
+            return {
+                'components': [],
+                'total_tokens': 0,
+                'max_tokens': max_tokens,
+                'usage_pct': 0
+            }
+
+        # Use ACTUAL tokens from last call, not estimates
+        # 1. System Prompt
+        if breakdown.get('system_tokens', 0) > 0:
+            components.append({
+                'name': 'System Prompt',
+                'tokens': breakdown['system_tokens'],
+                'type': 'system',
+                'description': 'System message',
+                'actions': ['view', 'edit']
+            })
+
+        # 2. Chat History
+        if breakdown.get('assistant_tokens', 0) > 0:
+            num_runs = getattr(self.agent, 'num_history_runs', '?')
+            components.append({
+                'name': 'Chat History',
+                'tokens': breakdown['assistant_tokens'],
+                'type': 'history',
+                'description': f'{num_runs} previous turn(s)',
+                'actions': ['clear', 'reduce']
+            })
+
+        # 3. Tool Schemas (combined - we can't break down per toolkit from actual data)
+        if breakdown.get('tool_tokens', 0) > 0:
+            tool_count = breakdown.get('tool_count', 0)
+            components.append({
+                'name': 'Tool Schemas',
+                'tokens': breakdown['tool_tokens'],
+                'type': 'tools',
+                'description': f'{tool_count} function(s) sent',
+                'actions': ['view', 'disable']
+            })
+
+        # 4. Current User Message
+        if breakdown.get('user_tokens', 0) > 0:
+            components.append({
+                'name': 'Current Input',
+                'tokens': breakdown['user_tokens'],
+                'type': 'user',
+                'description': 'User message',
+                'actions': []
+            })
+
+        # 5. Tool Results (if any)
+        if breakdown.get('tool_result_tokens', 0) > 0:
+            components.append({
+                'name': 'Tool Results',
+                'tokens': breakdown['tool_result_tokens'],
+                'type': 'tool_results',
+                'description': 'Previous tool outputs',
+                'actions': []
+            })
+
+        # Use actual total from breakdown
+        total_tokens = breakdown['total_tokens']
+
+        # Add percentages
+        for component in components:
+            component['percentage'] = (component['tokens'] / total_tokens * 100) if total_tokens > 0 else 0
+
+        # Sort by token count (descending) - Pareto principle
+        components.sort(key=lambda x: x['tokens'], reverse=True)
+
+        return {
+            'components': components,
+            'total_tokens': total_tokens,
+            'max_tokens': max_tokens,
+            'usage_pct': (total_tokens / max_tokens * 100) if max_tokens > 0 else 0
+        }
 
 
 # Convenience functions for CLI integration

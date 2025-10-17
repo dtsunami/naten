@@ -394,6 +394,9 @@ async def async_main(session_id: str = None):
     # Cancellation flag for agent interrupt
     cancel_agent = [False]  # Mutable flag for escape key interrupt
 
+    # Track last # press for double-press detection
+    last_hash_press = [0.0]  # Mutable timestamp
+
     def handle_paste(pasted_text: str, buffer) -> None:
         """Shared paste handling logic for both BracketedPaste and Ctrl+V.
 
@@ -604,10 +607,22 @@ async def async_main(session_id: str = None):
 
     @bindings.add('#')  # '#' (Shift+3) - Context window breakdown
     def _(event):
-        """Show clean progress bar breakdown of context window usage."""
+        """Show clean progress bar breakdown of context window usage (single press) or detailed toolkit breakdown (double press)."""
         try:
+            import time
             from rich.panel import Panel
             from .context_telemetry import get_interceptor_stats, ContextManager, get_multi_model_stats
+
+            # Check for double-press (within 500ms)
+            now = time.time()
+            is_double_press = (now - last_hash_press[0]) < 0.5
+            last_hash_press[0] = now
+
+            if is_double_press:
+                # Show detailed full context breakdown with management actions
+                from .context_overlay_toolkit_detail import show_detailed_context_breakdown
+                show_detailed_context_breakdown(agent, console)
+                return
 
             # Get ACTUAL stats from model interceptor
             stats = get_interceptor_stats(agent)
@@ -635,19 +650,18 @@ async def async_main(session_id: str = None):
                 console.print()
                 return
 
-            # Build progress bar display
-            multi_model_stats = get_multi_model_stats(agent)
-            total_tokens = sum(s.total_input_tokens for s in multi_model_stats.values()) if multi_model_stats else stats.total_input_tokens
-
-            # Calculate usage percentage
-            usage_pct = (total_tokens / max_tokens) * 100
-
             # Get breakdown from main model's last call
             breakdown = stats.last_breakdown
             if not breakdown:
                 console.print(Panel("No breakdown available", title="📊 Context Window", border_style="cyan"))
                 console.print()
                 return
+
+            # Use tokens from the LAST call (not cumulative)
+            total_tokens = breakdown['total_tokens']
+
+            # Calculate usage percentage
+            usage_pct = (total_tokens / max_tokens) * 100
 
             # Create progress bar visualization
             def make_bar(value, total, width=40):
@@ -679,28 +693,7 @@ async def async_main(session_id: str = None):
                     lines.append(f"{label:8} [{color}]{bar}[/{color}] {tokens:>6,} ([yellow]{pct:4.1f}%[/yellow])")
 
             lines.append("")
-
-            # Try to get Azure billing info
-            try:
-                session_id = str(agent.agent.session_id) if hasattr(agent.agent, 'session_id') else str(agent.code_session.id)
-                azure_metrics = agent.agent.get_session_metrics(session_id=session_id)
-
-                if azure_metrics:
-                    azure_input = getattr(azure_metrics, 'input_tokens', 0) or 0
-                    azure_cached = getattr(azure_metrics, 'cache_read_tokens', 0) or 0
-                    azure_reasoning = getattr(azure_metrics, 'reasoning_tokens', 0) or 0
-
-                    if azure_input > 0:
-                        lines.append("[bold]💰 Billing:[/bold]")
-                        lines.append(f"   Billed:  [green]{azure_input:,}[/green] tokens")
-                        if azure_cached > 0:
-                            savings = (azure_cached / total_tokens) * 100 if total_tokens > 0 else 0
-                            lines.append(f"   Cached:  [yellow]{azure_cached:,}[/yellow] tokens ([green]{savings:.0f}% saved[/green])")
-                        if azure_reasoning > 0:
-                            lines.append(f"   Reason:  [magenta]{azure_reasoning:,}[/magenta] tokens [dim](internal CoT)[/dim]")
-                        lines.append("")
-            except:
-                pass
+            lines.append("[dim]💡 Tip: Press ## (double-press) for full breakdown with management actions[/dim]")
 
             # Tool summary
             tool_functions = mgr.count_tool_functions()
