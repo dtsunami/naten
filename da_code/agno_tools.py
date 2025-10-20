@@ -134,12 +134,12 @@ class CommandTool(Toolkit):
 
     def execute_command(self, command: str, working_directory: str = None, explanation: str = None) -> str:
         """Execute shell/bash commands with user confirmation."""
-        logger.warning(f"🔧 SHELL_COMMAND TOOL CALLED with command: {command}")
+        logger.info(f"🔧 SHELL_COMMAND TOOL CALLED with command: {command}")
 
         try:
             working_dir = working_directory or os.getcwd()
 
-            logger.warning(f"🔧 EXECUTING COMMAND: {command} in {working_dir}")
+            logger.info(f"🔧 EXECUTING COMMAND: {command} in {working_dir}")
             start_time = time.time()
             result = subprocess.run(
                 command,
@@ -150,7 +150,7 @@ class CommandTool(Toolkit):
                 timeout=300
             )
 
-            logger.warning(f"🔧 COMMAND RESULT: returncode={result.returncode}, stdout_len={len(result.stdout) if result.stdout else 0}")
+            logger.info(f"🔧 COMMAND RESULT: returncode={result.returncode}, stdout_len={len(result.stdout) if result.stdout else 0}")
 
             exec_time = time.time() - start_time
 

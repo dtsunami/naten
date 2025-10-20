@@ -168,12 +168,12 @@ def build_agent_context(
 
     # Add search results automatically (grep/glob results from previous commands)
     if search_storage:
-        logger.warning(f"🔍 build_agent_context: search_storage has {len(search_storage)} items: {list(search_storage.keys())}")
-        logger.warning(f"🔍 build_agent_context: user_input = {user_input[:200]}")
+        logger.debug(f"🔍 build_agent_context: search_storage has {len(search_storage)} items: {list(search_storage.keys())}")
+        logger.debug(f"🔍 build_agent_context: user_input = {user_input[:200]}")
 
         search_sections = []
         for placeholder, search_data in search_storage.items():
-            logger.warning(f"🔍 Auto-injecting search results from: '{placeholder}'")
+            logger.debug(f"🔍 Auto-injecting search results from: '{placeholder}'")
 
             search_term = search_data.get('term', 'unknown')
             files_dict = search_data.get('files', {})
@@ -214,7 +214,7 @@ def build_agent_context(
         if search_sections:
             search_str = "\n\n".join(search_sections)
             context_parts.append(search_str)
-            logger.warning(f"✅ Search content injected: {len(search_sections)} result(s)")
+            logger.debug(f"✅ Search content injected: {len(search_sections)} result(s)")
 
         # Clear search content after using it
         search_storage.clear()
@@ -459,7 +459,7 @@ async def async_main(session_id: str = None):
             # Also check if it's a single-line paste (likely a command or short text)
             is_single_line = line_count == 1
 
-            logger.warning(
+            logger.debug(
                 "handle_paste called: lines=%d, first_line=%r, direct=%s, single_line=%s",
                 line_count, first_line[:120], is_direct_command, is_single_line
             )
@@ -550,20 +550,20 @@ async def async_main(session_id: str = None):
         try:
             data = getattr(event, 'data', None)
             try:
-                logger.warning("BracketedPaste event: data_present=%s", bool(data))
+                logger.debug("BracketedPaste event: data_present=%s", bool(data))
             except Exception:
                 pass
 
             # If there's no data on Windows, attempt Win32 clipboard read as a fallback
             if not data and sys.platform.startswith('win'):
                 try:
-                    logger.warning("BracketedPaste: no data, attempting Win32 clipboard fallback")
+                    logger.debug("BracketedPaste: no data, attempting Win32 clipboard fallback")
                     wb = read_windows_clipboard()
                     if wb:
                         handle_paste(wb, event.current_buffer)
                         return
                 except Exception as e:
-                    logger.warning(f"BracketedPaste Win32 fallback failed: {e}")
+                    logger.debug(f"BracketedPaste Win32 fallback failed: {e}")
 
             # Normal handling
             handle_paste(data, event.current_buffer)
@@ -741,20 +741,337 @@ async def async_main(session_id: str = None):
             logger.error(f"Context overlay failed: {e}", exc_info=True)
             console.print(f"\n[red]Context overlay error: {e}[/red]")
 
+
+    # Schedule the async function as a task in the running event loop
+    async def _run_context_manager_with_cleanup():
+        try:
+            await show_context_manager_textual(agent, console)
+        finally:
+            try:
+                from prompt_toolkit.output import get_default_output
+                out = get_default_output()
+                try:
+                    # Restore bracketed paste handling for prompt_toolkit after external UI
+                    if hasattr(out, 'enable_bracketed_paste'):
+                        out.enable_bracketed_paste()
+                    else:
+                        # Fallback: attempt to call disable to reset state if enable is unavailable
+                        out.disable_bracketed_paste()
+                except Exception:
+                    pass
+                    out.flush()
+            except Exception as ce:
+                logger.debug(f"Cleanup after context manager failed: {ce}")
+                
     @bindings.add('~')  # '~' - Context management (delete/summarize)
     def _(event):
         """Manage context components - delete or summarize to free tokens."""
         try:
             import asyncio
-
             console.print()
-
-            # Schedule the async function as a task in the running event loop
-            asyncio.create_task(show_context_manager_textual(agent, console))
-
+            asyncio.create_task(_run_context_manager_with_cleanup())
         except Exception as e:
             logger.error(f"Context manager failed: {e}", exc_info=True)
             console.print(f"\n[red]Context manager error: {e}[/red]\n")
+
+    
+    # Shared restore helper
+    async def perform_restore(file_path: str | None, input_queue, code_session, console, nudge_completer, auto_confirm: bool = False):
+        """Perform restore for a given file (or full session if file_path is None).
+        This encapsulates the restore logic so it can be called from both the CLI and keybinding.
+        """
+        # Helper to ignore leftover paste placeholders that may have been submitted as input
+        async def _get_nonpaste_input():
+            """Get next user input from input_queue, ignoring paste placeholders like [[paste#N: ...]]."""
+            while True:
+                val = await input_queue.get()
+                try:
+                    if isinstance(val, str):
+                        stripped = val.strip()
+                        # Ignore prompt_toolkit paste placeholders
+                        if stripped.startswith('[[') and 'paste#' in stripped:
+                            try:
+                                console.print("[dim]Ignored pending paste placeholder input[/dim]")
+                            except Exception:
+                                pass
+                            continue
+                except Exception:
+                    pass
+                return val
+        """Perform restore for a given file (or full session if file_path is None).
+        This encapsulates the restore logic so it can be called from both the CLI and keybinding.
+        """
+        try:
+            # Helper function
+            def calculate_diff_stats(current_content: str, target_content: str) -> dict:
+                if current_content is None:
+                    current_lines = []
+                else:
+                    current_lines = current_content.split('\n')
+                if target_content is None:
+                    target_lines = []
+                else:
+                    target_lines = target_content.split('\n')
+                added = len(target_lines) - len(current_lines)
+                return {
+                    'current_lines': len(current_lines),
+                    'target_lines': len(target_lines),
+                    'delta': added,
+                    'delta_str': f"+{added}" if added > 0 else str(added)
+                }
+
+            # Full session restore
+            if file_path is None:
+                console.print("[yellow]⚠️  This will revert ALL file changes since session start![/yellow]")
+                console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
+                confirm_input = await _get_nonpaste_input()
+                if confirm_input.lower() != 'yes':
+                    console.print("[cyan]Restore cancelled[/cyan]")
+                    return
+                console.print("[cyan]Reverting all changes...[/cyan]")
+                try:
+                    if code_session.filesystem_history:
+                        result = code_session.filesystem_history.revert_all_changes()
+                        if result.get("status") == "error":
+                            console.print(f"[red]❌ Restore failed: {result.get('message', 'Unknown error')}[/red]")
+                        elif result.get("status") == "completed":
+                            stats = result.get("stats", {})
+                            if stats.get('files_affected', 0) == 0:
+                                console.print("[green]✓ No changes to revert[/green]")
+                            else:
+                                console.print(f"[green]✓ Restore complete![/green]")
+                                console.print(f"  • Files deleted: {stats.get('deleted')}")
+                                console.print(f"  • Files restored: {stats.get('restored')}")
+                                console.print(f"  • Total files affected: {stats.get('files_affected')}")
+                                if stats.get('errors'):
+                                    console.print(f"\n[yellow]⚠️  Errors ({len(stats.get('errors'))}):[/yellow]")
+                                    for error in stats.get('errors', [])[:5]:
+                                        console.print(f"  • {error}")
+                                    if len(stats.get('errors', [])) > 5:
+                                        console.print(f"  ... and {len(stats.get('errors')) - 5} more")
+                    else:
+                        console.print("[yellow]No filesystem history available[/yellow]")
+                except Exception as e:
+                    console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
+                    logger.error(f"Restore error: {e}", exc_info=True)
+                return
+
+            # File-specific restore
+            revisions = nudge_completer._get_file_revisions(file_path)
+            snapshot_entry = None
+            if code_session.filesystem_history and code_session.filesystem_history.session_start_snapshot:
+                snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
+
+            has_session_start = snapshot_entry is not None or len(revisions) > 0
+            if not has_session_start:
+                console.print(f"[red]No history found for {file_path}[/red]")
+                return
+
+            console.print()
+            result = await show_restore_menu(file_path=file_path, revisions=revisions, has_session_start=(snapshot_entry is not None), console=console)
+            if not result:
+                console.print("[cyan]↩ Restore cancelled[/cyan]")
+                return
+
+            revision_num = result['revision']
+            auto_confirm = result['auto_confirm']
+
+            # Current content
+            current_content = None
+            try:
+                full_path = Path(code_session.working_directory) / file_path
+                if full_path.exists():
+                    with open(full_path, 'r', encoding='utf-8', newline='') as f:
+                        current_content = f.read()
+            except Exception:
+                pass
+
+            # Determine target
+            if revision_num == 0:
+                if snapshot_entry:
+                    if snapshot_entry.is_binary:
+                        console.print(f"[red]Cannot restore binary file {file_path}[/red]")
+                        return
+                    content_to_restore = snapshot_entry.content
+                    restore_description = "session start"
+                    diff_stats = calculate_diff_stats(current_content, content_to_restore)
+                    console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
+                    console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
+                    console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
+                    console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
+                else:
+                    console.print(f"\n[yellow]⚠️  This will DELETE {file_path}[/yellow]")
+                    console.print(f"[dim]File was created during this session[/dim]\n")
+                    if not auto_confirm:
+                        console.print("[yellow]Confirm deletion? [y/N]:[/yellow] ", end="")
+                        confirm_input = await _get_nonpaste_input()
+                        if confirm_input.lower() not in ['y', 'yes']:
+                            console.print("[cyan]↩ Restore cancelled[/cyan]")
+                            return
+                    try:
+                        full_path = Path(code_session.working_directory) / file_path
+                        if full_path.exists():
+                            full_path.unlink()
+                            console.print(f"[green]✓ Deleted {file_path} (restored to session start)[/green]")
+                        else:
+                            console.print(f"[yellow]File {file_path} already doesn't exist[/yellow]")
+                    except Exception as e:
+                        console.print(f"[red]❌ Failed to delete {file_path}: {str(e)}[/red]")
+                        logger.error(f"File delete error: {e}", exc_info=True)
+                    return
+            elif revision_num > 0:
+                if revision_num < 1 or revision_num > len(revisions):
+                    console.print(f"[red]Invalid revision #{revision_num}. Valid range: 1-{len(revisions)}[/red]")
+                    return
+
+                target_change = None
+                change_idx = 0
+                for change in code_session.filesystem_history.changes:
+                    if change.relative_path == file_path:
+                        change_idx += 1
+                        if change_idx == revision_num:
+                            target_change = change
+                            break
+
+                if not target_change or not target_change.content_snapshot:
+                    console.print(f"[red]No content snapshot for revision #{revision_num}[/red]")
+                    return
+
+                content_to_restore = target_change.content_snapshot
+                restore_description = f"revision #{revision_num}"
+                diff_stats = calculate_diff_stats(current_content, content_to_restore)
+                console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
+                console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
+                console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
+                console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
+            else:
+                # fallback to session start
+                if not code_session.filesystem_history or not code_session.filesystem_history.session_start_snapshot:
+                    console.print(f"[red]No session start snapshot available[/red]")
+                    return
+                snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
+                if not snapshot_entry:
+                    if revisions:
+                        console.print(f"[yellow]⚠️  {file_path} was created during this session[/yellow]")
+                        console.print(f"[yellow]Restoring to session start will DELETE this file[/yellow]")
+                        console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
+                        confirm_input = await _get_nonpaste_input()
+                        if confirm_input.lower() != 'yes':
+                            console.print("[cyan]Restore cancelled[/cyan]")
+                            return
+                        try:
+                            full_path = Path(code_session.working_directory) / file_path
+                            if full_path.exists():
+                                full_path.unlink()
+                                console.print(f"[green]✓ Deleted {file_path} (restored to session start)[/green]")
+                            else:
+                                console.print(f"[yellow]File {file_path} already doesn't exist[/yellow]")
+                        except Exception as e:
+                            console.print(f"[red]❌ Failed to delete {file_path}: {str(e)}[/red]")
+                            logger.error(f"File delete error: {e}", exc_info=True)
+                        return
+                    else:
+                        console.print(f"[red]File {file_path} not found in session history[/red]")
+                        return
+
+                if snapshot_entry.is_binary:
+                    console.print(f"[red]Cannot restore binary file {file_path}[/red]")
+                    return
+                content_to_restore = snapshot_entry.content
+                restore_description = "session start"
+
+            # Confirm restore
+            if not auto_confirm:
+                console.print("[yellow]Confirm restore? [y/N]:[/yellow] ", end="")
+                confirm_input = await _get_nonpaste_input()
+                if confirm_input.lower() not in ['y', 'yes']:
+                    console.print("[cyan]↩ Restore cancelled[/cyan]")
+                    return
+
+            # Perform write
+            try:
+                full_path = Path(code_session.working_directory) / file_path
+                with open(full_path, 'w', encoding='utf-8', newline='') as f:
+                    f.write(content_to_restore)
+                console.print(f"[green]✓ Restored {file_path} to {restore_description}[/green]")
+            except Exception as e:
+                console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
+                logger.error(f"File restore error: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"perform_restore failed: {e}", exc_info=True)
+
+    @bindings.add('%')  # Shift+5 - Restore file via Textual overlay
+    def _(event):
+        """Show restore overlay and perform file restore."""
+        try:
+            import asyncio
+            from da_code.textual_restore import show_file_picker, show_restore_menu
+            console.print()
+
+            async def _run_restore_with_cleanup():
+                try:
+                    # Gather modified files from filesystem history
+                    files = []
+                    if code_session.filesystem_history:
+                        seen = set()
+                        for change in code_session.filesystem_history.changes:
+                            rp = change.relative_path
+                            if rp not in seen:
+                                seen.add(rp)
+                                files.append(rp)
+                        files.sort()
+
+                    if not files:
+                        console.print("[yellow]No modified files to restore[/yellow]")
+                        return
+
+                    # If multiple files, show picker
+                    if len(files) == 1:
+                        selected_file = files[0]
+                    else:
+                        selected_file = await show_file_picker(files, console)
+                        if not selected_file:
+                            console.print("[cyan]Restore cancelled[/cyan]")
+                            return
+
+                    # Call the shared restore helper
+                    await perform_restore(selected_file, input_queue, code_session, console, nudge_completer)
+
+                finally:
+                    try:
+                        from prompt_toolkit.output import get_default_output
+                        out = get_default_output()
+                        try:
+                            # Restore bracketed paste handling for prompt_toolkit after external UI
+                            if hasattr(out, 'enable_bracketed_paste'):
+                                out.enable_bracketed_paste()
+                        except Exception:
+                            pass
+                        try:
+                            out.flush()
+                        except Exception:
+                            pass
+                    except Exception as ce:
+                        logger.debug(f"Cleanup after restore overlay failed: {ce}")
+
+            # Disable prompt_toolkit bracketed paste before launching the external Textual UI
+            try:
+                from prompt_toolkit.output import get_default_output
+                out = get_default_output()
+                try:
+                    if hasattr(out, 'disable_bracketed_paste'):
+                        out.disable_bracketed_paste()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            asyncio.create_task(_run_restore_with_cleanup())
+
+        except Exception as e:
+            logger.error(f"Restore overlay failed: {e}", exc_info=True)
+            console.print(f"\n[red]Restore overlay error: {e}[/red]")
+
 
     # Voice server URL (CLI feature, not agent tool)
     voice_server_url = [None]  # Mutable for inner function access
@@ -1114,6 +1431,8 @@ async def async_main(session_id: str = None):
                         console.print(f"[red]ERROR: Input task exited unexpectedly: {wait_for_input.result()}[/red]")
                         break  # Exit main loop - input is no longer available
                     user_input = await input_queue.get()
+                
+                # cleanup state after agent run
                 elif running_agent.done():
                     try:
                         final_response = running_agent.result()
@@ -1188,7 +1507,10 @@ async def async_main(session_id: str = None):
                         status_interface.stop_execution(False, str(e))
                         console.print(f"[red]Agent error: {str(e)}[/red]")
                         logger.error(f"Agent execution error: {type(e).__name__}: {str(e)}", exc_info=True)
+
+                # handle input
                 else:
+
                     # Accumulate output while agent is running
                     while output_queue.qsize() > 0:
                         chunk = await output_queue.get()
@@ -1236,6 +1558,7 @@ async def async_main(session_id: str = None):
                 if user_input is None:
                     continue
 
+                # cli exit
                 if user_input.lower() in ['exit', 'quit', 'q']:
                     # Save session before exit
                     try:
@@ -1250,6 +1573,7 @@ async def async_main(session_id: str = None):
                     console.print()
                     break
 
+                # cli help 
                 elif user_input.lower() == 'help':
                     console.print("[bold]Available commands:[/bold]")
                     console.print("  • [cyan]help[/cyan] - Show this help message")
@@ -1276,262 +1600,33 @@ async def async_main(session_id: str = None):
                     console.print("  • [cyan]Ctrl+V or terminal paste[/cyan] - Paste shows '[[paste#N: X lines]]' placeholder, actual content sent to agent")
                     console.print("\n[bold]Tip:[/bold] Use [cyan]glob[/cyan] and [cyan]grep[/cyan] to prepare context, then ask agent about results!")
  
+                # create default setup files
                 elif user_input.lower() == 'setup':
                     create_example_configuration(config_mgr=ConfigManager(), context_ldr=ContextLoader())
                     console.print("[green]Edit files and reload to update agent context[/green]")
 
+                # status of agent bringup, this needs improvement
                 elif user_input.lower() == 'status':
                     show_status(config_mgr=ConfigManager(), context_ldr=ContextLoader())
 
+                # explicit shell toggle mode
                 elif user_input.lower() == 'shell':
                     shell_manager.toggle_shell_mode()
                     continue
 
+                # restore cli command TODO: deprecate this in favor of hotkey
                 elif user_input.lower().startswith('restore'):
-                    # Check if it's a file-specific restore or full session restore
+                    # Use shared perform_restore helper for both file and full-session restores
+                    # Determine if a file path was provided: "restore <file>" vs "restore"
                     if len(user_input.strip()) > len('restore') and user_input[7:].strip():
-                        # File-specific restore: "restore file.py"
-                        file_path = user_input[7:].strip()  # Everything after "restore "
-
-                        # Get file revisions
-                        revisions = nudge_completer._get_file_revisions(file_path)
-
-                        # Check if file existed at session start
-                        snapshot_entry = None
-                        if code_session.filesystem_history and code_session.filesystem_history.session_start_snapshot:
-                            snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
-
-                        # Validate we have something to restore
-                        has_session_start = snapshot_entry is not None or len(revisions) > 0
-                        if not has_session_start:
-                            console.print(f"[red]No history found for {file_path}[/red]")
-                            continue
-
-                        # Show Textual restore menu
-                        console.print()
-                        result = await show_restore_menu(
-                            file_path=file_path,
-                            revisions=revisions,
-                            has_session_start=(snapshot_entry is not None),
-                            console=console
-                        )
-
-                        # Check if user cancelled
-                        if not result:
-                            console.print("[cyan]↩ Restore cancelled[/cyan]")
-                            continue
-
-                        # Extract result
-                        revision_num = result['revision']
-                        auto_confirm = result['auto_confirm']
-
-                        # Helper function to calculate diff stats
-                        def calculate_diff_stats(current_content: str, target_content: str) -> dict:
-                            """Calculate diff statistics between current and target content."""
-                            if current_content is None:
-                                current_lines = []
-                            else:
-                                current_lines = current_content.split('\n')
-
-                            if target_content is None:
-                                target_lines = []
-                            else:
-                                target_lines = target_content.split('\n')
-
-                            # Simple line-based diff
-                            added = len(target_lines) - len(current_lines)
-                            return {
-                                'current_lines': len(current_lines),
-                                'target_lines': len(target_lines),
-                                'delta': added,
-                                'delta_str': f"+{added}" if added > 0 else str(added)
-                            }
-
-                        # Get current file content for diff comparison
-                        current_content = None
-                        try:
-                            full_path = Path(code_session.working_directory) / file_path
-                            if full_path.exists():
-                                with open(full_path, 'r', encoding='utf-8', newline='') as f:
-                                    current_content = f.read()
-                        except Exception:
-                            pass
-
-                        # Determine which content to restore
-                        if revision_num == 0:
-                            # Session start
-                            if snapshot_entry:
-                                # File existed at session start
-                                if snapshot_entry.is_binary:
-                                    console.print(f"[red]Cannot restore binary file {file_path}[/red]")
-                                    continue
-                                content_to_restore = snapshot_entry.content
-                                restore_description = "session start"
-
-                                # Show diff synopsis
-                                diff_stats = calculate_diff_stats(current_content, content_to_restore)
-                                console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
-                                console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
-                                console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
-                                console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
-                            else:
-                                # File was created during session - delete it
-                                console.print(f"\n[yellow]⚠️  This will DELETE {file_path}[/yellow]")
-                                console.print(f"[dim]File was created during this session[/dim]\n")
-
-                                if not auto_confirm:
-                                    console.print("[yellow]Confirm deletion? [y/N]:[/yellow] ", end="")
-                                    confirm_input = await input_queue.get()
-                                    if confirm_input.lower() not in ['y', 'yes']:
-                                        console.print("[cyan]↩ Restore cancelled[/cyan]")
-                                        continue
-
-                                try:
-                                    full_path = Path(code_session.working_directory) / file_path
-                                    if full_path.exists():
-                                        full_path.unlink()
-                                        console.print(f"[green]✓ Deleted {file_path} (restored to session start)[/green]")
-                                    else:
-                                        console.print(f"[yellow]File {file_path} already doesn't exist[/yellow]")
-                                except Exception as e:
-                                    console.print(f"[red]❌ Failed to delete {file_path}: {str(e)}[/red]")
-                                    logger.error(f"File delete error: {e}", exc_info=True)
-                                continue
-                        elif revision_num > 0:
-                            # Restore to specific revision
-                            if revision_num < 1 or revision_num > len(revisions):
-                                console.print(f"[red]Invalid revision #{revision_num}. Valid range: 1-{len(revisions)}[/red]")
-                                continue
-
-                            # Get the change at this revision (revisions are 1-indexed)
-                            target_change = None
-                            change_idx = 0
-                            for change in code_session.filesystem_history.changes:
-                                if change.relative_path == file_path:
-                                    change_idx += 1
-                                    if change_idx == revision_num:
-                                        target_change = change
-                                        break
-
-                            if not target_change or not target_change.content_snapshot:
-                                console.print(f"[red]No content snapshot for revision #{revision_num}[/red]")
-                                continue
-
-                            content_to_restore = target_change.content_snapshot
-                            restore_description = f"revision #{revision_num}"
-
-                            # Show diff synopsis for specific revision
-                            diff_stats = calculate_diff_stats(current_content, content_to_restore)
-                            console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
-                            console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
-                            console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
-                            console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
-                        else:
-                            # No revision specified - restore to session start
-                            if not code_session.filesystem_history or not code_session.filesystem_history.session_start_snapshot:
-                                console.print(f"[red]No session start snapshot available[/red]")
-                                continue
-
-                            snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
-                            if not snapshot_entry:
-                                # File not in session start snapshot - was it created during the session?
-                                # Check if this file has any history (meaning it was created this session)
-                                if revisions:
-                                    # File was created during session - deleting it restores to session start
-                                    console.print(f"[yellow]⚠️  {file_path} was created during this session[/yellow]")
-                                    console.print(f"[yellow]Restoring to session start will DELETE this file[/yellow]")
-                                    console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
-
-                                    confirm_input = await input_queue.get()
-                                    if confirm_input.lower() != 'yes':
-                                        console.print("[cyan]Restore cancelled[/cyan]")
-                                        continue
-
-                                    # Delete the file
-                                    try:
-                                        full_path = Path(code_session.working_directory) / file_path
-                                        if full_path.exists():
-                                            full_path.unlink()
-                                            console.print(f"[green]✓ Deleted {file_path} (restored to session start)[/green]")
-                                        else:
-                                            console.print(f"[yellow]File {file_path} already doesn't exist[/yellow]")
-                                    except Exception as e:
-                                        console.print(f"[red]❌ Failed to delete {file_path}: {str(e)}[/red]")
-                                        logger.error(f"File delete error: {e}", exc_info=True)
-                                    continue
-                                else:
-                                    # File has no history and wasn't in session start - shouldn't happen
-                                    console.print(f"[red]File {file_path} not found in session history[/red]")
-                                    continue
-
-                            if snapshot_entry.is_binary:
-                                console.print(f"[red]Cannot restore binary file {file_path}[/red]")
-                                continue
-
-                            content_to_restore = snapshot_entry.content
-                            restore_description = "session start"
-
-                        # Confirm restore (skip if auto_confirm hotkey was used)
-                        if not auto_confirm:
-                            console.print("[yellow]Confirm restore? [y/N]:[/yellow] ", end="")
-                            confirm_input = await input_queue.get()
-                            if confirm_input.lower() not in ['y', 'yes']:
-                                console.print("[cyan]↩ Restore cancelled[/cyan]")
-                                continue
-
-                        # Perform restore
-                        try:
-                            full_path = Path(code_session.working_directory) / file_path
-                            # Use open() with newline='' to preserve exact line endings without translation
-                            with open(full_path, 'w', encoding='utf-8', newline='') as f:
-                                f.write(content_to_restore)
-                            console.print(f"[green]✓ Restored {file_path} to {restore_description}[/green]")
-                        except Exception as e:
-                            console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
-                            logger.error(f"File restore error: {e}", exc_info=True)
-
-                        continue
+                        file_path = user_input[7:].strip()
                     else:
-                        # Full session restore: "restore"
-                        console.print("[yellow]⚠️  This will revert ALL file changes since session start![/yellow]")
-                        console.print("[yellow]Are you sure? Type 'yes' to confirm:[/yellow]")
+                        file_path = None
 
-                        # Wait for confirmation
-                        confirm_input = await input_queue.get()
-                        if confirm_input.lower() != 'yes':
-                            console.print("[cyan]Restore cancelled[/cyan]")
-                            continue
+                    await perform_restore(file_path, input_queue, code_session, console, nudge_completer)
+                    continue
 
-                        console.print("[cyan]Reverting all changes...[/cyan]")
-                        try:
-                            if code_session.filesystem_history:
-                                result = code_session.filesystem_history.revert_all_changes()
-
-                                if result["status"] == "error":
-                                    console.print(f"[red]❌ Restore failed: {result.get('message', 'Unknown error')}[/red]")
-                                elif result["status"] == "completed":
-                                    stats = result["stats"]
-                                    if stats['files_affected'] == 0:
-                                        console.print("[green]✓ No changes to revert[/green]")
-                                    else:
-                                        console.print(f"[green]✓ Restore complete![/green]")
-                                        console.print(f"  • Files deleted: {stats['deleted']}")
-                                        console.print(f"  • Files restored: {stats['restored']}")
-                                        console.print(f"  • Total files affected: {stats['files_affected']}")
-
-                                        if stats['errors']:
-                                            console.print(f"\n[yellow]⚠️  Errors ({len(stats['errors'])}):[/yellow]")
-                                            for error in stats['errors'][:5]:  # Show first 5 errors
-                                                console.print(f"  • {error}")
-                                            if len(stats['errors']) > 5:
-                                                console.print(f"  ... and {len(stats['errors']) - 5} more")
-                            else:
-                                console.print("[yellow]No filesystem history available[/yellow]")
-                        except Exception as e:
-                            console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
-                            logger.error(f"Restore error: {e}", exc_info=True)
-                        continue
-
+                # add an mcp server (wraps server with toolkit proxy)
                 elif user_input.startswith('add_mcp '):
                     # Handle dynamic MCP server addition
                     try:
@@ -1568,6 +1663,7 @@ async def async_main(session_id: str = None):
                         logger.error(f"MCP addition error: {e}")
                     continue
                 
+                # add voice server
                 elif user_input.startswith('add_voice '):
                     # Handle voice server configuration (CLI feature, not agent tool)
                     try:
@@ -1613,8 +1709,7 @@ async def async_main(session_id: str = None):
                         logger.error(f"Voice configuration error: {e}")
                     continue
 
-
-
+                # help for glob
                 elif user_input.lower().startswith('help glob'):
                     console.print("\n[bold cyan]📁 GLOB Command - Find Files by Pattern[/bold cyan]\n")
                     console.print("[bold]Usage:[/bold]")
@@ -1633,6 +1728,7 @@ async def async_main(session_id: str = None):
                     console.print("  📁 Found 42 files...")
                     console.print("  [cyan]refactor all these files to use async[/cyan]  ← Results included!\n")
 
+                # help for grep
                 elif user_input.lower().startswith('help grep'):
                     console.print("\n[bold cyan]🔍 GREP Command - Search File Contents[/bold cyan]\n")
                     console.print("[bold]Usage:[/bold]")
@@ -1651,6 +1747,7 @@ async def async_main(session_id: str = None):
                     console.print("  [cyan]document all these async functions[/cyan]  ← Results included!\n")
                     console.print("[bold]Tip:[/bold] Results respect .daignore - ignored files are skipped")
 
+                # cli glob command
                 elif user_input.lower().startswith('glob '):
                     # Extract pattern
                     pattern = user_input[5:].strip()
@@ -1710,14 +1807,15 @@ async def async_main(session_id: str = None):
                             'term': pattern,
                             'files': {f: {'line_numbers': [], 'matches': []} for f in files}  # Glob doesn't have line matches
                         }
-                        logger.warning(f"📦 STORED glob results: placeholder='{placeholder}', {len(files)} files")
-                        logger.warning(f"📦 search_content_storage keys: {list(search_content_storage.keys())}")
+                        logger.debug(f"📦 STORED glob results: placeholder='{placeholder}', {len(files)} files")
+                        logger.debug(f"📦 search_content_storage keys: {list(search_content_storage.keys())}")
 
                     except Exception as e:
                         console.print(f"[red]❌ Glob error: {str(e)}[/red]")
                         logger.error(f"Glob command error: {e}", exc_info=True)
                     continue
 
+                # cli grep command
                 elif user_input.lower().startswith('grep '):
                     # Extract pattern
                     pattern = user_input[5:].strip()
@@ -1805,24 +1903,27 @@ async def async_main(session_id: str = None):
                             'term': pattern,
                             'files': files_dict
                         }
-                        logger.warning(f"📦 STORED grep results: placeholder='{placeholder}', {len(files_dict)} files, {matches} matches")
-                        logger.warning(f"📦 search_content_storage keys: {list(search_content_storage.keys())}")
+                        logger.debug(f"📦 STORED grep results: placeholder='{placeholder}', {len(files_dict)} files, {matches} matches")
+                        logger.debug(f"📦 search_content_storage keys: {list(search_content_storage.keys())}")
 
                     except Exception as e:
                         console.print(f"[red]❌ Grep error: {str(e)}[/red]")
                         logger.error(f"Grep command error: {e}", exc_info=True)
                     continue
 
-
-
+                # No tokens just return to agent/shell prompt
                 elif user_input.strip() == '':
                     continue
+
+                # run shell mode command
                 elif shell_manager.is_shell_mode:
                     # Shell mode: execute command and capture output
                     console.print(f"[dim]$ {user_input}[/dim]")
                     output = shell_manager.execute_shell_command(user_input)
                     console.print(output)
                     continue
+
+                # Perform async agent run :-)
                 else:
                     # Agent mode
                     if agent is None:

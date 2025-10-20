@@ -282,3 +282,144 @@ async def show_restore_menu(file_path: str, revisions: list, has_session_start: 
         logger.error(f"Restore menu app failed: {e}", exc_info=True)
         console.print(f"\n[red]Restore menu error: {e}[/red]\n")
         return None
+
+
+# --- File picker support -------------------------------------------------
+class FilePickerScreen(Screen):
+    """Simple file picker that lists files and returns the selected path."""
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("escape", "quit", "Quit"),
+        ("enter", "select", "Select"),
+        ("1,2,3,4,5,6,7,8,9", "select_number", "Select by number"),
+    ]
+
+    DEFAULT_CSS = """
+    FilePickerScreen {
+        background: $surface;
+    }
+
+    #header {
+        width: 100%;
+        height: auto;
+        padding: 1 2;
+        background: $boost;
+        border: solid $primary;
+        margin: 0 0 1 0;
+    }
+
+    #title {
+        text-style: bold;
+        color: $accent;
+        padding: 0 0 1 0;
+    }
+
+    #table-container {
+        width: 100%;
+        height: 1fr;
+        padding: 0 2;
+    }
+
+    DataTable {
+        height: 100%;
+    }
+
+    #help-text {
+        width: 100%;
+        padding: 1 2;
+        content-align: center middle;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, files: list, console_ref):
+        super().__init__()
+        self.files = files
+        self.console_ref = console_ref
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container(id="header"):
+            yield Static("📁 Select file to restore", id="title")
+            yield Static(f"Files: {len(self.files)}", id="file-info")
+
+        with Container(id="table-container"):
+            table = DataTable()
+            table.cursor_type = "row"
+            table.zebra_stripes = True
+            table.add_column("#", width=6)
+            table.add_column("File Path", width=100)
+
+            for i, fp in enumerate(self.files):
+                table.add_row(str(i), fp)
+
+            yield table
+
+        yield Static("Use ↑/↓ or 0-9 to select • Enter=Select • Q=Cancel", id="help-text")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        try:
+            table = self.query_one(DataTable)
+            if table:
+                table.focus()
+        except Exception:
+            pass
+
+    def action_quit(self) -> None:
+        self.app.exit(None)
+
+    def action_select_number(self, number: str) -> None:
+        try:
+            idx = int(number)
+            if 0 <= idx < len(self.files):
+                table = self.query_one(DataTable)
+                table.move_cursor(row=idx)
+        except Exception:
+            pass
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in "0123456789":
+            idx = int(event.key)
+            if 0 <= idx < len(self.files):
+                table = self.query_one(DataTable)
+                table.move_cursor(row=idx)
+
+    def action_select(self) -> None:
+        try:
+            table = self.query_one(DataTable)
+            if table and table.cursor_row is not None:
+                idx = table.cursor_row
+                result = self.files[idx]
+                self.app.exit(result)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"FilePicker selection failed: {e}", exc_info=True)
+            self.console_ref.print(f"[red]Error selecting file: {e}[/red]")
+            self.app.exit(None)
+
+
+class FilePickerApp(App):
+    def __init__(self, files: list, console_ref):
+        super().__init__()
+        self.files = files
+        self.console_ref = console_ref
+
+    def on_mount(self) -> None:
+        self.push_screen(FilePickerScreen(self.files, self.console_ref))
+
+
+async def show_file_picker(files: list, console) -> Optional[str]:
+    """Show a simple Textual file picker and return selected file path or None."""
+    try:
+        app = FilePickerApp(files, console)
+        result = await app.run_async()
+        return result
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"File picker failed: {e}", exc_info=True)
+        console.print(f"\n[red]File picker error: {e}[/red]\n")
+        return None
