@@ -117,7 +117,54 @@ def read_windows_clipboard():
         return None
 
 
-#====================================================================================================
+# Sanitizer for pasted/displayed text ---------------------------------------------------------------
+
+def sanitize_text(text: str) -> str:
+    """
+    Sanitize text for safe display and interaction in Textual/prompt_toolkit UIs.
+
+    - Normalize CRLF and lone CR to LF
+    - Strip ANSI escape sequences and common bracketed-paste artifacts
+    - Remove other non-printable control characters (except \n and \t)
+    - Remove stray CSI-like sequences that may have lost their leading ESC
+    - Collapse excessive blank lines
+    """
+    if text is None:
+        return text
+    try:
+        import re
+        # Normalize newlines
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+        # Remove ESC-based ANSI/CSI sequences (full sequences)
+        ansi_re = re.compile(r'\x1B\[[0-9;?]*[ -/]*[@-~]')
+        text = ansi_re.sub('', text)
+
+        # Also remove other ESC sequences like ESC followed by any non-printable
+        esc_re = re.compile(r'\x1B[^\n]')
+        text = esc_re.sub('', text)
+
+        # Remove orphan CSI-like sequences that start with '[' and look like control sequences
+        # e.g. '[?2026;0y' or '[I' which can appear when ESC was lost
+        orphan_csi_re = re.compile(r'\[[0-9;?=]*[A-Za-z]')
+        text = orphan_csi_re.sub('', text)
+
+        # Remove other non-printable controls except newline and tab
+        control_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+        text = control_re.sub('', text)
+
+        # Collapse multiple blank lines to at most two
+        text = re.sub(r'\n{3,}', '\n\n', text)
+
+        # Strip leading/trailing whitespace to avoid stray prompt fragments
+        return text.strip('\n')
+    except Exception:
+        # On any error, return a conservative cleaned version
+        try:
+            return ''.join(ch for ch in (text or '') if ord(ch) >= 32 or ch in '\n\t')
+        except Exception:
+            return text
+    #====================================================================================================
 # Context building and agent interaction
 #====================================================================================================
 
@@ -432,7 +479,8 @@ async def async_main(session_id: str = None):
         pasting from Windows/PowerShell hosts (bracketed-paste may deliver
         text with '\r' characters, which previously caused the paste to be
         treated as a single line). We normalize to '\n', trim trailing newlines,
-        and then make the same decisions about direct vs placeholder insertion.
+        sanitize control/ANSI characters, and then make the same decisions about
+        direct vs placeholder insertion.
         """
         try:
             if not pasted_text:
@@ -440,9 +488,21 @@ async def async_main(session_id: str = None):
                 return
 
             # Normalize Windows CRLF and lone CR to \n so split() yields real lines
+            if pasted_text is None:
+                return
+
+            # First normalize newlines
             if '\r' in pasted_text:
                 logger.debug("handle_paste: normalizing CR/LF characters in pasted text")
             pasted_text = pasted_text.replace('\r\n', '\n').replace('\r', '\n')
+
+            # Sanitize to strip stray control characters and CSI fragments that can
+            # leak into the UI (e.g. '[I[?2026;0y[?2048;0y'). This prevents crashes in the
+            # Textual overlay caused by unprintable or control sequences.
+            try:
+                pasted_text = sanitize_text(pasted_text)
+            except Exception:
+                logger.debug("handle_paste: sanitizer failed, continuing with raw text")
 
             # Trim trailing newline that often accompanies pasted blocks
             pasted_text = pasted_text.rstrip('\n')
@@ -940,6 +1000,12 @@ async def async_main(session_id: str = None):
                 content_to_restore = target_change.content_snapshot
                 restore_description = f"revision #{revision_num}"
                 diff_stats = calculate_diff_stats(current_content, content_to_restore)
+                # Sanitize content for display (do not mutate actual content_to_restore/current_content used for write)
+                display_current = sanitize_text(current_content) if 'sanitize_text' in globals() else (current_content or '')
+                display_target = sanitize_text(content_to_restore) if 'sanitize_text' in globals() else (content_to_restore or '')
+                # Sanitize content for display (do not mutate actual content_to_restore/current_content used for write)
+                display_current = sanitize_text(current_content) if 'sanitize_text' in globals() else (current_content or '')
+                display_target = sanitize_text(content_to_restore) if 'sanitize_text' in globals() else (content_to_restore or '')
                 console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
                 console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
                 console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
@@ -1189,6 +1255,7 @@ async def async_main(session_id: str = None):
             voice_recording_state["session_id"] = None
             voice_recording_state["is_recording"] = False
 
+
     @bindings.add(' ', filter=Condition(lambda: voice_recording_state["is_recording"]))
     def _(event):
         """Stop voice recording when Space is pressed during recording."""
@@ -1234,6 +1301,7 @@ async def async_main(session_id: str = None):
             # Force stop anyway
             voice_recording_state["is_recording"] = False
 
+
     @bindings.add(Keys.Enter)
     def _(event):
         """Handle Enter: accept completion first, then submit on second press."""
@@ -1249,6 +1317,7 @@ async def async_main(session_id: str = None):
         else:
             # No completion menu - submit the input
             event.current_buffer.validate_and_handle()
+
 
     # Create PromptSession for async usage - will switch history and completer dynamically
     prompt_session = PromptSession(
