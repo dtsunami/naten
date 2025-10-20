@@ -487,6 +487,9 @@ async def async_main(session_id: str = None):
     # Track last # press for double-press detection
     last_hash_press = [0.0]  # Mutable timestamp
 
+    # Track when Textual overlays are active to prevent key leakage
+    textual_overlay_active = [False]  # Mutable flag
+
     def handle_paste(pasted_text: str, buffer) -> None:
         """Shared paste handling logic for both BracketedPaste and Ctrl+V.
 
@@ -580,7 +583,7 @@ async def async_main(session_id: str = None):
         """Cancel running agent with Escape key."""
         cancel_agent[0] = True
 
-    @bindings.add(Keys.Up, filter=Condition(lambda: shell_manager.is_shell_mode), eager=True)
+    @bindings.add(Keys.Up, filter=Condition(lambda: shell_manager.is_shell_mode and not textual_overlay_active[0]), eager=True)
     def _(event):
         """Navigate up through shell command history when in shell mode."""
         # Only intercept up arrow when in shell mode and we have our in-memory history
@@ -599,7 +602,7 @@ async def async_main(session_id: str = None):
         buf.text = cmd
         buf.cursor_position = len(cmd)
 
-    @bindings.add(Keys.Down, filter=Condition(lambda: shell_manager.is_shell_mode), eager=True)
+    @bindings.add(Keys.Down, filter=Condition(lambda: shell_manager.is_shell_mode and not textual_overlay_active[0]), eager=True)
     def _(event):
         """Navigate down through shell command history when in shell mode."""
         hist = shell_manager.shell_command_history
@@ -618,6 +621,17 @@ async def async_main(session_id: str = None):
         cmd = hist[idx]
         event.current_buffer.text = cmd
         event.current_buffer.cursor_position = len(cmd)
+
+    # Add global arrow key filters to prevent history navigation during Textual overlays
+    @bindings.add(Keys.Up, filter=Condition(lambda: not shell_manager.is_shell_mode and textual_overlay_active[0]))
+    def _(event):
+        """Block arrow up when Textual overlay is active."""
+        pass  # Consume the key to prevent default history navigation
+
+    @bindings.add(Keys.Down, filter=Condition(lambda: not shell_manager.is_shell_mode and textual_overlay_active[0]))
+    def _(event):
+        """Block arrow down when Textual overlay is active."""
+        pass  # Consume the key to prevent default history navigation
 
     @bindings.add(Keys.BracketedPaste)  # Terminal bracketed paste (clipboard)
     def _(event):
@@ -820,8 +834,10 @@ async def async_main(session_id: str = None):
     # Schedule the async function as a task in the running event loop
     async def _run_context_manager_with_cleanup():
         try:
+            textual_overlay_active[0] = True  # Block arrow keys from leaking into history
             await show_context_manager_textual(agent, console)
         finally:
+            textual_overlay_active[0] = False  # Re-enable arrow key history navigation
             try:
                 from prompt_toolkit.output import get_default_output
                 out = get_default_output()
@@ -837,7 +853,7 @@ async def async_main(session_id: str = None):
                     out.flush()
             except Exception as ce:
                 logger.debug(f"Cleanup after context manager failed: {ce}")
-                
+
     @bindings.add('~')  # '~' - Context management (delete/summarize)
     def _(event):
         """Manage context components - delete or summarize to free tokens."""
@@ -1081,44 +1097,211 @@ async def async_main(session_id: str = None):
         except Exception as e:
             logger.error(f"perform_restore failed: {e}", exc_info=True)
 
+    async def perform_restore_direct(file_path: str, revision_num: int, auto_confirm: bool, input_queue, code_session, console, nudge_completer):
+        """Perform restore for a specific file and revision (called after user has selected both via combined menu).
+
+        Args:
+            file_path: Relative path of file to restore
+            revision_num: Revision number to restore (0 = session start)
+            auto_confirm: If True, skip confirmation prompts
+            input_queue: Queue for user input
+            code_session: Current code session
+            console: Rich console for output
+            nudge_completer: Completer for getting file revisions
+        """
+        async def _get_nonpaste_input():
+            """Get next user input from input_queue, ignoring paste placeholders."""
+            while True:
+                val = await input_queue.get()
+                try:
+                    if isinstance(val, str):
+                        stripped = val.strip()
+                        if stripped.startswith('[[') and 'paste#' in stripped:
+                            try:
+                                console.print("[dim]Ignored pending paste placeholder input[/dim]")
+                            except Exception:
+                                pass
+                            continue
+                except Exception:
+                    pass
+                return val
+
+        def calculate_diff_stats(current_content: str, target_content: str) -> dict:
+            if current_content is None:
+                current_lines = []
+            else:
+                current_lines = current_content.split('\n')
+            if target_content is None:
+                target_lines = []
+            else:
+                target_lines = target_content.split('\n')
+            added = len(target_lines) - len(current_lines)
+            return {
+                'current_lines': len(current_lines),
+                'target_lines': len(target_lines),
+                'delta': added,
+                'delta_str': f"+{added}" if added > 0 else str(added)
+            }
+
+        try:
+            revisions = nudge_completer._get_file_revisions(file_path)
+            snapshot_entry = None
+            if code_session.filesystem_history and code_session.filesystem_history.session_start_snapshot:
+                snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(file_path)
+
+            # Current content
+            current_content = None
+            try:
+                full_path = Path(code_session.working_directory) / file_path
+                if full_path.exists():
+                    with open(full_path, 'r', encoding='utf-8', newline='') as f:
+                        current_content = f.read()
+            except Exception:
+                pass
+
+            # Determine target content based on revision
+            if revision_num == 0:
+                if snapshot_entry:
+                    if snapshot_entry.is_binary:
+                        console.print(f"[red]Cannot restore binary file {file_path}[/red]")
+                        return
+                    content_to_restore = snapshot_entry.content
+                    restore_description = "session start"
+                    diff_stats = calculate_diff_stats(current_content, content_to_restore)
+                    console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
+                    console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
+                    console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
+                    console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
+                else:
+                    # File was created during session - will DELETE
+                    console.print(f"\n[yellow]⚠️  This will DELETE {file_path}[/yellow]")
+                    console.print(f"[dim]File was created during this session[/dim]\n")
+                    if not auto_confirm:
+                        console.print("[yellow]Confirm deletion? [y/N]:[/yellow] ", end="")
+                        confirm_input = await _get_nonpaste_input()
+                        if confirm_input.lower() not in ['y', 'yes']:
+                            console.print("[cyan]↩ Restore cancelled[/cyan]")
+                            return
+                    try:
+                        full_path = Path(code_session.working_directory) / file_path
+                        if full_path.exists():
+                            full_path.unlink()
+                            console.print(f"[green]✓ Deleted {file_path} (restored to session start)[/green]")
+                        else:
+                            console.print(f"[yellow]File {file_path} already doesn't exist[/yellow]")
+                    except Exception as e:
+                        console.print(f"[red]❌ Failed to delete {file_path}: {str(e)}[/red]")
+                        logger.error(f"File delete error: {e}", exc_info=True)
+                    return
+
+            elif revision_num > 0:
+                if revision_num < 1 or revision_num > len(revisions):
+                    console.print(f"[red]Invalid revision #{revision_num}. Valid range: 1-{len(revisions)}[/red]")
+                    return
+
+                target_change = None
+                change_idx = 0
+                for change in code_session.filesystem_history.changes:
+                    if change.relative_path == file_path:
+                        change_idx += 1
+                        if change_idx == revision_num:
+                            target_change = change
+                            break
+
+                if not target_change or not target_change.content_snapshot:
+                    console.print(f"[red]No content snapshot for revision #{revision_num}[/red]")
+                    return
+
+                content_to_restore = target_change.content_snapshot
+                restore_description = f"revision #{revision_num}"
+                diff_stats = calculate_diff_stats(current_content, content_to_restore)
+                console.print(f"\n[cyan]📊 Change Synopsis:[/cyan]")
+                console.print(f"  Current: [yellow]{diff_stats['current_lines']} lines[/yellow]")
+                console.print(f"  Target:  [green]{diff_stats['target_lines']} lines[/green]")
+                console.print(f"  Delta:   [magenta]{diff_stats['delta_str']} lines[/magenta]\n")
+
+            # Confirm restore
+            if not auto_confirm:
+                console.print("[yellow]Confirm restore? [y/N]:[/yellow] ", end="")
+                confirm_input = await _get_nonpaste_input()
+                if confirm_input.lower() not in ['y', 'yes']:
+                    console.print("[cyan]↩ Restore cancelled[/cyan]")
+                    return
+
+            # Perform write
+            try:
+                full_path = Path(code_session.working_directory) / file_path
+                with open(full_path, 'w', encoding='utf-8', newline='') as f:
+                    f.write(content_to_restore)
+                console.print(f"[green]✓ Restored {file_path} to {restore_description}[/green]")
+            except Exception as e:
+                console.print(f"[red]❌ Restore failed: {str(e)}[/red]")
+                logger.error(f"File restore error: {e}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"perform_restore_direct failed: {e}", exc_info=True)
+
     @bindings.add('%')  # Shift+5 - Restore file via Textual overlay
     def _(event):
         """Show restore overlay and perform file restore."""
         try:
             import asyncio
-            from da_code.textual_restore import show_file_picker, show_restore_menu
-            console.print()
+            from da_code.textual_restore import show_combined_restore_menu
 
             async def _run_restore_with_cleanup():
                 try:
-                    # Gather modified files from filesystem history
-                    files = []
+                    textual_overlay_active[0] = True  # Block arrow keys from leaking into history
+
+                    # Gather modified files and their revision data
+                    file_data = {}
                     if code_session.filesystem_history:
                         seen = set()
                         for change in code_session.filesystem_history.changes:
                             rp = change.relative_path
                             if rp not in seen:
                                 seen.add(rp)
-                                files.append(rp)
-                        files.sort()
+                                # Get revisions for this file
+                                revisions = nudge_completer._get_file_revisions(rp)
+                                # Check for session start snapshot
+                                snapshot_entry = None
+                                if code_session.filesystem_history.session_start_snapshot:
+                                    snapshot_entry = code_session.filesystem_history.session_start_snapshot.get(rp)
+                                has_session_start = snapshot_entry is not None
 
-                    if not files:
+                                # Only include files that have revisions or a session start snapshot
+                                if revisions or has_session_start:
+                                    file_data[rp] = (revisions, has_session_start)
+
+                    if not file_data:
                         console.print("[yellow]No modified files to restore[/yellow]")
                         return
 
-                    # If multiple files, show picker
-                    if len(files) == 1:
-                        selected_file = files[0]
-                    else:
-                        selected_file = await show_file_picker(files, console)
-                        if not selected_file:
-                            console.print("[cyan]Restore cancelled[/cyan]")
-                            return
+                    # Show combined file and revision picker
+                    result = await show_combined_restore_menu(file_data, console)
+                    if not result:
+                        console.print("[cyan]Restore cancelled[/cyan]")
+                        return
 
-                    # Call the shared restore helper
-                    await perform_restore(selected_file, input_queue, code_session, console, nudge_completer)
+                    # Extract file and revision from result
+                    selected_file = result['file_path']
+                    selected_revision = result['revision']
+                    auto_confirm = result.get('auto_confirm', False)
+
+                    # Directly restore the selected file and revision
+                    # We need to call a modified version of perform_restore that accepts revision
+                    # For now, let's reconstruct the result dict format that perform_restore expects
+                    await perform_restore_direct(
+                        selected_file,
+                        selected_revision,
+                        auto_confirm,
+                        input_queue,
+                        code_session,
+                        console,
+                        nudge_completer
+                    )
 
                 finally:
+                    textual_overlay_active[0] = False  # Re-enable arrow key history navigation
                     try:
                         from prompt_toolkit.output import get_default_output
                         out = get_default_output()
@@ -1135,7 +1318,7 @@ async def async_main(session_id: str = None):
                     except Exception as ce:
                         logger.debug(f"Cleanup after restore overlay failed: {ce}")
 
-            # Disable prompt_toolkit bracketed paste before launching the external Textual UI
+            # Disable bracketed paste before launching Textual UI
             try:
                 from prompt_toolkit.output import get_default_output
                 out = get_default_output()
@@ -1147,6 +1330,7 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
+            # Run the Textual UI as a background task
             asyncio.create_task(_run_restore_with_cleanup())
 
         except Exception as e:
@@ -1507,6 +1691,8 @@ async def async_main(session_id: str = None):
                     cancel_agent[0] = False
                     output_message = None
                     status_message = None
+                    pasted_content_storage.clear()
+                    search_content_storage.clear()
                     continue
 
                 # If agent is not running then wait for input command
@@ -1530,6 +1716,10 @@ async def async_main(session_id: str = None):
                         console.print()
                         console.print(output_message)
                         output_message = None
+
+                        # Clear storage to prevent leakage between runs
+                        pasted_content_storage.clear()
+                        search_content_storage.clear()
 
                         # Fetch final metrics and print enhanced summary
                         try:
@@ -1588,6 +1778,10 @@ async def async_main(session_id: str = None):
                     except Exception as e:
                         # Handle agent execution errors
                         running_agent = None
+                        status_message = None
+                        output_message = None
+                        pasted_content_storage.clear()
+                        search_content_storage.clear()
                         status_interface.stop_execution(False, str(e))
                         console.print(f"[red]Agent error: {str(e)}[/red]")
                         logger.error(f"Agent execution error: {type(e).__name__}: {str(e)}", exc_info=True)
@@ -2024,7 +2218,7 @@ async def async_main(session_id: str = None):
 
                         # Gather all context sources
                         shell_context = shell_manager.get_shell_context_for_agent()
-                        file_changes = code_session.get_file_changes_summary()
+                        file_changes = code_session.get_file_changes_summary(peek_only=True)
                         logger.info(f"File changes summary: {file_changes}")
 
                         # Build enhanced input with all context
@@ -2063,6 +2257,10 @@ async def async_main(session_id: str = None):
                         running_agent = tg.create_task(
                             agent.arun(sanitized_input, confirm_wrapper, status_queue, output_queue, user_id)
                         )
+
+                        # Commit file changes timestamp now that agent has started successfully
+                        code_session.mark_file_changes_reported()
+
                         user_input = None
                     except Exception as e:
                         status_interface.stop_execution(False, str(e))
@@ -2072,6 +2270,8 @@ async def async_main(session_id: str = None):
                         running_agent = None
                         status_message = None
                         output_message = None
+                        pasted_content_storage.clear()
+                        search_content_storage.clear()
 
             except KeyboardInterrupt:
                 if status_interface.current_status:

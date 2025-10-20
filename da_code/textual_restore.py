@@ -1,11 +1,11 @@
 """Textual-based file restore menu for version selection."""
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Static, DataTable, Button, Footer, Header
 from textual.screen import Screen
 from textual import events
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 
 
 class RestoreScreen(Screen):
@@ -422,4 +422,390 @@ async def show_file_picker(files: list, console) -> Optional[str]:
         logger = logging.getLogger(__name__)
         logger.error(f"File picker failed: {e}", exc_info=True)
         console.print(f"\n[red]File picker error: {e}[/red]\n")
+        return None
+
+
+# --- Combined File and Revision Picker -------------------------------------------------
+class CombinedRestoreScreen(Screen):
+    """Combined file picker and revision history in side-by-side view."""
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("escape", "quit", "Quit"),
+        ("tab", "switch_panel", "Switch panel"),
+        ("s", "restore_session", "Restore Session"),
+    ]
+
+    DEFAULT_CSS = """
+    CombinedRestoreScreen {
+        background: $surface;
+    }
+
+    #header {
+        width: 100%;
+        height: auto;
+        padding: 0 2;
+        background: $boost;
+        border-bottom: solid $primary;
+    }
+
+    #title {
+        text-style: bold;
+        color: $accent;
+    }
+
+    #main-container {
+        width: 100%;
+        height: 1fr;
+        layout: horizontal;
+    }
+
+    #files-panel {
+        width: 40%;
+        height: 100%;
+        border: solid $primary;
+        padding: 1;
+    }
+
+    #revisions-panel {
+        width: 60%;
+        height: 100%;
+        border: solid $accent;
+        padding: 1;
+    }
+
+    #files-table {
+        height: 1fr;
+    }
+
+    #revisions-table {
+        height: 1fr;
+    }
+
+    .panel-title {
+        text-style: bold;
+        padding: 0 0 1 0;
+    }
+
+    #help-text {
+        width: 100%;
+        padding: 1 2;
+        content-align: center middle;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, file_data: Dict[str, Tuple[List, bool]], console_ref):
+        """Initialize combined restore screen.
+
+        Args:
+            file_data: Dict mapping file_path -> (revisions_list, has_session_start)
+            console_ref: Rich console instance
+        """
+        super().__init__()
+        self.file_data = file_data
+        self.console_ref = console_ref
+        self.current_file: Optional[str] = None
+        self.current_panel = "files"  # "files" or "revisions"
+        self.auto_confirm = False
+
+    def compose(self) -> ComposeResult:
+        """Compose the combined restore UI."""
+        try:
+            yield Header()
+
+            # Header
+            with Container(id="header"):
+                yield Static("File Restore", id="title")
+
+            # Main container with side-by-side panels
+            with Horizontal(id="main-container"):
+                # Left panel: Files
+                with Vertical(id="files-panel"):
+                    yield Static("📁 Modified Files", classes="panel-title")
+                    files_table = DataTable(id="files-table")
+                    files_table.cursor_type = "row"
+                    files_table.zebra_stripes = True
+                    files_table.add_column("File Path", width=50)
+                    files_table.add_column("Revisions", width=10)
+
+                    # Populate files
+                    for file_path, (revisions, has_session_start) in self.file_data.items():
+                        revision_count = len(revisions)
+                        files_table.add_row(file_path, str(revision_count))
+
+                    yield files_table
+
+                # Right panel: Revisions
+                with Vertical(id="revisions-panel"):
+                    yield Static("📝 Revision History", classes="panel-title", id="revisions-title")
+                    revisions_table = DataTable(id="revisions-table")
+                    revisions_table.cursor_type = "row"
+                    revisions_table.zebra_stripes = True
+                    revisions_table.add_column("#", width=8)
+                    revisions_table.add_column("Lines Changed", width=15)
+                    revisions_table.add_column("Time Ago", width=15)
+                    revisions_table.add_column("Description", width=30)
+                    yield revisions_table
+
+            # Help text
+            yield Static(
+                "↑/↓=Select file • Tab=Switch panel • 0-9/Enter=Restore revision • S=Restore session • Q=Quit",
+                id="help-text"
+            )
+
+            yield Footer()
+
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Combined restore UI composition failed: {e}", exc_info=True)
+            yield Static(f"Error loading restore menu: {e}", classes="error")
+
+    def on_mount(self) -> None:
+        """Focus the files table when screen mounts."""
+        try:
+            files_table = self.query_one("#files-table", DataTable)
+            if files_table:
+                files_table.focus()
+                # Select first file if available
+                if files_table.row_count > 0:
+                    files_table.move_cursor(row=0)
+                    self._update_revisions_for_current_file()
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"on_mount error: {e}", exc_info=True)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Update revisions panel when a file is selected."""
+        try:
+            if event.data_table.id == "files-table":
+                self._update_revisions_for_current_file()
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Row highlight error: {e}", exc_info=True)
+
+    def _update_revisions_for_current_file(self) -> None:
+        """Update the revisions table based on selected file."""
+        try:
+            files_table = self.query_one("#files-table", DataTable)
+            revisions_table = self.query_one("#revisions-table", DataTable)
+
+            if files_table.cursor_row is None:
+                return
+
+            # Get the selected file path
+            row_key = files_table.get_row_at(files_table.cursor_row)
+            if not row_key:
+                return
+
+            file_path = str(row_key[0])  # First column is file path
+            self.current_file = file_path
+
+            # Update title
+            title = self.query_one("#revisions-title", Static)
+            title.update(f"📝 Revisions: {file_path}")
+
+            # Clear and repopulate revisions table
+            revisions_table.clear()
+
+            if file_path in self.file_data:
+                revisions, has_session_start = self.file_data[file_path]
+
+                # Add session start option (revision 0)
+                if has_session_start:
+                    revisions_table.add_row(
+                        "0",
+                        "-",
+                        "-",
+                        "Session start (original)"
+                    )
+                elif revisions:
+                    # File was created during session
+                    revisions_table.add_row(
+                        "0",
+                        "-",
+                        "-",
+                        "Session start (DELETE file)"
+                    )
+
+                # Add all revisions
+                for rev_num, lines_changed, time_str, _ in revisions:
+                    revisions_table.add_row(
+                        str(rev_num),
+                        f"{lines_changed} lines",
+                        f"{time_str} ago",
+                        f"Revision #{rev_num}"
+                    )
+
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Update revisions error: {e}", exc_info=True)
+
+    def action_switch_panel(self) -> None:
+        """Switch focus between files and revisions panels."""
+        try:
+            files_table = self.query_one("#files-table", DataTable)
+            revisions_table = self.query_one("#revisions-table", DataTable)
+
+            if self.current_panel == "files":
+                revisions_table.focus()
+                self.current_panel = "revisions"
+            else:
+                files_table.focus()
+                self.current_panel = "files"
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Switch panel error: {e}", exc_info=True)
+
+    def action_quit(self) -> None:
+        """Cancel restore."""
+        self.app.exit(None)
+
+    def action_restore_selected(self) -> None:
+        """Restore the currently highlighted revision."""
+        try:
+            if not self.current_file:
+                return
+
+            revisions_table = self.query_one("#revisions-table", DataTable)
+            if revisions_table.cursor_row is None:
+                return
+
+            selected_revision = revisions_table.cursor_row
+            revisions, _ = self.file_data[self.current_file]
+            max_revision = len(revisions)
+
+            # Check if the revision number is valid
+            if 0 <= selected_revision <= max_revision:
+                # Restore with auto_confirm=True (no confirmation for Enter key)
+                result = {
+                    "file_path": self.current_file,
+                    "revision": selected_revision,
+                    "auto_confirm": True
+                }
+                self.app.exit(result)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Restore selected failed: {e}", exc_info=True)
+
+    def on_key(self, event: events.Key) -> None:
+        """Handle keyboard shortcuts for instant restore."""
+        # Enter key - restore currently selected revision
+        if event.key == "enter":
+            try:
+                if not self.current_file:
+                    return
+
+                revisions_table = self.query_one("#revisions-table", DataTable)
+                if revisions_table.cursor_row is None:
+                    return
+
+                selected_revision = revisions_table.cursor_row
+                revisions, _ = self.file_data[self.current_file]
+                max_revision = len(revisions)
+
+                # Check if the revision number is valid
+                if 0 <= selected_revision <= max_revision:
+                    # Instantly restore with auto_confirm=True (no confirmation)
+                    result = {
+                        "file_path": self.current_file,
+                        "revision": selected_revision,
+                        "auto_confirm": True
+                    }
+                    event.prevent_default()
+                    event.stop()
+                    self.app.exit(result)
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Enter key restore failed: {e}", exc_info=True)
+
+        # Number key selection (0-9) - instantly restore that revision
+        elif event.key in "0123456789":
+            try:
+                idx = int(event.key)
+
+                if not self.current_file:
+                    return
+
+                revisions, _ = self.file_data[self.current_file]
+                max_revision = len(revisions)
+
+                # Check if the revision number is valid
+                if 0 <= idx <= max_revision:
+                    # Instantly restore with auto_confirm=True (no confirmation)
+                    result = {
+                        "file_path": self.current_file,
+                        "revision": idx,
+                        "auto_confirm": True
+                    }
+                    self.app.exit(result)
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Number key restore failed: {e}", exc_info=True)
+
+    async def action_restore_session(self) -> None:
+        """Restore entire session (revert all changes)."""
+        from .textual_confirmation import show_confirmation_dialog
+
+        try:
+            confirmed = await show_confirmation_dialog(
+                "Restore Entire Session?",
+                "This will revert ALL files to their session start state. This action cannot be undone.",
+                self.console_ref
+            )
+
+            if confirmed:
+                # Return special marker for session restore
+                result = {
+                    "restore_session": True
+                }
+                self.app.exit(result)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Session restore confirmation failed: {e}", exc_info=True)
+
+
+class CombinedRestoreApp(App):
+    """Combined file and revision restore application."""
+
+    def __init__(self, file_data: Dict[str, Tuple[List, bool]], console_ref):
+        super().__init__()
+        self.file_data = file_data
+        self.console_ref = console_ref
+
+    def on_mount(self) -> None:
+        """Push combined restore screen on mount."""
+        self.push_screen(CombinedRestoreScreen(self.file_data, self.console_ref))
+
+
+async def show_combined_restore_menu(file_data: Dict[str, Tuple[List, bool]], console) -> Optional[dict]:
+    """
+    Show combined file and revision restore menu.
+
+    Args:
+        file_data: Dict mapping file_path -> (revisions_list, has_session_start)
+                   where revisions_list is List[(revision_num, lines_changed, time_ago_str, timestamp)]
+        console: Rich console instance
+
+    Returns:
+        Dict with 'file_path', 'revision', and 'auto_confirm' if user selected, None if cancelled
+    """
+    try:
+        app = CombinedRestoreApp(file_data, console)
+        result = await app.run_async()
+        return result
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Combined restore menu failed: {e}", exc_info=True)
+        console.print(f"\n[red]Combined restore menu error: {e}[/red]\n")
         return None

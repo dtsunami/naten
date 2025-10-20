@@ -327,13 +327,22 @@ class FileSystemHistory(BaseModel):
     last_reported_time: float = Field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
     session_start_snapshot: Dict[str, FileSnapshot] = Field(default_factory=dict, description="Snapshot at session start")
 
-    def get_changes_since_last_prompt(self) -> Optional[str]:
-        """Get a summary of changes since last prompt."""
+    def get_changes_since_last_prompt(self, peek_only: bool = False) -> Optional[str]:
+        """Get a summary of changes since last prompt.
+
+        Args:
+            peek_only: If True, only peek at changes without updating last_reported_time.
+                      Use this when building context before agent starts to avoid losing
+                      changes if agent fails to start.
+        """
         from collections import defaultdict
 
         current_time = datetime.now(timezone.utc).timestamp()
         new_changes = [c for c in self.changes if c.timestamp.timestamp() > self.last_reported_time]
-        self.last_reported_time = current_time
+
+        # Only update timestamp if not peeking (commit happens after agent starts)
+        if not peek_only:
+            self.last_reported_time = current_time
 
         if not new_changes:
             return None
@@ -353,6 +362,14 @@ class FileSystemHistory(BaseModel):
                 parts.append(f"{event_type.title()}: {files}{more}")
 
         return "📁 File changes: " + " | ".join(parts)
+
+    def mark_changes_reported(self) -> None:
+        """Commit the timestamp update to mark changes as reported.
+
+        Call this after agent successfully starts to prevent losing changes
+        if agent fails to start.
+        """
+        self.last_reported_time = datetime.now(timezone.utc).timestamp()
 
     def get_file_history(self, file_path: str) -> List[FileChange]:
         """Get history of changes for a specific file."""
@@ -678,11 +695,21 @@ class CodeSession(BaseModel):
                 project_root=self.working_directory
             )
 
-    def get_file_changes_summary(self) -> Optional[str]:
-        """Get summary of recent file changes."""
+    def get_file_changes_summary(self, peek_only: bool = False) -> Optional[str]:
+        """Get summary of recent file changes.
+
+        Args:
+            peek_only: If True, only peek at changes without marking them as reported.
+                      Use this when building context before agent starts.
+        """
         if not self.filesystem_history:
             return None
-        return self.filesystem_history.get_changes_since_last_prompt()
+        return self.filesystem_history.get_changes_since_last_prompt(peek_only=peek_only)
+
+    def mark_file_changes_reported(self) -> None:
+        """Mark file changes as reported after agent successfully starts."""
+        if self.filesystem_history:
+            self.filesystem_history.mark_changes_reported()
 
     def get_session_summary(self) -> Dict[str, Any]:
         """Get a comprehensive summary of the session."""
