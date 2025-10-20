@@ -34,7 +34,9 @@ from .ux import (
     show_status_splash,
     SimpleStatusInterface,
     get_random_thinking_phrase,
-    console  # Import the shared console from ux
+    console,  # Import the shared console from ux
+    pause_execution,
+    resume_execution,
 )
 from .textual_confirmation import show_confirmation_dialog
 from .textual_context_manager import show_context_manager_textual
@@ -289,14 +291,27 @@ async def async_main(session_id: str = None):
     shell_manager = ShellModeManager()
 
     async def confirm_wrapper(execution: CommandExecution) -> ConfirmationResponse:
-        # Stop status to show confirmation dialog cleanly
-        status_interface.stop_execution()
+        # Pause status (do not reset metrics) to show confirmation dialog cleanly
+        try:
+            pause_execution(status_interface)
+        except Exception:
+            # Fallback to stop if pause isn't available for some reason
+            try:
+                status_interface.stop_execution()
+            except Exception:
+                pass
 
         # Show Textual confirmation dialog
         response = await show_confirmation_dialog(execution)
 
-        # Restart status interface for continued execution
-        status_interface.start_execution("Processing...")
+        # Resume status interface for continued execution, preserving metrics
+        try:
+            resume_execution(status_interface)
+        except Exception:
+            try:
+                status_interface.start_execution("Processing...")
+            except Exception:
+                pass
 
         return response
 

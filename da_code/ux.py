@@ -58,7 +58,13 @@ def get_random_spinner() -> str:
 
 
 class SimpleStatusInterface:
-    """Simple status interface with Rich spinner and agent insights."""
+    """Simple status interface with Rich spinner and agent insights.
+
+    New features:
+    - pause_execution(): stop the visual spinner without resetting internal metrics/start_time
+      (useful for temporary modal prompts like confirmations)
+    - resume_execution(): restart the spinner and timer preserving metrics and start_time
+    """
 
     def __init__(self):
         self.start_time = None
@@ -75,7 +81,9 @@ class SimpleStatusInterface:
         self.current_spinner = get_random_spinner()
 
     def start_execution(self, message: str):
-        """Start execution with status message and start background timer for updates."""
+        """Start execution with status message and start background timer for updates.
+
+        This resets the timers and metrics (for a fresh execution)."""
         self.start_time = time.time()
         self.llm_calls = 0
         self.tool_calls = 0
@@ -87,6 +95,9 @@ class SimpleStatusInterface:
         self.current_spinner = get_random_spinner()
         self.current_status = Status(f"🤖 {message}", spinner=self.current_spinner)
         self.current_status.start()
+
+        # Keep track of the initial message for resume scenarios
+        self._last_message = message
 
         # Start a lightweight background timer task that periodically refreshes the status text.
         # We keep it synchronous-friendly by using threading.Timer so it works both in sync and
@@ -107,7 +118,7 @@ class SimpleStatusInterface:
                     if self.current_status:
                         # Compute a short status label without heavy formatting
                         elapsed = time.time() - self.start_time if self.start_time else 0
-                        status_text = f"🤖 {message} | {elapsed:.1f}s"
+                        status_text = f"🤖 {self._last_message} | {elapsed:.1f}s"
                         if self.llm_calls > 0:
                             status_text += f" | 🧠 {self.llm_calls}"
                         if self.tool_calls > 0:
@@ -148,6 +159,8 @@ class SimpleStatusInterface:
                 # Add input/output breakdown if available
                 if self.input_tokens > 0 or self.output_tokens > 0:
                     status_text += f" (↓{self.input_tokens}↑{self.output_tokens})"
+            # Update last displayed message so pause/resume can restore it
+            self._last_message = message
             self.current_status.update(status_text)
 
     def log_llm_call(self, tokens_used: int = 0, input_tokens: int = 0, output_tokens: int = 0):
@@ -172,7 +185,12 @@ class SimpleStatusInterface:
         self.agent_metrics['tokens'] += tokens
 
     def stop_execution(self, success: bool = True, final_message: str = None, silent: bool = False):
-        """Stop execution and show final result."""
+        """Stop execution and show final result.
+
+        This stops the visual spinner, clearing the status, but leaves internal
+        metrics intact unless called from start_execution which intentionally
+        resets them.
+        """
         # Cancel any background timer task we started
         if getattr(self, '_timer_task', None):
             try:
@@ -214,6 +232,7 @@ class SimpleStatusInterface:
 
             console.print(result_text)
 
+        # Keep internal metrics (llm_calls/tool_calls/tokens) so caller can resume the status
         self.current_status = None
         self.callback_handler = None
 
@@ -334,6 +353,66 @@ async def async_prompt_user_silent(choices: List[str], default: str = None, comm
 
 def display_simple_confirmation(execution) -> None:
     """Display simplified command confirmation panel using UserResponse enum."""
+
+# Add pause/resume helpers for temporary modals so we don't reset metrics during confirmation
+def pause_execution(status: SimpleStatusInterface):
+    """Pause visual status spinner but keep metrics intact."""
+    try:
+        if status and getattr(status, 'current_status', None):
+            try:
+                status.current_status.stop()
+            except Exception:
+                pass
+            # Cancel timer but DO NOT reset metrics
+            if getattr(status, '_timer_task', None):
+                try:
+                    status._timer_task.cancel()
+                except Exception:
+                    pass
+                finally:
+                    status._timer_task = None
+    except Exception:
+        pass
+
+
+def resume_execution(status: SimpleStatusInterface):
+    """Resume visual status spinner and timer preserving metrics and start_time."""
+    try:
+        if status and getattr(status, 'start_time', None):
+            # Recreate the visual status using stored last message
+            status.current_status = Status(f"🤖 {getattr(status, '_last_message', 'Processing...')}", spinner=status.current_spinner)
+            try:
+                status.current_status.start()
+            except Exception:
+                pass
+
+            # Restart timer tick loop to update display
+            try:
+                import threading
+
+                def _tick():
+                    try:
+                        if status.current_status:
+                            elapsed = time.time() - status.start_time if status.start_time else 0
+                            status_text = f"🤖 {getattr(status, '_last_message', 'Processing...')} | {elapsed:.1f}s"
+                            if status.llm_calls > 0:
+                                status_text += f" | 🧠 {status.llm_calls}"
+                            if status.tool_calls > 0:
+                                status_text += f" | 🔧 {status.tool_calls}"
+                            status.current_status.update(status_text)
+                            status._timer_task = threading.Timer(0.8, _tick)
+                            status._timer_task.daemon = True
+                            status._timer_task.start()
+                    except Exception:
+                        pass
+
+                status._timer_task = threading.Timer(0.8, _tick)
+                status._timer_task.daemon = True
+                status._timer_task.start()
+            except Exception:
+                pass
+    except Exception:
+        pass
     # Build content
     content = []
 
@@ -394,8 +473,8 @@ async def async_prompt_text(message: str, default: str = None) -> str:
 
 async def confirmation_handler(execution: CommandExecution, status_interface: SimpleStatusInterface) -> ConfirmationResponse:
     """Handle command confirmation directly."""
-    # Stop status to show confirmation dialog cleanly
-    status_interface.stop_execution()
+    # Pause status to show confirmation dialog cleanly without resetting metrics
+    pause_execution(status_interface)
 
     # Get user choice using enum values with command display
     response = await async_prompt_user_silent([
@@ -412,8 +491,8 @@ async def confirmation_handler(execution: CommandExecution, status_interface: Si
         if not modified_command:
             response = UserResponse.NO.value.title()
 
-    # Restart status interface for continued execution
-    status_interface.start_execution("Processing...")
+    # Resume status interface for continued execution, preserving metrics
+    resume_execution(status_interface)
 
     # Convert response back to enum value for consistency
     response_lower = response.lower()
