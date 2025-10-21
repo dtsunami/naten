@@ -19,6 +19,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.completion import PathCompleter, WordCompleter, Completer, Completion
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.application.current import get_app
+import traceback
 
 from .config import ConfigManager, setup_logging
 from .context import ContextLoader, DirectoryContext
@@ -304,6 +305,51 @@ async def async_main(session_id: str = None):
         # Show Textual confirmation dialog
         response = await show_confirmation_dialog(execution)
 
+        # Resume status interface for continued execution, preserving metrics.
+        # Use the boolean return value to decide whether we need to apply an
+        # alternate path. Avoid calling start_execution() because that resets
+        # metrics and is responsible for the observed metric resets.
+        try:
+            resumed_ok = resume_execution(status_interface)
+        except Exception:
+            resumed_ok = False
+
+        if not resumed_ok:
+            # Attempt a conservative in-place rebuild that preserves metrics. If
+            # that still fails, we log the failure and leave metrics intact
+            # without resetting them. Do not call start_execution here.
+            try:
+                status_interface.ensure_visual_display(preserve_metrics=True)
+            except Exception:
+                # As a last resort, do nothing - this avoids resetting metrics
+                # and leaves the status non-visual until next start_execution
+                pass
+
+        # Force prompt_toolkit to redraw the UI to avoid stale terminal fragments
+        try:
+            # Small sleep to give terminal time to restore mode after textual
+            # overlay dismissals. On some platforms the redraw races with the
+            # terminal restore which leaves artifacts; this short delay helps.
+            import time as _time
+            _time.sleep(0.02)
+            get_app().invalidate()
+        except Exception:
+            pass
+
+        return response
+        # Pause status (do not reset metrics) to show confirmation dialog cleanly
+        try:
+            pause_execution(status_interface)
+        except Exception:
+            # Fallback to stop if pause isn't available for some reason
+            try:
+                status_interface.stop_execution()
+            except Exception:
+                pass
+
+        # Show Textual confirmation dialog
+        response = await show_confirmation_dialog(execution)
+
         # Resume status interface for continued execution, preserving metrics
         try:
             resume_execution(status_interface)
@@ -312,6 +358,11 @@ async def async_main(session_id: str = None):
                 status_interface.start_execution("Processing...")
             except Exception:
                 pass
+        # Force prompt_toolkit to redraw the UI to avoid stale terminal fragments
+        try:
+            get_app().invalidate()
+        except Exception:
+            pass
 
         return response
 
@@ -377,8 +428,9 @@ async def async_main(session_id: str = None):
                 status_interface.update_status("Skipping session snapshot (drive root)")
             else:
                 status_interface.update_status("Scheduling session snapshot (non-blocking)...")
-                # Offload the potentially expensive snapshot to a thread so the CLI stays responsive
-                loop = asyncio.get_running_loop()
+                # Prepare the potentially expensive snapshot to run inside the main TaskGroup so
+                # it can be cancelled/managed together with other background tasks.
+                # We store a callable here and will schedule it once the TaskGroup is available.
                 # Provide a progress callback that updates the status interface with current file being indexed
                 def _progress_cb(msg: str):
                     try:
@@ -387,7 +439,8 @@ async def async_main(session_id: str = None):
                     except Exception:
                         pass
 
-                loop.run_in_executor(None, functools.partial(code_session.filesystem_history.capture_session_start_snapshot, daignore, 10, _progress_cb))
+                # Save the callable to be executed later (inside the TaskGroup)
+                snapshot_callable = functools.partial(code_session.filesystem_history.capture_session_start_snapshot, daignore, 10, _progress_cb)
 
         status_interface.update_status("Initializing Agno agent...")
 
@@ -489,6 +542,11 @@ async def async_main(session_id: str = None):
 
     # Track when Textual overlays are active to prevent key leakage
     textual_overlay_active = [False]  # Mutable flag
+
+    # Holder for the active TaskGroup so keybinding handlers can attach tasks to it.
+    # This allows all created tasks to be children of the TaskGroup and be
+    # cancelled/aggregated together on failure or shutdown.
+    tg_holder = {'tg': None}
 
     def handle_paste(pasted_text: str, buffer) -> None:
         """Shared paste handling logic for both BracketedPaste and Ctrl+V.
@@ -860,7 +918,24 @@ async def async_main(session_id: str = None):
         try:
             import asyncio
             console.print()
-            asyncio.create_task(_run_context_manager_with_cleanup())
+            # Prefer creating overlay tasks as children of the main TaskGroup so
+            # they are tracked and canceled together. Fall back to loop.create_task
+            # if the TaskGroup is not yet available.
+            loop = asyncio.get_running_loop()
+            tg = tg_holder.get('tg')
+            if tg is not None:
+                tg.create_task(_run_context_manager_with_cleanup())
+            else:
+                # No TaskGroup yet (startup race), create a loop task and log a warning
+                logger.warning("Context manager starting before TaskGroup available; creating untracked task")
+                try:
+                    loop.create_task(_run_context_manager_with_cleanup())
+                except Exception:
+                    # Last resort: fallback to asyncio.create_task
+                    try:
+                        asyncio.create_task(_run_context_manager_with_cleanup())
+                    except Exception:
+                        logger.debug("Failed to create untracked context manager task")
         except Exception as e:
             logger.error(f"Context manager failed: {e}", exc_info=True)
             console.print(f"\n[red]Context manager error: {e}[/red]\n")
@@ -1330,8 +1405,21 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
-            # Run the Textual UI as a background task
-            asyncio.create_task(_run_restore_with_cleanup())
+            # Run the Textual UI as a background task. Prefer scheduling under the
+            # active TaskGroup so that it will be cancelled/managed together with
+            # other tasks. Fall back to asyncio.create_task if no TaskGroup is available.
+            try:
+                tg = tg_holder.get('tg')
+                if tg is not None:
+                    tg.create_task(_run_restore_with_cleanup())
+                else:
+                    asyncio.create_task(_run_restore_with_cleanup())
+            except Exception as e:
+                logger.debug(f"Failed to schedule restore overlay task: {e}")
+                try:
+                    asyncio.create_task(_run_restore_with_cleanup())
+                except Exception:
+                    logger.error("Could not start restore overlay task", exc_info=True)
 
         except Exception as e:
             logger.error(f"Restore overlay failed: {e}", exc_info=True)
@@ -1530,6 +1618,130 @@ async def async_main(session_id: str = None):
         reserve_space_for_menu=8,  # Reserve space for completion menu (8 rows)
     )
 
+    def force_prompt_redraw(ps: PromptSession | None = None, logger_ref=None):
+        """Try a consolidated set of redraw/invalidate/run_in_terminal operations
+        on the PromptSession's app and the current prompt_toolkit app to force the
+        prompt to become visible again. Returns a dict of actions attempted for
+        diagnostic logging.
+        """
+        results = {
+            'ps_app': False,
+            'ps_run_in_terminal': False,
+            'ps_invalidate': False,
+            'ps_request_redraw': False,
+            'cur_app_invalidate': False,
+            'cur_app_run_in_terminal': False,
+            'cur_app_request_redraw': False,
+        }
+        try:
+            import time as _time
+            _time.sleep(0.06)
+
+            if ps is None:
+                try:
+                    # Try to access the prompt_session from outer scope if not provided
+                    ps = prompt_session
+                except Exception:
+                    ps = None
+
+            # Attempt operations on the PromptSession app first
+            try:
+                app = getattr(ps, 'app', None) if ps is not None else None
+                if app is not None:
+                    results['ps_app'] = True
+
+                    # Prefer run_in_terminal to ensure prompt_toolkit restores the terminal
+                    try:
+                        def _noop():
+                            try:
+                                app.invalidate()
+                            except Exception:
+                                pass
+                        try:
+                            app.run_in_terminal(_noop)
+                            results['ps_run_in_terminal'] = True
+                        except Exception:
+                            # Fallback: direct invalidate
+                            try:
+                                app.invalidate()
+                                results['ps_invalidate'] = True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    try:
+                        if getattr(app, 'renderer', None) and hasattr(app.renderer, 'request_redraw'):
+                            try:
+                                app.renderer.request_redraw()
+                                results['ps_request_redraw'] = True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+            # Fallback to the current prompt_toolkit app
+            try:
+                from prompt_toolkit.application.current import get_app
+                try:
+                    cur_app = get_app()
+                except Exception:
+                    cur_app = None
+
+                if cur_app is not None:
+                    try:
+                        def _noop2():
+                            try:
+                                cur_app.invalidate()
+                            except Exception:
+                                pass
+                        try:
+                            cur_app.run_in_terminal(_noop2)
+                            results['cur_app_run_in_terminal'] = True
+                        except Exception:
+                            try:
+                                cur_app.invalidate()
+                                results['cur_app_invalidate'] = True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    try:
+                        if getattr(cur_app, 'renderer', None) and hasattr(cur_app.renderer, 'request_redraw'):
+                            try:
+                                cur_app.renderer.request_redraw()
+                                results['cur_app_request_redraw'] = True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                import sys as _sys
+                _sys.stdout.flush()
+                try:
+                    _sys.stderr.flush()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        except Exception as e:
+            try:
+                if logger_ref:
+                    logger_ref.debug(f"force_prompt_redraw error: {e}")
+                else:
+                    logger.debug(f"force_prompt_redraw error: {e}")
+            except Exception:
+                pass
+        return results
+
     async def get_user_input_with_history(queue):
         """Get user input with file-based history and arrow key support.
 
@@ -1657,7 +1869,58 @@ async def async_main(session_id: str = None):
             fs_watcher.stop()
             logger.info("Filesystem watcher stopped")
 
+    def create_traced_task(tg, coro, name=None):
+        """
+        Create a Task under TaskGroup 'tg' that logs exceptions with full traceback before re-raising.
+        Falls back to loop.create_task or asyncio.create_task when TaskGroup is not available.
+        """
+        async def _wrapper():
+            try:
+                return await coro
+            except Exception as exc:
+                try:
+                    logger.error(f"Task '%s' raised exception:", name or getattr(coro, '__name__', str(coro)), exc_info=True)
+                except Exception:
+                    # Best-effort print if logging fails
+                    try:
+                        import traceback as _tb
+                        print(_tb.format_exc())
+                    except Exception:
+                        pass
+                raise
+
+        try:
+            if tg is not None:
+                return tg.create_task(_wrapper())
+            else:
+                loop = asyncio.get_running_loop()
+                return loop.create_task(_wrapper())
+        except Exception:
+            try:
+                return asyncio.create_task(_wrapper())
+            except Exception:
+                logger.exception('Failed to create traced task')
+                return None
+
     async with asyncio.TaskGroup() as tg:
+        # Attach the TaskGroup to the holder so keybindings and overlays can
+        # create child tasks that will be managed under the same group. This
+        # ensures that on any failure or cancellation all related tasks are
+        # cancelled together.
+        tg_holder['tg'] = tg
+
+        # If a snapshot_callable was scheduled earlier, start it inside the taskgroup
+        try:
+            if 'snapshot_callable' in locals():
+                tg.create_task(asyncio.to_thread(snapshot_callable))
+        except Exception:
+            try:
+                logger.debug("Failed to start snapshot inside TaskGroup, falling back to run_in_executor")
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(None, snapshot_callable)
+            except Exception:
+                pass
+
         wait_for_input = tg.create_task(get_user_input_with_history(input_queue))
         fs_watcher_task = tg.create_task(run_filesystem_watcher())
 
@@ -1682,6 +1945,44 @@ async def async_main(session_id: str = None):
 
                     running_agent = None
                     status_interface.stop_execution(False, "Cancelled")
+
+                    # Robust prompt restore helper for cancellation path
+                    try:
+                        import time as _time
+                        _time.sleep(0.06)
+
+                        try:
+                            app = getattr(prompt_session, 'app', None)
+                            if app is not None:
+                                try:
+                                    app.invalidate()
+                                except Exception:
+                                    pass
+                                try:
+                                    # Try renderer redraw if available
+                                    if getattr(app, 'renderer', None) and hasattr(app.renderer, 'request_redraw'):
+                                        app.renderer.request_redraw()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        try:
+                            from prompt_toolkit.application.current import get_app
+                            try:
+                                get_app().invalidate()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                        try:
+                            import sys as _sys
+                            _sys.stdout.flush()
+                        except Exception:
+                            pass
+                    except Exception as _e:
+                        logger.debug(f"Prompt restore helper (cancel) failed: {_e}")
 
                     # Print any partial output that was generated before cancellation
                     if output_message:
@@ -1712,14 +2013,262 @@ async def async_main(session_id: str = None):
                         # Clear status silently
                         status_interface.stop_execution(True, silent=True)
 
-                        # Print agent output
-                        console.print()
-                        console.print(output_message)
+                        # Robust prompt restore helper to avoid prompt_toolkit + Rich race conditions.
+                        try:
+                            import time as _time
+                            # Slightly longer sleep to give Rich/threads a moment to stop cleanly
+                            _time.sleep(0.06)
+
+                            # Prefer invalidating the PromptSession's app if available
+                            try:
+                                app = getattr(prompt_session, 'app', None)
+                                if app is not None:
+                                    # Run multiple invalidates/request_redraw attempts for robustness
+                                    try:
+                                        app.invalidate()
+                                    except Exception:
+                                        pass
+
+                                    try:
+                                        if hasattr(app, 'renderer') and hasattr(app.renderer, 'request_redraw'):
+                                            app.renderer.request_redraw()
+                                    except Exception:
+                                        pass
+
+                                    try:
+                                        if hasattr(app, 'call_from_executor'):
+                                            try:
+                                                app.call_from_executor(lambda: app.invalidate())
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+
+                                    # Conservative repeated invalidation (in case first one races)
+                                    try:
+                                        for _i in range(3):
+                                            try:
+                                                app.invalidate()
+                                            except Exception:
+                                                pass
+                                            _time.sleep(0.01)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                            # Fallback to the current app invalidation
+                            try:
+                                from prompt_toolkit.application.current import get_app
+                                try:
+                                    cur_app = get_app()
+                                except Exception:
+                                    cur_app = None
+
+                                if cur_app is not None:
+                                    try:
+                                        cur_app.invalidate()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if hasattr(cur_app, 'call_from_executor'):
+                                            try:
+                                                cur_app.call_from_executor(lambda: cur_app.invalidate())
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if getattr(cur_app, 'renderer', None) and hasattr(cur_app.renderer, 'request_redraw'):
+                                            try:
+                                                cur_app.renderer.request_redraw()
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+
+                                    try:
+                                        for _i in range(2):
+                                            try:
+                                                cur_app.invalidate()
+                                            except Exception:
+                                                pass
+                                            _time.sleep(0.01)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                            # Flush stdout/stderr to ensure any prints are visible immediately
+                            try:
+                                import sys as _sys
+                                _sys.stdout.flush()
+                                try:
+                                    _sys.stderr.flush()
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                        except Exception as _e:
+                            logger.debug(f"Prompt restore helper failed: {_e}")
+
+                        # Print agent output using prompt_toolkit.run_in_terminal when possible to
+                        # ensure the terminal is restored correctly and the prompt is redrawn.
+                        printed = False
+                        try:
+                            app = getattr(prompt_session, 'app', None)
+                            if app is not None:
+                                def _print_out():
+                                    try:
+                                        console.print()
+                                        console.print(output_message)
+                                    except Exception:
+                                        pass
+                                try:
+                                    app.run_in_terminal(_print_out)
+                                    printed = True
+                                except Exception:
+                                    printed = False
+                        except Exception:
+                            printed = False
+
+                        if not printed:
+                            console.print()
+                            console.print(output_message)
+
                         output_message = None
 
                         # Clear storage to prevent leakage between runs
                         pasted_content_storage.clear()
                         search_content_storage.clear()
+
+                        # Aggressive prompt_toolkit redraw attempts to force prompt visibility
+                        try:
+                            app = getattr(prompt_session, 'app', None)
+                            if app is not None:
+                                try:
+                                    # Renderer request redraw
+                                    if getattr(app, 'renderer', None) and hasattr(app.renderer, 'request_redraw'):
+                                        app.renderer.request_redraw()
+                                except Exception:
+                                    pass
+
+                                try:
+                                    # Private redraw if available
+                                    if hasattr(app, '_redraw'):
+                                        try:
+                                            app._redraw()
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+                                try:
+                                    app.invalidate()
+                                except Exception:
+                                    pass
+
+                                try:
+                                    if hasattr(app, 'call_from_executor'):
+                                        try:
+                                            app.call_from_executor(lambda: app.invalidate())
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+                            # Fallback to current app
+                            try:
+                                from prompt_toolkit.application.current import get_app
+                                try:
+                                    cur_app = get_app()
+                                except Exception:
+                                    cur_app = None
+
+                                if cur_app is not None:
+                                    try:
+                                        if getattr(cur_app, 'renderer', None) and hasattr(cur_app.renderer, 'request_redraw'):
+                                            cur_app.renderer.request_redraw()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if hasattr(cur_app, '_redraw'):
+                                            try:
+                                                cur_app._redraw()
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                                    try:
+                                        cur_app.invalidate()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if hasattr(cur_app, 'call_from_executor'):
+                                            try:
+                                                cur_app.call_from_executor(lambda: cur_app.invalidate())
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                            try:
+                                import sys as _sys
+                                _sys.stdout.flush()
+                                try:
+                                    _sys.stderr.flush()
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                        except Exception as _e:
+                            logger.debug(f"Aggressive redraw helper failed: {_e}")
+
+                        # Additional attempt: use force_prompt_redraw helper and log results
+                        try:
+                            try:
+                                res = force_prompt_redraw(prompt_session, logger_ref=logger)
+                            except Exception:
+                                try:
+                                    res = force_prompt_redraw(prompt_session)
+                                except Exception:
+                                    res = {}
+                            try:
+                                logger.debug(f"force_prompt_redraw results: {res}")
+                            except Exception:
+                                pass
+
+                            # Ensure cursor visible and reset SGR to avoid hidden cursor or inverse colors
+                            try:
+                                def _show_cursor():
+                                    import sys as _sys2
+                                    try:
+                                        _sys2.stdout.write('\x1b[?25h')  # show cursor
+                                    except Exception:
+                                        pass
+                                    try:
+                                        _sys2.stdout.write('\x1b[0m')    # reset attributes
+                                    except Exception:
+                                        pass
+                                    try:
+                                        _sys2.stdout.flush()
+                                    except Exception:
+                                        pass
+
+                                app = getattr(prompt_session, 'app', None)
+                                if app is not None:
+                                    try:
+                                        app.run_in_terminal(_show_cursor)
+                                    except Exception:
+                                        _show_cursor()
+                                else:
+                                    _show_cursor()
+                            except Exception as _e:
+                                logger.debug(f"cursor restore failed: {_e}")
+                        except Exception:
+                            pass
 
                         # Fetch final metrics and print enhanced summary
                         try:
@@ -1783,6 +2332,12 @@ async def async_main(session_id: str = None):
                         pasted_content_storage.clear()
                         search_content_storage.clear()
                         status_interface.stop_execution(False, str(e))
+                        try:
+                            import time as _time
+                            _time.sleep(0.02)
+                            get_app().invalidate()
+                        except Exception:
+                            pass
                         console.print(f"[red]Agent error: {str(e)}[/red]")
                         logger.error(f"Agent execution error: {type(e).__name__}: {str(e)}", exc_info=True)
 
@@ -2264,6 +2819,12 @@ async def async_main(session_id: str = None):
                         user_input = None
                     except Exception as e:
                         status_interface.stop_execution(False, str(e))
+                        try:
+                            import time as _time
+                            _time.sleep(0.02)
+                            get_app().invalidate()
+                        except Exception:
+                            pass
                         console.print(f"[red]Sorry, I encountered an error: {str(e)}[/red]")
                         logger.error(f"Agent chat error: {type(e).__name__}: {str(e)}", exc_info=True)
                         # Clean up agent-related state variables
@@ -2321,8 +2882,38 @@ def main():
             print(f"  da_code --session {_current_session_id}")
         print()
     except Exception as e:
-        print(f"Error: {e}")
-        logger.error(f"Main execution error: {e}")
+        # Improved top-level exception reporting: handle ExceptionGroup (TaskGroup) and print
+        # full traceback(s) for each sub-exception to aid debugging of unhandled TaskGroup errors.
+        try:
+            # Basic error header
+            print(f"Error: {e}")
+
+            # If this is an ExceptionGroup (Python 3.11+) or has an 'exceptions' attribute,
+            # iterate and print detailed tracebacks for each sub-exception.
+            sub_excs = getattr(e, 'exceptions', None)
+            if sub_excs and isinstance(sub_excs, (list, tuple)):
+                print("\nUnhandled exceptions in TaskGroup (ExceptionGroup):")
+                for idx, sub in enumerate(sub_excs, start=1):
+                    print(f"\n--- Sub-exception #{idx}: {type(sub).__name__}: {sub} ---")
+                    try:
+                        traceback.print_exception(type(sub), sub, sub.__traceback__)
+                    except Exception:
+                        # Fallback if traceback printing fails
+                        try:
+                            print(repr(sub))
+                        except Exception:
+                            pass
+            else:
+                # Single exception - print full traceback
+                try:
+                    traceback.print_exception(type(e), e, e.__traceback__)
+                except Exception:
+                    print(str(e))
+        except Exception as ex_disp:
+            # If anything goes wrong while printing diagnostics, ensure we still log the original
+            print(f"Error while displaying exception details: {ex_disp}")
+        # Always log with full exc_info so logs capture all available information
+        logger.error("Main execution error: %s", e, exc_info=True)
 
 if __name__ == '__main__':
     main()

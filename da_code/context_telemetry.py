@@ -539,60 +539,238 @@ class ModelInterceptor:
             logger.error(f"❌ Model interceptor error: {e}", exc_info=True)
 
     def response(self, messages: List[Any], **kwargs) -> Any:
-        """Intercept synchronous response call."""
-        logger.debug(f"\n{'🎯'*40}")
-        logger.debug(f"🎯 INTERCEPTED: Synchronous LLM call (response)")
-        logger.debug(f"{'🎯'*40}")
+        """Intercept synchronous response call with graceful rate-limit retries.
 
-        # Log messages (tools is in kwargs)
-        self._log_messages(messages, **kwargs)
-
-        # Call original model
-        logger.info(f"📤 Sending {len(messages)} messages to actual LLM model...")
-        result = self.model.response(messages, **kwargs)
-        logger.debug(f"✅ LLM call completed successfully\n")
-
-        return result
-
-    async def aresponse(self, messages: List[Any], **kwargs) -> Any:
-        """Intercept async response call."""
-        logger.debug(f"\n{'🎯'*40}")
-        logger.debug(f"🎯 INTERCEPTED: Async LLM call (aresponse)")
-        logger.debug(f"{'🎯'*40}")
-
-        # Log messages (tools is in kwargs)
-        self._log_messages(messages, **kwargs)
-
-        # Call original model
-        logger.info(f"📤 Sending {len(messages)} messages to actual LLM model (async)...")
-        result = await self.model.aresponse(messages, **kwargs)
-        logger.debug(f"✅ Async LLM call completed successfully\n")
-
-        return result
-
-    async def aresponse_stream(self, messages: List[Any], **kwargs):
-        """Intercept async streaming response call."""
+        This wraps the underlying model.response call and retries on detected
+        rate-limit / 429 responses. It honours a `Retry-After` header if
+        available, and uses exponential backoff with jitter otherwise.
+        """
+        import time
+        import random
         try:
-            logger.debug(f"\n{'🎯'*40}")
-            logger.debug(f"🎯 INTERCEPTED: Async STREAMING LLM call (aresponse_stream)")
-            logger.debug(f"{'🎯'*40}")
+            # Local helper to detect rate limit errors and extract Retry-After
+            def _is_rate_limit_error(exc) -> (bool, Optional[float]):
+                # httpx HTTPStatusError has response with status_code
+                try:
+                    import httpx
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        resp = getattr(exc, 'response', None)
+                        if resp is not None and getattr(resp, 'status_code', None) == 429:
+                            retry = None
+                            try:
+                                retry = resp.headers.get('Retry-After')
+                            except Exception:
+                                retry = None
+                            return True, float(retry) if retry and retry.isdigit() else None
+                except Exception:
+                    pass
 
-            # Log messages before streaming starts (tools is in kwargs)
+                # Generic status_code on exception
+                status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+                if status == 429:
+                    retry = None
+                    try:
+                        retry = getattr(exc, 'response', None).headers.get('Retry-After')
+                    except Exception:
+                        retry = None
+                    try:
+                        return True, float(retry) if retry and str(retry).isdigit() else None
+                    except Exception:
+                        return True, None
+
+                name = exc.__class__.__name__
+                msg = str(exc)
+                if 'RateLimit' in name or 'TooManyRequests' in name or '429' in msg:
+                    return True, None
+
+                return False, None
+
+            # Log messages (tools is in kwargs)
             self._log_messages(messages, **kwargs)
 
-            # Call original model and stream results
-            logger.info(f"📤 Starting stream: {len(messages)} messages to LLM...")
+            max_retries = getattr(self.model, 'max_retries', 5) or 5
+            attempt = 0
+            base_delay = 0.5
 
-            # Stream chunks from the underlying model
-            async for chunk in self.model.aresponse_stream(messages, **kwargs):
-                yield chunk
+            while True:
+                try:
+                    logger.info(f"📤 Sending {len(messages)} messages to actual LLM model...")
+                    result = self.model.response(messages, **kwargs)
+                    logger.debug(f"✅ LLM call completed successfully\n")
+                    return result
+                except Exception as e:
+                    is_rate, retry_after = _is_rate_limit_error(e)
+                    attempt += 1
+                    if not is_rate or attempt > max_retries:
+                        logger.error(f"❌ LLM call failed (attempt {attempt}) - not retrying: {e}", exc_info=True)
+                        raise
 
-            logger.debug(f"✅ Streaming LLM call completed\n")
+                    # Compute sleep: prefer Retry-After if provided
+                    if retry_after:
+                        sleep_for = float(retry_after)
+                    else:
+                        sleep_for = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
 
-        except Exception as e:
-            logger.error(f"❌ Error in streaming interceptor: {e}", exc_info=True)
-            # Re-raise to let Agno handle it
+                    logger.warning(f"⚠️  Rate limit detected (synchronous). Retrying in {sleep_for:.2f}s (attempt {attempt}/{max_retries})")
+                    time.sleep(sleep_for)
+        except Exception:
+            # Re-raise preserving traceback - callers may want to handle
             raise
+
+    async def aresponse(self, messages: List[Any], **kwargs) -> Any:
+        """Intercept async response call with graceful rate-limit retries.
+
+        This wrapper retries on rate-limit (429) responses using exponential
+        backoff with jitter and honours `Retry-After` if present.
+        """
+        import asyncio
+        import random
+        # Local helper to detect rate limit errors and extract Retry-After
+        def _is_rate_limit_error(exc) -> (bool, Optional[float]):
+            try:
+                import httpx
+                if isinstance(exc, httpx.HTTPStatusError):
+                    resp = getattr(exc, 'response', None)
+                    if resp is not None and getattr(resp, 'status_code', None) == 429:
+                        retry = None
+                        try:
+                            retry = resp.headers.get('Retry-After')
+                        except Exception:
+                            retry = None
+                        return True, float(retry) if retry and retry.isdigit() else None
+            except Exception:
+                pass
+
+            status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+            if status == 429:
+                retry = None
+                try:
+                    retry = getattr(exc, 'response', None).headers.get('Retry-After')
+                except Exception:
+                    retry = None
+                try:
+                    return True, float(retry) if retry and str(retry).isdigit() else None
+                except Exception:
+                    return True, None
+
+            name = exc.__class__.__name__
+            msg = str(exc)
+            if 'RateLimit' in name or 'TooManyRequests' in name or '429' in msg:
+                return True, None
+
+            return False, None
+
+        max_retries = getattr(self.model, 'max_retries', 5) or 5
+        attempt = 0
+        base_delay = 0.5
+
+        # Log messages (tools is in kwargs)
+        self._log_messages(messages, **kwargs)
+
+        while True:
+            try:
+                logger.info(f"📤 Sending {len(messages)} messages to actual LLM model (async)...")
+                result = await self.model.aresponse(messages, **kwargs)
+                logger.debug(f"✅ Async LLM call completed successfully\n")
+                return result
+            except Exception as e:
+                is_rate, retry_after = _is_rate_limit_error(e)
+                attempt += 1
+                if not is_rate or attempt > max_retries:
+                    logger.error(f"❌ Async LLM call failed (attempt {attempt}) - not retrying: {e}", exc_info=True)
+                    raise
+
+                if retry_after:
+                    sleep_for = float(retry_after)
+                else:
+                    sleep_for = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+
+                logger.warning(f"⚠️  Rate limit detected (async). Retrying in {sleep_for:.2f}s (attempt {attempt}/{max_retries})")
+                await asyncio.sleep(sleep_for)
+
+    async def aresponse_stream(self, messages: List[Any], **kwargs):
+        """Intercept async streaming response call with graceful rate-limit handling.
+
+        On rate-limit errors this will back off and retry the stream from the
+        start. For streaming sources that support resumption this could be
+        improved to resume; for now we retry the entire streaming call.
+        """
+        import asyncio
+        import random
+
+        def _is_rate_limit_error(exc) -> (bool, Optional[float]):
+            try:
+                import httpx
+                if isinstance(exc, httpx.HTTPStatusError):
+                    resp = getattr(exc, 'response', None)
+                    if resp is not None and getattr(resp, 'status_code', None) == 429:
+                        retry = None
+                        try:
+                            retry = resp.headers.get('Retry-After')
+                        except Exception:
+                            retry = None
+                        return True, float(retry) if retry and retry.isdigit() else None
+            except Exception:
+                pass
+
+            status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+            if status == 429:
+                retry = None
+                try:
+                    retry = getattr(exc, 'response', None).headers.get('Retry-After')
+                except Exception:
+                    retry = None
+                try:
+                    return True, float(retry) if retry and str(retry).isdigit() else None
+                except Exception:
+                    return True, None
+
+            name = exc.__class__.__name__
+            msg = str(exc)
+            if 'RateLimit' in name or 'TooManyRequests' in name or '429' in msg:
+                return True, None
+
+            return False, None
+
+        max_retries = getattr(self.model, 'max_retries', 5) or 5
+        attempt = 0
+        base_delay = 0.5
+
+        # We will attempt the streaming call and on transient 429 we'll retry
+        while True:
+            try:
+                logger.debug(f"\n{'🎯'*40}")
+                logger.debug(f"🎯 INTERCEPTED: Async STREAMING LLM call (aresponse_stream)")
+                logger.debug(f"{'🎯'*40}")
+
+                # Log messages before streaming starts (tools is in kwargs)
+                self._log_messages(messages, **kwargs)
+
+                # Call original model and stream results
+                logger.info(f"📤 Starting stream: {len(messages)} messages to LLM...")
+
+                # Stream chunks from the underlying model
+                async for chunk in self.model.aresponse_stream(messages, **kwargs):
+                    yield chunk
+
+                logger.debug(f"✅ Streaming LLM call completed\n")
+                return
+
+            except Exception as e:
+                is_rate, retry_after = _is_rate_limit_error(e)
+                attempt += 1
+                if not is_rate or attempt > max_retries:
+                    logger.error(f"❌ Error in streaming interceptor (attempt {attempt}) - not retrying: {e}", exc_info=True)
+                    raise
+
+                if retry_after:
+                    sleep_for = float(retry_after)
+                else:
+                    sleep_for = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+
+                logger.warning(f"⚠️  Rate limit detected during stream. Retrying in {sleep_for:.2f}s (attempt {attempt}/{max_retries})")
+                await asyncio.sleep(sleep_for)
+                # retry the stream loop
 
     @property
     def __class__(self):

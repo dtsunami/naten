@@ -21,7 +21,7 @@ dependencies = [
     "agno",
     "ddgs",
     "pytest",
-    "pytest",
+    "patch",
     "sqlalchemy",
     "azure-ai_inference",
     "aiohttp",

@@ -499,7 +499,7 @@ MIT License - see LICENSE file for details.
 ```bash
 git clone <repository-url>
 cd da_code
-pip install -r requirements.txt
+pip install -e da_code
 cp .env.example .env  # Add your Azure OpenAI credentials
 python -m da_code "help me get started"
 ```

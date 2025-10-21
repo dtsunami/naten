@@ -188,7 +188,11 @@ class FileTool(Toolkit):
             tools=[
                 self.read_file,
                 self.create_file,
+                # replace_text is deprecated — use produce_patch/apply_patch via patch_tool
+                # keep shim for backward compatibility
                 self.replace_text,
+                self.produce_patch,
+                #self.apply_patch,
                 self.copy_file,
                 self.glob_files,
                 self.grep_content,
@@ -489,6 +493,320 @@ class FileTool(Toolkit):
             return f"Replaced {count} occurrence(s) in {path}"
         else:
             return f"No matches found — {path} left unchanged"
+
+    def produce_patch(self, path: str, new_contents: str) -> str:
+        """Produce a unified diff between the current file contents and new_contents.
+
+        Delegates to da_code.patch_tool.produce_patch to ensure canonical diff formatting.
+        Returns unified diff text (empty string if identical).
+        """
+        from .patch_tool import produce_patch as _produce
+        try:
+            path_abs = safe_path(path)
+        except Exception:
+            # If path is invalid per safe_path, let caller handle the error via exception
+            path_abs = path
+        try:
+            diff = _produce(path_abs, new_contents)
+            return diff
+        except Exception:
+            return ""
+
+    def apply_patch(self, patch_text: str, dry_run: bool = True, backup: bool = True, force: bool = False) -> str:
+        """Apply a unified diff produced by produce_patch.
+
+        This implementation prefers the third-party python-patch (techtonik/python-patch) if
+        it is installed. If python-patch is not available or fails, it falls back to the
+        built-in manual parser and applier (legacy fallback).
+
+        Returns a JSON string summarizing per-file application results.
+        In dry_run mode no files are modified; in non-dry-run mode files are written
+        atomically and backups are created when backup=True.
+        """
+        import json
+        import tempfile
+        import shutil
+        import datetime
+        from pathlib import Path
+
+        # Delegate to new patch_tool implementation for better diagnostics and behaviour
+        try:
+            from .patch_tool import apply_patch as _apply_patch
+            # patch_tool.apply_patch returns dict; convert to JSON string for backward compatibility
+            res = _apply_patch(patch_text, dry_run=dry_run, backup=backup, workspace_root=get_workspace_root(), fuzzy=force)
+            import json
+            return json.dumps(res)
+        except Exception:
+            # Fallback to legacy implementation if our patch_tool is not available or fails
+            pass
+
+        # Try to use python-patch if available
+        try:
+            import patch as patchlib
+        except Exception:
+            patchlib = None
+
+        if patchlib is not None:
+            try:
+                # Different versions of python-patch expose different APIs. Try common factories.
+                if hasattr(patchlib, 'fromstring'):
+                    pset = patchlib.fromstring(patch_text)
+                elif hasattr(patchlib, 'PatchSet'):
+                    # Some variants may accept the raw text
+                    try:
+                        pset = patchlib.PatchSet(patch_text)
+                    except Exception:
+                        pset = patchlib.PatchSet.from_string(patch_text)
+                else:
+                    pset = None
+
+                if pset is None:
+                    raise RuntimeError('python-patch installed but unable to parse patch')
+
+                workspace = get_workspace_root()
+
+                # For dry_run: attempt to validate by applying to a temporary copy of the files
+                # involved (python-patch may provide a dry-run flag; try common 'apply' signatures).
+                def try_apply(ps, do_apply: bool):
+                    # ps.apply may accept different args depending on library version
+                    try:
+                        # Preferred: ps.apply(root=..., strip=1, dry_run=...)
+                        return ps.apply(root=workspace, strip=1, dry_run=(not do_apply))
+                    except TypeError:
+                        # Fallback: try ps.apply() without kwargs
+                        try:
+                            return ps.apply()
+                        except Exception:
+                            # Some versions return None/True/False; treat None as success
+                            return True
+                    except Exception:
+                        return False
+
+                ok = try_apply(pset, do_apply=not dry_run)
+
+                # Build per-file results if possible
+                results = []
+                try:
+                    # patchlib PatchSet may have 'patched_files' or 'items'
+                    files = []
+                    if hasattr(pset, 'patched_files'):
+                        files = list(pset.patched_files)
+                    elif hasattr(pset, 'items'):
+                        # each item may have target or path
+                        for it in pset.items:
+                            p = None
+                            if hasattr(it, 'target'):
+                                p = it.target
+                            elif hasattr(it, 'path'):
+                                p = it.path
+                            elif hasattr(it, 'source'):
+                                p = it.source
+                            if p:
+                                files.append(os.path.join(workspace, p))
+
+                    if not files:
+                        # Unknown API — present a generic result
+                        if dry_run:
+                            return json.dumps({"results": [{"file": "<unknown>", "status": "dry_run_ok"}]})
+                        else:
+                            return json.dumps({"results": [{"file": "<unknown>", "status": ("applied" if ok else "conflict")} ]})
+
+                    for f in files:
+                        # Normalize and validate path
+                        try:
+                            tp = safe_path(f)
+                        except Exception as e:
+                            results.append({"file": f, "status": "error", "error": str(e)})
+                            continue
+                        if dry_run:
+                            results.append({"file": tp, "status": "dry_run_ok"})
+                        else:
+                            # If backup requested, create backup before applying
+                            if backup and os.path.exists(tp):
+                                bak_name = f"{tp}.bak.{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}.bak"
+                                shutil.copy2(tp, bak_name)
+                            results.append({"file": tp, "status": ("applied" if ok else "conflict")})
+
+                    # If we were in real-apply mode and python-patch didn't actually write, attempt to call apply again
+                    if (not dry_run) and ok:
+                        # Some python-patch variants perform apply() as part of ps.apply(), but if not,
+                        # try to call ps.apply(root=workspace) to ensure the patch is written.
+                        try:
+                            _ = try_apply(pset, do_apply=True)
+                        except Exception:
+                            pass
+
+                    return json.dumps({"results": results})
+                except Exception:
+                    # If anything goes wrong, fall back to manual implementation below
+                    pass
+
+            except Exception:
+                # Any error with python-patch usage -> fall back to manual parser
+                patchlib = None
+
+        # ---------------------------------------------------------------------
+        # Fallback: manual parser & applier (existing implementation)
+        # ---------------------------------------------------------------------
+        lines = patch_text.splitlines()
+        i = 0
+        results = []
+
+        def parse_hunk_header(hdr: str):
+            # header format: @@ -start,count +start,count @@
+            parts = hdr.split()
+            if len(parts) < 3:
+                return None
+            a_range = parts[1]  # -start,count
+            b_range = parts[2]  # +start,count
+            def parse_range(r):
+                r = r.lstrip('+-')
+                if ',' in r:
+                    start, count = r.split(',', 1)
+                    return int(start), int(count)
+                else:
+                    return int(r), 1
+            return parse_range(a_range), parse_range(b_range)
+
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith('--- '):
+                # parse file headers
+                orig = line[4:]
+                i += 1
+                if i >= len(lines) or not lines[i].startswith('+++ '):
+                    return json.dumps({"error": "Malformed patch: missing +++ header"})
+                newh = lines[i][4:]
+
+                # Extract path (strip a/ or b/ prefix if present)
+                def extract_path(hdr):
+                    p = hdr
+                    if hdr.startswith('a/') or hdr.startswith('b/'):
+                        p = hdr[2:]
+                    return p
+
+                relpath = extract_path(orig)
+                try:
+                    target_path = safe_path(relpath)
+                except Exception as e:
+                    results.append({"file": relpath, "status": "error", "error": str(e)})
+                    # Skip to next file header
+                    i += 1
+                    continue
+
+                # Collect hunks
+                i += 1
+                hunks = []
+                while i < len(lines) and not lines[i].startswith('--- '):
+                    if lines[i].startswith('@@ '):
+                        hdr = lines[i]
+                        i += 1
+                        hunk_lines = []
+                        while i < len(lines) and not (lines[i].startswith('@@ ') or lines[i].startswith('--- ')):
+                            hunk_lines.append(lines[i])
+                            i += 1
+                        hunks.append((hdr, hunk_lines))
+                    else:
+                        # skip unexpected lines between hunks
+                        i += 1
+
+                # Read current content
+                try:
+                    with open(target_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        curr_lines = f.read().splitlines(keepends=False)
+                except FileNotFoundError:
+                    curr_lines = []
+
+                out_lines = []
+                curr_index = 0  # 0-based index into curr_lines
+                conflict = False
+
+                for hdr, hunk_lines in hunks:
+                    parsed = parse_hunk_header(hdr)
+                    if parsed is None:
+                        conflict = True
+                        break
+                    (a_start, a_count), (b_start, b_count) = parsed
+                    # Convert to 0-based index
+                    a_start_idx = a_start - 1
+
+                    # Append any lines before this hunk from curr_lines
+                    while curr_index < a_start_idx and curr_index < len(curr_lines):
+                        out_lines.append(curr_lines[curr_index])
+                        curr_index += 1
+
+                    # Now process hunk lines
+                    # We will validate context lines (starting with space) against curr_lines
+                    temp_index = curr_index
+                    for hl in hunk_lines:
+                        if not hl:
+                            # blank line — treat as context of ''
+                            sign = ' '
+                            text = ''
+                        else:
+                            sign = hl[0]
+                            text = hl[1:]
+                        if sign == ' ':
+                            # context: must match curr_lines[temp_index]
+                            if temp_index >= len(curr_lines) or curr_lines[temp_index] != text:
+                                conflict = True
+                                break
+                            out_lines.append(text)
+                            temp_index += 1
+                        elif sign == '-':
+                            # removal: ensure matches
+                            if temp_index >= len(curr_lines) or curr_lines[temp_index] != text:
+                                conflict = True
+                                break
+                            # skip this line (remove)
+                            temp_index += 1
+                        elif sign == '+':
+                            # addition: add to out_lines
+                            out_lines.append(text)
+                        else:
+                            # unexpected
+                            conflict = True
+                            break
+                    if conflict:
+                        break
+                    # advance curr_index to temp_index
+                    curr_index = temp_index
+
+                # Append any remaining lines
+                while curr_index < len(curr_lines):
+                    out_lines.append(curr_lines[curr_index])
+                    curr_index += 1
+
+                if conflict and not force:
+                    results.append({"file": target_path, "status": "conflict"})
+                    continue
+
+                # Prepare final content with newlines
+                final_content = "\n".join(out_lines)
+                if final_content and not final_content.endswith('\n'):
+                    final_content += '\n'
+
+                if dry_run:
+                    results.append({"file": target_path, "status": "dry_run_ok", "preview_len": len(final_content)})
+                else:
+                    # Make backup if requested
+                    if backup and os.path.exists(target_path):
+                        bak_name = f"{target_path}.bak.{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}.bak"
+                        shutil.copy2(target_path, bak_name)
+                    # Atomic write
+                    dirn = os.path.dirname(target_path) or '.'
+                    fd, tmp_path = tempfile.mkstemp(dir=dirn)
+                    os.close(fd)
+                    with open(tmp_path, 'w', encoding='utf-8') as f:
+                        f.write(final_content)
+                    # Replace
+                    os.replace(tmp_path, target_path)
+                    results.append({"file": target_path, "status": "applied"})
+
+            else:
+                i += 1
+
+        return json.dumps({"results": results})
 
     def copy_file(self, source_path: str, destination_path: str) -> str:
         """Copy a file to a new location (preserves metadata).

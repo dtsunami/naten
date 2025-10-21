@@ -79,6 +79,75 @@ class SimpleStatusInterface:
         # Agent metrics
         self.agent_metrics = {'calls': 0, 'tokens': 0}
         self.current_spinner = get_random_spinner()
+        # Setup logger for debug/diagnostic messages
+        import logging
+        self._logger = logging.getLogger(__name__)
+
+    def ensure_visual_display(self, preserve_metrics: bool = True) -> bool:
+        """Attempt to (re)build the Rich.Status visual without resetting internal metrics.
+
+        Returns True on success, False on failure. This is safer than calling
+        start_execution() which resets metrics.
+        """
+        try:
+            # If there's an existing status, stop it cleanly first
+            if getattr(self, 'current_status', None):
+                try:
+                    self.current_status.stop()
+                except Exception:
+                    pass
+
+            # Recreate the visual status using stored last message
+            last_msg = getattr(self, '_last_message', 'Processing...')
+            self.current_status = Status(f"🤖 {last_msg}", spinner=self.current_spinner)
+            try:
+                self.current_status.start()
+            except Exception as e:
+                self._logger.debug(f"ensure_visual_display: Status.start() failed: {e}")
+                return False
+
+            # Restart timer tick loop to update display
+            try:
+                import threading
+
+                def _tick():
+                    try:
+                        if self.current_status:
+                            elapsed = time.time() - self.start_time if self.start_time else 0
+                            status_text = f"🤖 {getattr(self, '_last_message', 'Processing...')} | {elapsed:.1f}s"
+                            if self.llm_calls > 0:
+                                status_text += f" | 🧠 {self.llm_calls}"
+                            if self.tool_calls > 0:
+                                status_text += f" | 🔧 {self.tool_calls}"
+                            self.current_status.update(status_text)
+                            self._timer_task = threading.Timer(0.8, _tick)
+                            self._timer_task.daemon = True
+                            self._timer_task.start()
+                    except Exception:
+                        pass
+
+                # Cancel any previous timer
+                if getattr(self, '_timer_task', None):
+                    try:
+                        self._timer_task.cancel()
+                    except Exception:
+                        pass
+
+                self._timer_task = threading.Timer(0.8, _tick)
+                self._timer_task.daemon = True
+                self._timer_task.start()
+            except Exception:
+                self._logger.debug("ensure_visual_display: failed to start timer loop")
+                # Not fatal - visual display may still be ok
+                pass
+
+            return True
+        except Exception as e:
+            try:
+                self._logger.debug(f"ensure_visual_display unexpected error: {e}")
+            except Exception:
+                pass
+            return False
 
     def start_execution(self, message: str):
         """Start execution with status message and start background timer for updates.
@@ -356,6 +425,46 @@ def display_simple_confirmation(execution) -> None:
 
 # Add pause/resume helpers for temporary modals so we don't reset metrics during confirmation
 def pause_execution(status: SimpleStatusInterface):
+    """Pause visual status spinner but keep metrics intact.
+
+    This now explicitly clears the current_status reference and returns when
+    complete. It also performs a prompt_toolkit invalidate() to force a redraw
+    of the input prompt so Rich/Textual overlays don't leave stray artifacts.
+    """
+    try:
+        if not status:
+            return
+
+        if getattr(status, 'current_status', None):
+            try:
+                status.current_status.stop()
+            except Exception:
+                pass
+            finally:
+                # Explicitly clear visual reference to avoid half-stopped objects
+                status.current_status = None
+
+        # Cancel timer but DO NOT reset metrics
+        if getattr(status, '_timer_task', None):
+            try:
+                status._timer_task.cancel()
+            except Exception:
+                pass
+            finally:
+                status._timer_task = None
+
+        # Ask prompt_toolkit to invalidate/redraw to avoid stale spinner fragments
+        try:
+            # Small sleep to allow terminal to restore state in some environments
+            import time as _time
+            # Conservative short sleep - tweak if needed per-platform
+            _time.sleep(0.02)
+            from prompt_toolkit.application.current import get_app
+            get_app().invalidate()
+        except Exception:
+            pass
+    except Exception:
+        pass
     """Pause visual status spinner but keep metrics intact."""
     try:
         if status and getattr(status, 'current_status', None):
@@ -375,7 +484,78 @@ def pause_execution(status: SimpleStatusInterface):
         pass
 
 
-def resume_execution(status: SimpleStatusInterface):
+def resume_execution(status: SimpleStatusInterface) -> bool:
+    """Resume visual status spinner and timer preserving metrics and start_time.
+
+    Returns True if the visual was successfully rebuilt, False otherwise.
+    """
+    try:
+        if not status:
+            return False
+
+        if status and getattr(status, 'start_time', None):
+            # Try to reuse the new helper to rebuild the visual display without
+            # resetting metrics. This is safer than directly calling start_execution.
+            success = status.ensure_visual_display(preserve_metrics=True)
+
+            # If ensure_visual_display wasn't successful, try a conservative
+            # fallback that doesn't reset metrics: attempt to re-create Status
+            # inline and restart the timer loop. We return a boolean to let
+            # the caller decide whether to call start_execution (which resets).
+            if not success:
+                try:
+                    status.current_status = Status(f"🤖 {getattr(status, '_last_message', 'Processing...')}", spinner=status.current_spinner)
+                    try:
+                        status.current_status.start()
+                    except Exception:
+                        pass
+
+                    import threading
+
+                    def _tick():
+                        try:
+                            if status.current_status:
+                                elapsed = time.time() - status.start_time if status.start_time else 0
+                                status_text = f"🤖 {getattr(status, '_last_message', 'Processing...')} | {elapsed:.1f}s"
+                                if status.llm_calls > 0:
+                                    status_text += f" | 🧠 {status.llm_calls}"
+                                if status.tool_calls > 0:
+                                    status_text += f" | 🔧 {status.tool_calls}"
+                                status.current_status.update(status_text)
+                                status._timer_task = threading.Timer(0.8, _tick)
+                                status._timer_task.daemon = True
+                                status._timer_task.start()
+                        except Exception:
+                            pass
+
+                    # Cancel any previous timer
+                    if getattr(status, '_timer_task', None):
+                        try:
+                            status._timer_task.cancel()
+                        except Exception:
+                            pass
+
+                    status._timer_task = threading.Timer(0.8, _tick)
+                    status._timer_task.daemon = True
+                    status._timer_task.start()
+                except Exception:
+                    return False
+
+            # Give the terminal a moment and invalidate prompt_toolkit so the
+            # prompt is redrawn and any overlay artifacts are removed.
+            try:
+                import time as _time
+                _time.sleep(0.02)
+                from prompt_toolkit.application.current import get_app
+                get_app().invalidate()
+            except Exception:
+                pass
+
+            return True
+    except Exception:
+        pass
+
+    return False
     """Resume visual status spinner and timer preserving metrics and start_time."""
     try:
         if status and getattr(status, 'start_time', None):
