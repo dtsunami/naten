@@ -152,6 +152,21 @@ echo "fix the type errors" | python -m da_code
 echo "check git status" | python -m da_code --stream
 ```
 
+### Running Tests
+```bash
+# Run all tests
+.venv/Scripts/python.exe -m pytest da_code/ -v
+
+# Run specific test file
+.venv/Scripts/python.exe -m pytest da_code/test_agno_tools.py -v
+
+# Run with coverage
+.venv/Scripts/python.exe -m pytest da_code/ --cov=da_code --cov-report=html
+
+# Run tests matching a pattern
+.venv/Scripts/python.exe -m pytest da_code/ -k "patch" -v
+```
+
 ## 💫 Usage Examples
 
 ### **Lightning-Fast Tool Execution**

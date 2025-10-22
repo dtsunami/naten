@@ -39,10 +39,11 @@ from .ux import (
     pause_execution,
     resume_execution,
 )
-from .textual_confirmation import show_confirmation_dialog
-from .textual_context_manager import show_context_manager_textual
-from .textual_restore import show_restore_menu
-
+from .ux import (
+    show_confirmation_dialog,
+    show_context_manager_textual,
+    show_restore_menu
+)
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +303,14 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
-        # Show Textual confirmation dialog
-        response = await show_confirmation_dialog(execution)
+        # Show Textual confirmation dialog, with flags to block handlers
+        try:
+            textual_app_active['active'] = True  # Block paste handlers from interfering
+            textual_overlay_active[0] = True  # Block escape/arrow keys from interfering
+            response = await show_confirmation_dialog(execution)
+        finally:
+            textual_app_active['active'] = False  # Re-enable paste handlers
+            textual_overlay_active[0] = False  # Re-enable escape/arrow keys
 
         # Resume status interface for continued execution, preserving metrics.
         # Use the boolean return value to decide whether we need to apply an
@@ -325,44 +332,22 @@ async def async_main(session_id: str = None):
                 # and leaves the status non-visual until next start_execution
                 pass
 
-        # Force prompt_toolkit to redraw the UI to avoid stale terminal fragments
+        # Restore prompt_toolkit state after Textual overlay
         try:
-            # Small sleep to give terminal time to restore mode after textual
-            # overlay dismissals. On some platforms the redraw races with the
-            # terminal restore which leaves artifacts; this short delay helps.
-            import time as _time
-            _time.sleep(0.02)
-            get_app().invalidate()
-        except Exception:
-            pass
-
-        return response
-        # Pause status (do not reset metrics) to show confirmation dialog cleanly
-        try:
-            pause_execution(status_interface)
-        except Exception:
-            # Fallback to stop if pause isn't available for some reason
+            from prompt_toolkit.output import get_default_output
+            out = get_default_output()
             try:
-                status_interface.stop_execution()
+                # Restore bracketed paste handling for prompt_toolkit after external UI
+                if hasattr(out, 'enable_bracketed_paste'):
+                    out.enable_bracketed_paste()
+                else:
+                    # Fallback: attempt to call disable to reset state if enable is unavailable
+                    out.disable_bracketed_paste()
             except Exception:
                 pass
-
-        # Show Textual confirmation dialog
-        response = await show_confirmation_dialog(execution)
-
-        # Resume status interface for continued execution, preserving metrics
-        try:
-            resume_execution(status_interface)
-        except Exception:
-            try:
-                status_interface.start_execution("Processing...")
-            except Exception:
-                pass
-        # Force prompt_toolkit to redraw the UI to avoid stale terminal fragments
-        try:
-            get_app().invalidate()
-        except Exception:
-            pass
+            out.flush()
+        except Exception as ce:
+            logger.debug(f"Cleanup after confirmation dialog failed: {ce}")
 
         return response
 
@@ -515,6 +500,9 @@ async def async_main(session_id: str = None):
     paste_counter = [0]  # Mutable counter for unique paste IDs
     search_content_storage = {}
 
+    # Flag to track when Textual apps are active (to prevent paste handler interference)
+    textual_app_active = {'active': False}
+
     nudge_completer = NudgeCompleter(
         working_dir=code_session.working_directory,
         code_session=code_session,
@@ -636,10 +624,14 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
-    @bindings.add(Keys.Escape)
+    @bindings.add(Keys.Escape, filter=Condition(lambda: not textual_overlay_active[0]))
     def _(event):
-        """Cancel running agent with Escape key."""
-        cancel_agent[0] = True
+        """Cancel running agent with Escape key (only when no overlay is active)."""
+        if running_agent is not None and not running_agent.done():
+            logger.warning(f"⚠️  Escape pressed - setting cancel_agent flag")
+            cancel_agent[0] = True
+        else:
+            logger.debug("Escape pressed but no agent running")
 
     @bindings.add(Keys.Up, filter=Condition(lambda: shell_manager.is_shell_mode and not textual_overlay_active[0]), eager=True)
     def _(event):
@@ -691,10 +683,11 @@ async def async_main(session_id: str = None):
         """Block arrow down when Textual overlay is active."""
         pass  # Consume the key to prevent default history navigation
 
-    @bindings.add(Keys.BracketedPaste)  # Terminal bracketed paste (clipboard)
+    @bindings.add(Keys.BracketedPaste, filter=Condition(lambda: not textual_app_active.get('active', False)))  # Terminal bracketed paste (clipboard)
     def _(event):
         """Intercept terminal paste: show placeholder in prompt, store actual content."""
         try:
+
             data = getattr(event, 'data', None)
             try:
                 logger.debug("BracketedPaste event: data_present=%s", bool(data))
@@ -722,7 +715,7 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
-    @bindings.add('c-v')  # Ctrl+V
+    @bindings.add('c-v', filter=Condition(lambda: not textual_app_active.get('active', False)))  # Ctrl+V
     def _(event):
         """Handle Ctrl+V paste from clipboard (desktop terminals).
 
@@ -731,6 +724,7 @@ async def async_main(session_id: str = None):
         return text so we can trace failures on PowerShell/Win32 hosts.
         """
         try:
+
             data = None
             try:
                 cb = event.app.clipboard
@@ -1931,9 +1925,10 @@ async def async_main(session_id: str = None):
             try:
                 # Check for cancellation request
                 if cancel_agent[0] and running_agent is not None and not running_agent.done():
+                    logger.warning(f"⚠️  USER INITIATED CANCELLATION - cancel_agent flag is True")
                     # Cancel the agent run first (tells the agent to stop)
                     if agent.active_run_id:
-                        logger.debug(f"Cancelling agent run: {agent.active_run_id}")
+                        logger.warning(f"   Cancelling agent run: {agent.active_run_id}")
                         agent.agent.cancel_run(agent.active_run_id)
 
                     # Then cancel the asyncio task
@@ -2326,6 +2321,13 @@ async def async_main(session_id: str = None):
 
                     except Exception as e:
                         # Handle agent execution errors
+                        logger.warning(f"⚠️  AGENT EXECUTION EXCEPTION - Type: {type(e).__name__}")
+                        logger.warning(f"   Exception details: {str(e)}")
+                        logger.warning(f"   running_agent state: {running_agent}")
+                        if running_agent is not None:
+                            logger.warning(f"   running_agent.done(): {running_agent.done()}")
+                            logger.warning(f"   running_agent.cancelled(): {running_agent.cancelled()}")
+
                         running_agent = None
                         status_message = None
                         output_message = None

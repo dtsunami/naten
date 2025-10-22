@@ -10,179 +10,6 @@ import pytest
 from pathlib import Path
 
 from . import agno_tools as agno
-
-@pytest.fixture
-def temp_dir():
-    d = tempfile.mkdtemp()
-    yield d
-    shutil.rmtree(d)
-
-# ---------------- Utilities ----------------
-
-def test_get_workspace_root_env(monkeypatch):
-    monkeypatch.setenv('DA_CODE_WORKSPACE_ROOT', '/tmp/workspace')
-    assert agno.get_workspace_root() == '/tmp/workspace'
-
-def test_safe_path_relative_inside(temp_dir):
-    monkeypatch_env = {'DA_CODE_WORKSPACE_ROOT': temp_dir}
-    os.environ.update(monkeypatch_env)
-    fpath = agno.safe_path('file.txt')
-    assert fpath.startswith(temp_dir)
-
-def test_get_file_emoji_py():
-    assert agno.get_file_emoji('test.py') == "🐍"
-
-# ---------------- TodoTool ----------------
-
-def test_todotool_create_and_read(temp_dir):
-    tool = agno.TodoTool(working_directory=temp_dir)
-    msg = tool.create_todo('My Task')
-    assert 'todo.md' in msg
-    assert 'TODO' in tool.read_todo()
-
-def test_todotool_check_exists(temp_dir):
-    tool = agno.TodoTool(working_directory=temp_dir)
-    assert '❌' in tool.check_exists()
-    tool.create_todo('Task')
-    assert '✅' in tool.check_exists()
-
-# ---------------- CommandTool ----------------
-
-def test_commandtool_success(monkeypatch):
-    tool = agno.CommandTool()
-    def mock_run(*a, **k):
-        return subprocess.CompletedProcess(args=a[0], returncode=0, stdout='ok', stderr='')
-    monkeypatch.setattr(subprocess, 'run', mock_run)
-    out = tool.execute_command('ls')
-    assert '✅' in out
-
-def test_commandtool_fail(monkeypatch):
-    tool = agno.CommandTool()
-    def mock_run(*a, **k):
-        return subprocess.CompletedProcess(args=a[0], returncode=1, stdout='', stderr='fail')
-    monkeypatch.setattr(subprocess, 'run', mock_run)
-    out = tool.execute_command('ls')
-    assert '❌' in out
-
-# ---------------- WebSearchTool ----------------
-
-def test_websearchtool_success(monkeypatch):
-    tool = agno.WebSearchTool()
-    class DummyResponse:
-        status_code = 200
-        def json(self):
-            return {'AbstractText': 'Summary', 'AbstractURL': 'url'}
-    class DummyClient:
-        def __enter__(self): return self
-        def __exit__(self,a,b,c): pass
-        def get(self, url): return DummyResponse()
-    monkeypatch.setattr(agno.httpx, 'Client', lambda **k: DummyClient())
-    out = tool.search('query')
-    # Adjusted to match fallback output of current tool implementation
-    assert ('Summary' in out) or ('No instant results available' in out)
-
-# ---------------- FileTool ----------------
-
-def test_filetool_create_and_list(temp_dir):
-    tool = agno.FileTool()
-    fpath = os.path.join(temp_dir, 'a.txt')
-    tool.create_file(fpath, 'data')
-    listing = tool.list_directory(temp_dir)
-    try:
-        listing_obj = json.loads(listing)
-        assert listing_obj['path'] == temp_dir
-    except json.JSONDecodeError:
-        assert temp_dir in listing
-
-def test_filetool_read_write(temp_dir):
-    tool = agno.FileTool()
-    fpath = os.path.join(temp_dir, 'b.txt')
-    tool.write_file(fpath, 'hello')
-    assert 'hello' in tool.read_file(fpath)
-
-def test_filetool_replace(temp_dir):
-    tool = agno.FileTool()
-    fpath = os.path.join(temp_dir, 'c.txt')
-    tool.write_file(fpath, 'abc abc')
-    msg = tool.replace_text(fpath, 'abc', 'xyz')
-    assert 'Replaced' in msg
-
-# ---------------- TimeTool ----------------
-
-def test_timetool_formats():
-    t = agno.TimeTool()
-    assert 'T' in t.current_time('iso')
-    assert 'UTC' in t.current_time('human')
-
-# ---------------- PythonTool ----------------
-
-def test_pythontool_success():
-    t = agno.PythonTool()
-    res = t.execute_code("print('hi')")
-    assert 'hi' in res
-
-def test_pythontool_error():
-    t = agno.PythonTool()
-    res = t.execute_code("raise ValueError('x')")
-    assert '❌' in res
-
-# ---------------- GitTool ----------------
-
-def test_gittool_status(monkeypatch):
-    t = agno.GitTool()
-    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a[0], 0, 'dirty', ''))
-    assert '📋' in t.status()
-
-# ---------------- HttpTool ----------------
-
-def test_httptool_fetch(monkeypatch):
-    t = agno.HttpTool()
-    class DummyResponse:
-        status_code = 200
-        reason_phrase = 'OK'
-        headers = {'content-type': 'text/plain'}
-        content = b'data'
-        text = 'hello'
-    class DummyClient:
-        def __enter__(self): return self
-        def __exit__(self,a,b,c): pass
-        def get(self, url, headers): return DummyResponse()
-    monkeypatch.setattr(agno.httpx, 'Client', lambda **k: DummyClient())
-    out = t.fetch('http://test')
-    assert 'HTTP GET' in out
-
-
-def test_produce_and_apply_patch(temp_dir):
-    tool = agno.FileTool()
-    fpath = os.path.join(temp_dir, 'p.txt')
-    # create original file
-    tool.create_file(fpath, 'line1\nline2\n')
-    # produce patch replacing line2
-    new_content = 'line1\nLINE2_CHANGED\n'
-    diff = tool.produce_patch(fpath, new_content)
-    assert diff.strip() != ''
-    # dry run apply
-    res = json.loads(tool.apply_patch(diff, dry_run=True))
-    # accept multiple possible statuses from different implementations
-    assert res['results'][0]['status'] in ('appliable', 'created', 'dry_run_ok')
-    # real apply
-    res2 = json.loads(tool.apply_patch(diff, dry_run=False, backup=True))
-    assert res2['results'][0]['status'] in ('applied', 'appliable', 'created')
-    # verify file contents
-    with open(fpath, 'r', encoding='utf-8') as f:
-        s = f.read()
-    assert 'LINE2_CHANGED' in s
-
-
-def test_apply_patch_conflict(temp_dir):
-    tool = agno.FileTool()
-    fpath = os.path.join(temp_dir, 'q.txt')
-    tool.create_file(fpath, 'a\nb\nc\n')
-    # create a patch that expects different context
-    patch = '--- a/q.txt\n+++ b/q.txt\n@@ -1,3 +1,3 @@\n-a\n-b\n-c\n+X\n+Y\n+Z\n'
-    res = json.loads(tool.apply_patch(patch, dry_run=True))
-    # Since content doesn't match context, expect conflict
-    assert res['results'][0]['status'] in ('conflict', 'error')
 import os
 import io
 import json
@@ -202,6 +29,12 @@ def temp_dir():
     yield d
     shutil.rmtree(d)
 
+@pytest.fixture
+def temp_dir():
+    d = tempfile.mkdtemp()
+    yield d
+    shutil.rmtree(d)
+
 # ---------------- Utilities ----------------
 
 def test_get_workspace_root_env(monkeypatch):
@@ -337,7 +170,8 @@ def test_httptool_fetch(monkeypatch):
     assert 'HTTP GET' in out
 
 
-def test_produce_and_apply_patch(temp_dir):
+def test_produce_and_apply_patch(temp_dir, monkeypatch):
+    monkeypatch.setenv('DA_CODE_WORKSPACE_ROOT', temp_dir)
     tool = agno.FileTool()
     fpath = os.path.join(temp_dir, 'p.txt')
     # create original file
@@ -359,7 +193,8 @@ def test_produce_and_apply_patch(temp_dir):
     assert 'LINE2_CHANGED' in s
 
 
-def test_apply_patch_conflict(temp_dir):
+def test_apply_patch_conflict(temp_dir, monkeypatch):
+    monkeypatch.setenv('DA_CODE_WORKSPACE_ROOT', temp_dir)
     tool = agno.FileTool()
     fpath = os.path.join(temp_dir, 'q.txt')
     tool.create_file(fpath, 'a\nb\nc\n')
@@ -368,3 +203,229 @@ def test_apply_patch_conflict(temp_dir):
     res = json.loads(tool.apply_patch(patch, dry_run=True))
     # Since content doesn't match context, expect conflict
     assert res['results'][0]['status'] in ('conflict', 'error')
+
+
+# ---------------- Utilities ----------------
+
+def test_get_workspace_root_env(monkeypatch):
+    monkeypatch.setenv('DA_CODE_WORKSPACE_ROOT', '/tmp/workspace')
+    assert agno.get_workspace_root() == '/tmp/workspace'
+
+def test_safe_path_relative_inside(temp_dir):
+    monkeypatch_env = {'DA_CODE_WORKSPACE_ROOT': temp_dir}
+    os.environ.update(monkeypatch_env)
+    fpath = agno.safe_path('file.txt')
+    assert fpath.startswith(temp_dir)
+
+def test_get_file_emoji_py():
+    assert agno.get_file_emoji('test.py') == "🐍"
+
+# ---------------- TodoTool ----------------
+
+def test_todotool_create_and_read(temp_dir):
+    tool = agno.TodoTool(working_directory=temp_dir)
+    msg = tool.create_todo('My Task')
+    assert 'todo.md' in msg
+    assert 'TODO' in tool.read_todo()
+
+def test_todotool_check_exists(temp_dir):
+    tool = agno.TodoTool(working_directory=temp_dir)
+    assert '❌' in tool.check_exists()
+    tool.create_todo('Task')
+    assert '✅' in tool.check_exists()
+
+
+# ---------------- CommandTool ----------------
+
+
+def test_commandtool_success(monkeypatch):
+    tool = agno.CommandTool()
+    def mock_run(*a, **k):
+        return subprocess.CompletedProcess(args=a[0], returncode=0, stdout='ok', stderr='')
+    monkeypatch.setattr(subprocess, 'run', mock_run)
+    out = tool.execute_command('ls')
+    assert '✅' in out
+
+
+def test_commandtool_fail(monkeypatch):
+    tool = agno.CommandTool()
+    def mock_run(*a, **k):
+        return subprocess.CompletedProcess(args=a[0], returncode=1, stdout='', stderr='fail')
+    monkeypatch.setattr(subprocess, 'run', mock_run)
+    out = tool.execute_command('ls')
+    assert '❌' in out
+
+
+# ---------------- WebSearchTool ----------------
+
+
+def test_websearchtool_success(monkeypatch):
+    tool = agno.WebSearchTool()
+    class DummyResponse:
+        status_code = 200
+        def json(self):
+            return {'AbstractText': 'Summary', 'AbstractURL': 'url'}
+    class DummyClient:
+        def __enter__(self): return self
+        def __exit__(self,a,b,c): pass
+        def get(self, url): return DummyResponse()
+    monkeypatch.setattr(agno.httpx, 'Client', lambda **k: DummyClient())
+    out = tool.search('query')
+    # Adjusted to match fallback output of current tool implementation
+    assert ('Summary' in out) or ('No instant results available' in out)
+
+
+# ---------------- FileTool ----------------
+
+
+def test_filetool_create_and_list(temp_dir):
+    tool = agno.FileTool()
+    fpath = os.path.join(temp_dir, 'a.txt')
+    tool.create_file(fpath, 'data')
+    listing = tool.list_directory(temp_dir)
+    try:
+        listing_obj = json.loads(listing)
+        assert listing_obj['path'] == temp_dir
+    except json.JSONDecodeError:
+        assert temp_dir in listing
+
+
+def test_filetool_read_write(temp_dir):
+    tool = agno.FileTool()
+    fpath = os.path.join(temp_dir, 'b.txt')
+    tool.write_file(fpath, 'hello')
+    assert 'hello' in tool.read_file(fpath)
+
+
+def test_filetool_replace(temp_dir):
+    tool = agno.FileTool()
+    fpath = os.path.join(temp_dir, 'c.txt')
+    tool.write_file(fpath, 'abc abc')
+    msg = tool.replace_text(fpath, 'abc', 'xyz')
+    assert 'Replaced' in msg
+
+
+# ---------------- TimeTool ----------------
+
+
+def test_timetool_formats():
+    t = agno.TimeTool()
+    assert 'T' in t.current_time('iso')
+    assert 'UTC' in t.current_time('human')
+
+
+# ---------------- PythonTool ----------------
+
+
+def test_pythontool_success():
+    t = agno.PythonTool()
+    res = t.execute_code("print('hi')")
+    assert 'hi' in res
+
+
+def test_pythontool_error():
+    t = agno.PythonTool()
+    res = t.execute_code("raise ValueError('x')")
+    assert '❌' in res
+
+
+# ---------------- GitTool ----------------
+
+
+def test_gittool_status(monkeypatch):
+    t = agno.GitTool()
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a[0], 0, 'dirty', ''))
+    assert '📋' in t.status()
+
+
+# ---------------- HttpTool ----------------
+
+
+def test_httptool_fetch(monkeypatch):
+    t = agno.HttpTool()
+    class DummyResponse:
+        status_code = 200
+        reason_phrase = 'OK'
+        headers = {'content-type': 'text/plain'}
+        content = b'data'
+        text = 'hello'
+    class DummyClient:
+        def __enter__(self): return self
+        def __exit__(self,a,b,c): pass
+        def get(self, url, headers): return DummyResponse()
+    monkeypatch.setattr(agno.httpx, 'Client', lambda **k: DummyClient())
+    out = t.fetch('http://test')
+    assert 'HTTP GET' in out
+
+
+def test_produce_and_apply_patch(temp_dir, monkeypatch):
+    monkeypatch.setenv('DA_CODE_WORKSPACE_ROOT', temp_dir)
+    tool = agno.FileTool()
+    fpath = os.path.join(temp_dir, 'p.txt')
+    # create original file
+    tool.create_file(fpath, 'line1\nline2\n')
+    # produce patch replacing line2
+    new_content = 'line1\nLINE2_CHANGED\n'
+    diff = tool.produce_patch(fpath, new_content)
+    assert diff.strip() != ''
+    # dry run apply
+    res = json.loads(tool.apply_patch(diff, dry_run=True))
+    # accept multiple possible statuses from different implementations
+    assert res['results'][0]['status'] in ('appliable', 'created', 'dry_run_ok')
+    # real apply
+    res2 = json.loads(tool.apply_patch(diff, dry_run=False, backup=True))
+    assert res2['results'][0]['status'] in ('applied', 'appliable', 'created')
+    # verify file contents
+    with open(fpath, 'r', encoding='utf-8') as f:
+        s = f.read()
+    assert 'LINE2_CHANGED' in s
+
+
+def test_apply_patch_conflict(temp_dir, monkeypatch):
+    monkeypatch.setenv('DA_CODE_WORKSPACE_ROOT', temp_dir)
+    tool = agno.FileTool()
+    fpath = os.path.join(temp_dir, 'q.txt')
+    tool.create_file(fpath, 'a\nb\nc\n')
+    # create a patch that expects different context
+    patch = '--- a/q.txt\n+++ b/q.txt\n@@ -1,3 +1,3 @@\n-a\n-b\n-c\n+X\n+Y\n+Z\n'
+    res = json.loads(tool.apply_patch(patch, dry_run=True))
+    # Since content doesn't match context, expect conflict
+    assert res['results'][0]['status'] in ('conflict', 'error')
+
+
+def test_apply_patch_respects_daignore(temp_dir, monkeypatch):
+    """Test that apply_patch respects .daignore rules."""
+    # Set workspace root to temp_dir
+    monkeypatch.setenv('DA_CODE_WORKSPACE_ROOT', temp_dir)
+
+    # Reset the global daignore instance to pick up the new workspace root
+    agno._daignore_instance = None
+
+    tool = agno.FileTool()
+
+    # Create a .daignore file that ignores .env files
+    daignore_path = os.path.join(temp_dir, '.daignore')
+    Path(daignore_path).write_text('*.env\nsecrets.txt\n', encoding='utf-8')
+
+    # Create a .env file
+    env_file = os.path.join(temp_dir, '.env')
+    Path(env_file).write_text('SECRET=original\n', encoding='utf-8')
+
+    # Create a patch that tries to modify the .env file using full path
+    new_content = 'SECRET=modified\n'
+    # Use full path in patch so it resolves correctly
+    patch_file_path = env_file.replace('\\', '/')  # Normalize path separators for patch
+    diff = f'''--- a/{patch_file_path}
++++ b/{patch_file_path}
+@@ -1 +1 @@
+-SECRET=original
++SECRET=modified
+'''
+
+    # Try to apply the patch - should be rejected due to daignore
+    res = json.loads(tool.apply_patch(diff, dry_run=True))
+    assert res['results'][0]['status'] == 'error'
+    assert 'daignore' in res['results'][0]['message'].lower() or 'ignored' in res['results'][0]['message'].lower()
+
+    # Verify original file was not modified
+    assert Path(env_file).read_text(encoding='utf-8') == 'SECRET=original\n'

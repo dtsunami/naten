@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>mdserve Hub</title>
+  <style>
+    :root { --bg: #0b1020; --panel: #0f1724; --muted: #9aa4b2; --accent: #7dd3fc; --card: #0b1220; --text: #e6eef6; }
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin: 0; display: flex; height: 100vh; background: var(--bg); color: var(--text); }
+    #left { width: 360px; border-right: 1px solid rgba(255,255,255,0.04); padding: 1rem; overflow: auto; background: linear-gradient(180deg, var(--panel), #07101a); }
+    #right { flex: 1; display: flex; flex-direction: column; background: radial-gradient(ellipse at top right, rgba(125,211,252,0.03), transparent); }
+    .tree { list-style: none; padding-left: 0; }
+    .node { padding: 0.5rem 0.75rem; cursor: pointer; border-radius: 6px; color: var(--text); }
+    .node:hover { background: rgba(255,255,255,0.02); }
+    .folder { font-weight: 700; color: var(--accent); }
+    .controls { margin-bottom: 1rem; display:flex; gap:8px; }
+    iframe { border: none; flex: 1; width: 100%; background: #fff; }
+    .servers { margin-top: 1rem; }
+    .server { padding: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.03); display:flex; justify-content:space-between; align-items:center; }
+    button { margin-right: 0.5rem; padding:6px 8px; border-radius:6px; background:transparent; border:1px solid rgba(255,255,255,0.04); color:var(--text); }
+    input, select { padding:6px 8px; border-radius:6px; background:transparent; border:1px solid rgba(255,255,255,0.04); color:var(--text); }
+  </style>
+</head>
+<body>
+  <div id="left">
+    <div class="controls">
+      <button id="refresh">Refresh Files</button>
+      <button id="list-servers">List Servers</button>
+    </div>
+    <div>
+      <h3 style="margin-top:0;">Files</h3>
+      <div style="margin-bottom:8px;"><input id="root" placeholder="Project root (default: current dir)" style="width:100%" /></div>
+      <ul id="files" class="tree"></ul>
+    </div>
+    <div class="servers">
+      <h3>Servers</h3>
+      <div id="servers"></div>
+    </div>
+  </div>
+  <div id="right">
+    <div style="padding: 0.5rem; border-bottom: 1px solid #ddd; display:flex; gap:8px; align-items:center;">
+      <div>Open in pane:</div>
+      <select id="target-select"><option value="pane">Pane (embed)</option><option value="new">New tab</option></select>
+      <label><input type="checkbox" id="use-proxy" checked /> Proxy via hub</label>
+    </div>
+    <iframe id="viewer"></iframe>
+  </div>
+
+  <script>
+    async function api(path, opts) {
+      const res = await fetch('/api' + path, opts);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    async function refreshFiles() {
+      const root = document.getElementById('root').value || undefined;
+      const files = await api('/files' + (root ? '?dir=' + encodeURIComponent(root) : ''));
+      const ul = document.getElementById('files');
+      ul.innerHTML = '';
+      // Group by parent directory
+      const groups = {};
+      files.forEach(f => {
+        const p = f.split('/').slice(0,-1).join('/') || '.';
+        (groups[p] = groups[p] || []).push(f);
+      });
+      Object.keys(groups).sort().forEach(dir => {
+        const h = document.createElement('div');
+        h.className = 'folder';
+        h.textContent = dir;
+        ul.appendChild(h);
+        groups[dir].forEach(f => {
+          const li = document.createElement('li');
+          li.textContent = f.split('/').slice(-1)[0];
+          li.title = f;
+          li.className = 'node';
+          li.onclick = () => startForFile(f);
+          ul.appendChild(li);
+        });
+      });
+    }
+
+    async function listServers() {
+      const s = await api('/servers');
+      const div = document.getElementById('servers');
+      div.innerHTML = '';
+      s.forEach(srv => {
+        const el = document.createElement('div');
+        el.className = 'server';
+        el.innerHTML = `<strong>${srv.file}</strong><br/>${srv.host}:${srv.port}<br/>`;
+        const openBtn = document.createElement('button');
+        openBtn.textContent = 'Open';
+        openBtn.onclick = () => openServer(srv);
+        const stopBtn = document.createElement('button');
+        stopBtn.textContent = 'Stop';
+        stopBtn.onclick = async () => { await fetch('/api/servers/' + srv.id, { method: 'DELETE' }); listServers(); };
+        el.appendChild(openBtn);
+        el.appendChild(stopBtn);
+        div.appendChild(el);
+      });
+    }
+
+    async function startForFile(file) {
+      const body = { file };
+      const res = await fetch('/api/servers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const info = await res.json();
+      listServers();
+      openServer(info);
+    }
+
+    function openServer(info) {
+      const target = document.getElementById('target-select').value;
+      const useProxy = document.getElementById('use-proxy').checked;
+      const url = useProxy ? `/proxy/${info.id}` : `http://${info.host}:${info.port}`;
+      if (target === 'new') window.open(url, '_blank'); else document.getElementById('viewer').src = url;
+    }
+
+    document.getElementById('refresh').onclick = refreshFiles;
+    document.getElementById('list-servers').onclick = listServers;
+
+    // initial load
+    refreshFiles();
+    listServers();
+  </script>
+</body>
+</html>

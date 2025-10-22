@@ -310,7 +310,8 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                         if run_event.event == RunEvent.run_completed:
                             return True
                         elif run_event.event == RunEvent.run_cancelled:
-                            logger.info(f"Run cancelled event received for run_id: {self.active_run_id}")
+                            logger.warning(f"⚠️  AGENT CANCELLATION DETECTED - run_id: {self.active_run_id}")
+                            logger.warning(f"   RunEvent details: {run_event}")
                             return ('cancelled', None)
                     elif run_event.event in [RunEvent.reasoning_started]:
                         await status_queue.put("Reasoning: Starting...")
@@ -345,16 +346,38 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                         logger.error(f"Unhandled run event!!! {run_event}")
                 else:
                     for tool in run_event.tools_requiring_confirmation:  # type: ignore
-                        confirm_arg = f"Confirm Tool [bold blue]{tool.tool_name}({tool.tool_args})[/] requires confirmation."
+                        # Extract actual command from tool args (for bash/shell tools)
+                        actual_command = tool.tool_args.get("command", str(tool.tool_args))
+
                         execution = CommandExecution(
-                            command=confirm_arg,
+                            command=actual_command,  # Store actual command for editing
+                            tool_name=tool.tool_name,  # Store tool name for display
                             explanation=tool.tool_args.get("explanation", ""),
                             working_directory=tool.tool_args.get("working_directory", self.code_session.working_directory),
                             agent_reasoning=tool.tool_args.get("reasoning", ""),
                             related_files=tool.tool_args.get("related_files", [])
                         )
                         confirmation_response = await self.confirmation_handler(execution)
-                        tool.confirmed = confirmation_response.choice.lower() == "yes"
+
+                        # Handle different confirmation responses
+                        if confirmation_response.choice.lower() == "yes":
+                            tool.confirmed = True
+                        elif confirmation_response.choice.lower() == "edit":
+                            # User edited the command - update tool args with modified command
+                            if confirmation_response.modified_command:
+                                tool.tool_args["command"] = confirmation_response.modified_command
+                                tool.confirmed = True
+                            else:
+                                tool.confirmed = False
+                        elif confirmation_response.choice.lower() == "reprompt":
+                            # User wants to reprompt - reject tool and send message back to agent
+                            tool.confirmed = False
+                            if confirmation_response.reprompt_message:
+                                # Set error message that will be sent back to agent as tool result
+                                tool.error = f"User requested clarification: {confirmation_response.reprompt_message}"
+                        else:
+                            # Cancel or unknown response
+                            tool.confirmed = False
                     # replace stream with continuation stream
                     return ('continue', run_event.tools)
             return ('done', None)

@@ -17,7 +17,280 @@ import re
 import glob
 
 import logging
+import difflib
+import tempfile
+import shutil
 logger = logging.getLogger(__name__)
+
+#====================================================================================================
+# Patch Utilities (for produce_patch and apply_patch)
+#====================================================================================================
+
+def _is_within_root(target_path: str, root: str) -> bool:
+    """Check if target path is within root directory."""
+    root = os.path.abspath(root)
+    target = os.path.abspath(target_path)
+    try:
+        return os.path.commonpath([root]) == os.path.commonpath([root, target])
+    except ValueError:
+        return False
+
+
+def _read_text_file_preserve_newlines(path: str):
+    """Read file preserving newline style."""
+    from pathlib import Path
+    b = Path(path).read_bytes()
+    if b.find(b'\x00') != -1:
+        raise ValueError("binary file (contains NUL bytes)")
+    newline_style = '\r\n' if b.find(b'\r\n') != -1 else '\n'
+    try:
+        text = b.decode('utf-8')
+    except Exception:
+        text = b.decode('latin1')
+    return text, newline_style
+
+
+def _atomic_write(path: str, data: bytes):
+    """Atomically write data to file."""
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dirpath)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+
+def _produce_patch_impl(path: str, new_contents: str) -> str:
+    """Produce a unified diff between current file contents and new_contents."""
+    from pathlib import Path
+    path = os.fspath(path)
+    try:
+        old_text, _ = _read_text_file_preserve_newlines(path)
+    except FileNotFoundError:
+        old_text = ""
+    except ValueError:
+        raise
+
+    old_lines = old_text.splitlines(keepends=False)
+    new_lines = new_contents.splitlines(keepends=False)
+
+    diff_lines = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm='\n'
+        )
+    )
+    return "\n".join(diff_lines) + ("\n" if diff_lines else "")
+
+
+def _apply_patch_impl(patch_text: str, dry_run: bool = True, backup: bool = True,
+                      workspace_root: Optional[str] = None, fuzzy: bool = False):
+    """Apply a unified diff patch."""
+    import time
+    import datetime
+
+    workspace_root = os.path.abspath(workspace_root or os.getcwd())
+    results = []
+
+    # Fallback parser
+    lines = patch_text.splitlines()
+    i = 0
+    files = []
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('--- '):
+            fromfile = line[4:].strip()
+            i += 1
+            while i < len(lines) and lines[i].strip() == '':
+                i += 1
+            if i >= len(lines):
+                break
+            tofile_line = lines[i]
+            if not tofile_line.startswith('+++ '):
+                i += 1
+                continue
+            tofile = tofile_line[4:].strip()
+            for pref in ('a/', 'b/'):
+                if fromfile.startswith(pref):
+                    fromfile = fromfile[len(pref):]
+                if tofile.startswith(pref):
+                    tofile = tofile[len(pref):]
+            current = {"fromfile": fromfile, "tofile": tofile, "hunks": []}
+            i += 1
+            while i < len(lines) and lines[i].strip() == '':
+                i += 1
+            while i < len(lines) and lines[i].startswith('@@'):
+                hunk_header = lines[i]
+                i += 1
+                hunk_lines = []
+                while i < len(lines) and not lines[i].startswith('@@') and not lines[i].startswith('--- '):
+                    hunk_lines.append(lines[i])
+                    i += 1
+                current['hunks'].append({"header": hunk_header, "lines": hunk_lines})
+            files.append(current)
+        else:
+            i += 1
+
+    # Get daignore instance for checking ignored paths
+    daignore = get_daignore()
+
+    for file_entry in files:
+        tofile = file_entry['tofile']
+        abs_target = os.path.abspath(tofile)
+
+        # Check workspace boundary
+        if not _is_within_root(abs_target, workspace_root):
+            results.append({"file": abs_target, "status": "error", "message": "path outside workspace"})
+            continue
+
+        # Check .daignore rules
+        if daignore.is_ignored(abs_target):
+            results.append({"file": abs_target, "status": "error", "message": "access denied: path is ignored by .daignore"})
+            continue
+
+        file_result = {"file": abs_target, "status": None, "hunks": []}
+        exists = os.path.exists(abs_target)
+        if not exists:
+            if dry_run:
+                file_result['status'] = "created"
+                file_result['message'] = "file would be created"
+            else:
+                pass
+        try:
+            old_text, newline = _read_text_file_preserve_newlines(abs_target) if exists else ("", "\n")
+        except ValueError:
+            file_result['status'] = "error"
+            file_result['message'] = "binary file"
+            results.append(file_result)
+            continue
+        old_lines = old_text.splitlines(keepends=True)
+        new_lines = list(old_lines)
+        hunk_index = 0
+        overall_conflict = False
+        for hunk in file_entry['hunks']:
+            header = hunk['header']
+            try:
+                parts = header.split()
+                minus = parts[1]
+                plus = parts[2]
+                def parse_range(r):
+                    r = r.lstrip('+-')
+                    if ',' in r:
+                        start, cnt = r.split(',', 1)
+                        return int(start), int(cnt)
+                    else:
+                        return int(r), 1
+                from_start, from_count = parse_range(minus)
+                to_start, to_count = parse_range(plus)
+            except Exception:
+                file_result['hunks'].append({"hunk_index": hunk_index, "status": "conflict", "message": "invalid hunk header"})
+                overall_conflict = True
+                hunk_index += 1
+                continue
+
+            old_pos = from_start - 1
+            idx_cursor = old_pos
+            expected_ok = True
+            consumed_old = 0
+            for l in hunk['lines']:
+                if l.startswith(' '):
+                    expected_line = l[1:]
+                    if idx_cursor >= len(new_lines):
+                        expected_ok = False
+                        file_result['hunks'].append({"hunk_index": hunk_index, "status": "conflict", "message": f"context line beyond EOF: expected {expected_line!r}"})
+                        break
+                    if new_lines[idx_cursor].rstrip('\r\n') != expected_line.rstrip('\r\n'):
+                        expected_ok = False
+                        file_result['hunks'].append({"hunk_index": hunk_index, "status": "conflict", "message": f"context mismatch at line {idx_cursor+1}"})
+                        break
+                    idx_cursor += 1
+                    consumed_old += 1
+                elif l.startswith('-'):
+                    expected_line = l[1:]
+                    if idx_cursor >= len(new_lines):
+                        expected_ok = False
+                        file_result['hunks'].append({"hunk_index": hunk_index, "status": "conflict", "message": "removal beyond EOF"})
+                        break
+                    if new_lines[idx_cursor].rstrip('\r\n') != expected_line.rstrip('\r\n'):
+                        expected_ok = False
+                        file_result['hunks'].append({"hunk_index": hunk_index, "status": "conflict", "message": f"removal mismatch at line {idx_cursor+1}"})
+                        break
+                    idx_cursor += 1
+                    consumed_old += 1
+                elif l.startswith('+'):
+                    pass
+                else:
+                    pass
+
+            if not expected_ok:
+                overall_conflict = True
+                hunk_index += 1
+                continue
+
+            if dry_run:
+                file_result['hunks'].append({"hunk_index": hunk_index, "status": "appliable", "message": "hunk matches current file"})
+            else:
+                apply_idx = from_start - 1
+                out_block = []
+                scan_idx = apply_idx
+                for l in hunk['lines']:
+                    if l.startswith(' '):
+                        out_block.append(new_lines[scan_idx])
+                        scan_idx += 1
+                    elif l.startswith('-'):
+                        scan_idx += 1
+                    elif l.startswith('+'):
+                        content = l[1:]
+                        if content and not content.endswith(('\n', '\r\n')):
+                            content += '\n'
+                        elif not content:
+                            content = '\n'
+                        out_block.append(content)
+                    else:
+                        pass
+                end_idx = apply_idx + consumed_old
+                new_lines[apply_idx:end_idx] = out_block
+                file_result['hunks'].append({"hunk_index": hunk_index, "status": "applied", "message": "hunk applied"})
+            hunk_index += 1
+
+        if overall_conflict:
+            file_result['status'] = "conflict"
+        else:
+            file_result['status'] = "appliable" if dry_run else "applied"
+
+        if not dry_run and not overall_conflict:
+            new_text = "".join(new_lines)
+            try:
+                encoded = new_text.encode("utf-8")
+            except Exception:
+                encoded = new_text.encode("latin1", errors="replace")
+            if exists and backup:
+                ts = int(time.time())
+                bak = f"{abs_target}.bak.{ts}"
+                shutil.copy2(abs_target, bak)
+            try:
+                _atomic_write(abs_target, encoded)
+                file_result['message'] = "written"
+            except Exception as e:
+                file_result['status'] = "error"
+                file_result['message'] = f"write failed: {e}"
+
+        results.append(file_result)
+
+    return {"results": results}
+
 
 #====================================================================================================
 # Utilities
@@ -192,7 +465,7 @@ class FileTool(Toolkit):
                 # keep shim for backward compatibility
                 self.replace_text,
                 self.produce_patch,
-                #self.apply_patch,
+                self.apply_patch,
                 self.copy_file,
                 self.glob_files,
                 self.grep_content,
@@ -497,17 +770,15 @@ class FileTool(Toolkit):
     def produce_patch(self, path: str, new_contents: str) -> str:
         """Produce a unified diff between the current file contents and new_contents.
 
-        Delegates to da_code.patch_tool.produce_patch to ensure canonical diff formatting.
         Returns unified diff text (empty string if identical).
         """
-        from .patch_tool import produce_patch as _produce
         try:
             path_abs = safe_path(path)
         except Exception:
             # If path is invalid per safe_path, let caller handle the error via exception
             path_abs = path
         try:
-            diff = _produce(path_abs, new_contents)
+            diff = _produce_patch_impl(path_abs, new_contents)
             return diff
         except Exception:
             return ""
@@ -515,30 +786,20 @@ class FileTool(Toolkit):
     def apply_patch(self, patch_text: str, dry_run: bool = True, backup: bool = True, force: bool = False) -> str:
         """Apply a unified diff produced by produce_patch.
 
-        This implementation prefers the third-party python-patch (techtonik/python-patch) if
-        it is installed. If python-patch is not available or fails, it falls back to the
-        built-in manual parser and applier (legacy fallback).
-
         Returns a JSON string summarizing per-file application results.
         In dry_run mode no files are modified; in non-dry-run mode files are written
         atomically and backups are created when backup=True.
         """
         import json
-        import tempfile
-        import shutil
-        import datetime
-        from pathlib import Path
 
-        # Delegate to new patch_tool implementation for better diagnostics and behaviour
+        # Use local implementation
         try:
-            from .patch_tool import apply_patch as _apply_patch
-            # patch_tool.apply_patch returns dict; convert to JSON string for backward compatibility
-            res = _apply_patch(patch_text, dry_run=dry_run, backup=backup, workspace_root=get_workspace_root(), fuzzy=force)
-            import json
+            res = _apply_patch_impl(patch_text, dry_run=dry_run, backup=backup, workspace_root=get_workspace_root(), fuzzy=force)
             return json.dumps(res)
-        except Exception:
-            # Fallback to legacy implementation if our patch_tool is not available or fails
-            pass
+        except Exception as e:
+            return json.dumps({"error": f"Patch application failed: {str(e)}"})
+
+        # Legacy fallback code (keeping for reference)
 
         # Try to use python-patch if available
         try:

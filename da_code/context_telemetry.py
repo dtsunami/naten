@@ -14,12 +14,75 @@ The interceptor provides ACTUAL token counts from real LLM calls (not estimates)
 
 import logging
 import json
+import time
+import random
+import asyncio
 import tiktoken
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_BASE_RETRY_DELAY = 0.5
+
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+def _is_rate_limit_error(exc: Exception) -> Tuple[bool, Optional[float]]:
+    """Detect rate limit errors and extract Retry-After header if present.
+
+    Args:
+        exc: The exception to check
+
+    Returns:
+        Tuple of (is_rate_limit, retry_after_seconds)
+        - is_rate_limit: True if this is a rate limit error
+        - retry_after_seconds: Value from Retry-After header, or None
+    """
+    # Check for httpx HTTPStatusError with 429 status
+    try:
+        import httpx
+        if isinstance(exc, httpx.HTTPStatusError):
+            resp = getattr(exc, 'response', None)
+            if resp is not None and getattr(resp, 'status_code', None) == 429:
+                retry = None
+                try:
+                    retry = resp.headers.get('Retry-After')
+                except Exception:
+                    retry = None
+                return True, float(retry) if retry and retry.isdigit() else None
+    except Exception:
+        pass
+
+    # Generic status_code check on exception or response
+    status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+    if status == 429:
+        retry = None
+        try:
+            retry = getattr(exc, 'response', None).headers.get('Retry-After')
+        except Exception:
+            retry = None
+        try:
+            return True, float(retry) if retry and str(retry).isdigit() else None
+        except Exception:
+            return True, None
+
+    # Check exception class name and message for rate limit indicators
+    name = exc.__class__.__name__
+    msg = str(exc)
+    if 'RateLimit' in name or 'TooManyRequests' in name or '429' in msg:
+        return True, None
+
+    return False, None
 
 
 # ============================================================================
@@ -545,52 +608,13 @@ class ModelInterceptor:
         rate-limit / 429 responses. It honours a `Retry-After` header if
         available, and uses exponential backoff with jitter otherwise.
         """
-        import time
-        import random
         try:
-            # Local helper to detect rate limit errors and extract Retry-After
-            def _is_rate_limit_error(exc) -> (bool, Optional[float]):
-                # httpx HTTPStatusError has response with status_code
-                try:
-                    import httpx
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        resp = getattr(exc, 'response', None)
-                        if resp is not None and getattr(resp, 'status_code', None) == 429:
-                            retry = None
-                            try:
-                                retry = resp.headers.get('Retry-After')
-                            except Exception:
-                                retry = None
-                            return True, float(retry) if retry and retry.isdigit() else None
-                except Exception:
-                    pass
-
-                # Generic status_code on exception
-                status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
-                if status == 429:
-                    retry = None
-                    try:
-                        retry = getattr(exc, 'response', None).headers.get('Retry-After')
-                    except Exception:
-                        retry = None
-                    try:
-                        return True, float(retry) if retry and str(retry).isdigit() else None
-                    except Exception:
-                        return True, None
-
-                name = exc.__class__.__name__
-                msg = str(exc)
-                if 'RateLimit' in name or 'TooManyRequests' in name or '429' in msg:
-                    return True, None
-
-                return False, None
-
             # Log messages (tools is in kwargs)
             self._log_messages(messages, **kwargs)
 
-            max_retries = getattr(self.model, 'max_retries', 5) or 5
+            max_retries = getattr(self.model, 'max_retries', DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES
             attempt = 0
-            base_delay = 0.5
+            base_delay = DEFAULT_BASE_RETRY_DELAY
 
             while True:
                 try:
@@ -605,7 +629,7 @@ class ModelInterceptor:
                         logger.error(f"❌ LLM call failed (attempt {attempt}) - not retrying: {e}", exc_info=True)
                         raise
 
-                    # Compute sleep: prefer Retry-After if provided
+                    # Compute sleep: prefer Retry-After if provided, else exponential backoff with jitter
                     if retry_after:
                         sleep_for = float(retry_after)
                     else:
@@ -623,46 +647,9 @@ class ModelInterceptor:
         This wrapper retries on rate-limit (429) responses using exponential
         backoff with jitter and honours `Retry-After` if present.
         """
-        import asyncio
-        import random
-        # Local helper to detect rate limit errors and extract Retry-After
-        def _is_rate_limit_error(exc) -> (bool, Optional[float]):
-            try:
-                import httpx
-                if isinstance(exc, httpx.HTTPStatusError):
-                    resp = getattr(exc, 'response', None)
-                    if resp is not None and getattr(resp, 'status_code', None) == 429:
-                        retry = None
-                        try:
-                            retry = resp.headers.get('Retry-After')
-                        except Exception:
-                            retry = None
-                        return True, float(retry) if retry and retry.isdigit() else None
-            except Exception:
-                pass
-
-            status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
-            if status == 429:
-                retry = None
-                try:
-                    retry = getattr(exc, 'response', None).headers.get('Retry-After')
-                except Exception:
-                    retry = None
-                try:
-                    return True, float(retry) if retry and str(retry).isdigit() else None
-                except Exception:
-                    return True, None
-
-            name = exc.__class__.__name__
-            msg = str(exc)
-            if 'RateLimit' in name or 'TooManyRequests' in name or '429' in msg:
-                return True, None
-
-            return False, None
-
-        max_retries = getattr(self.model, 'max_retries', 5) or 5
+        max_retries = getattr(self.model, 'max_retries', DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES
         attempt = 0
-        base_delay = 0.5
+        base_delay = DEFAULT_BASE_RETRY_DELAY
 
         # Log messages (tools is in kwargs)
         self._log_messages(messages, **kwargs)
@@ -680,6 +667,7 @@ class ModelInterceptor:
                     logger.error(f"❌ Async LLM call failed (attempt {attempt}) - not retrying: {e}", exc_info=True)
                     raise
 
+                # Compute sleep: prefer Retry-After if provided, else exponential backoff with jitter
                 if retry_after:
                     sleep_for = float(retry_after)
                 else:
@@ -695,46 +683,9 @@ class ModelInterceptor:
         start. For streaming sources that support resumption this could be
         improved to resume; for now we retry the entire streaming call.
         """
-        import asyncio
-        import random
-
-        def _is_rate_limit_error(exc) -> (bool, Optional[float]):
-            try:
-                import httpx
-                if isinstance(exc, httpx.HTTPStatusError):
-                    resp = getattr(exc, 'response', None)
-                    if resp is not None and getattr(resp, 'status_code', None) == 429:
-                        retry = None
-                        try:
-                            retry = resp.headers.get('Retry-After')
-                        except Exception:
-                            retry = None
-                        return True, float(retry) if retry and retry.isdigit() else None
-            except Exception:
-                pass
-
-            status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
-            if status == 429:
-                retry = None
-                try:
-                    retry = getattr(exc, 'response', None).headers.get('Retry-After')
-                except Exception:
-                    retry = None
-                try:
-                    return True, float(retry) if retry and str(retry).isdigit() else None
-                except Exception:
-                    return True, None
-
-            name = exc.__class__.__name__
-            msg = str(exc)
-            if 'RateLimit' in name or 'TooManyRequests' in name or '429' in msg:
-                return True, None
-
-            return False, None
-
-        max_retries = getattr(self.model, 'max_retries', 5) or 5
+        max_retries = getattr(self.model, 'max_retries', DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES
         attempt = 0
-        base_delay = 0.5
+        base_delay = DEFAULT_BASE_RETRY_DELAY
 
         # We will attempt the streaming call and on transient 429 we'll retry
         while True:
@@ -763,6 +714,7 @@ class ModelInterceptor:
                     logger.error(f"❌ Error in streaming interceptor (attempt {attempt}) - not retrying: {e}", exc_info=True)
                     raise
 
+                # Compute sleep: prefer Retry-After if provided, else exponential backoff with jitter
                 if retry_after:
                     sleep_for = float(retry_after)
                 else:

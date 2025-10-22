@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdserve-wrapper"
+version = "0.1.0"
+description = "Python wrapper for mdserve - fast markdown preview server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+mdserve = "mdserve_wrapper.cli:main"
+mdserve-all = "mdserve_wrapper.cli:serve_all"
+mdserve-hub = "mdserve_wrapper.api:serve_cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools]
+packages = ["mdserve_wrapper"]
+
+[tool.setuptools.package-data]
+mdserve_wrapper = ["bin/*"]

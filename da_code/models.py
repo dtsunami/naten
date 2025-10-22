@@ -64,9 +64,8 @@ class CommandStatus(str, Enum):
 class UserResponse(str, Enum):
     """User response to command confirmation."""
     YES = "yes"
-    NO = "no"
-    MODIFY = "modify"
-    EXPLAIN = "explain"
+    EDIT = "edit"
+    REPROMPT = "reprompt"
 
 
 class LLMCallStatus(str, Enum):
@@ -109,6 +108,7 @@ class CommandExecution(BaseModel):
 
     # Command details
     command: str = Field(..., description="Shell command to execute")
+    tool_name: Optional[str] = Field(None, description="Name of the tool being executed")
     explanation: Optional[str] = Field(None, description="Agent explanation of what command does")
     working_directory: str = Field("/tmp", description="Working directory for command execution")
 
@@ -158,6 +158,7 @@ class ConfirmationResponse(BaseModel):
 
     choice: str
     modified_command: Optional[str] = None
+    reprompt_message: Optional[str] = None
 
 
 
