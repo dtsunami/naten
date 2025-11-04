@@ -64,7 +64,7 @@ class CommandStatus(str, Enum):
 class UserResponse(str, Enum):
     """User response to command confirmation."""
     YES = "yes"
-    EDIT = "edit"
+    MODIFY = "modify"
     REPROMPT = "reprompt"
 
 
@@ -149,8 +149,8 @@ class ConfirmationRequest(BaseModel):
     """Request for user confirmation during execution."""
 
     execution: CommandExecution
-    choices: list[str] = Field(default=["yes", "no", "modify", "explain"])
-    default_choice: str = "no"
+    choices: list[str] = Field(default=["yes", "modify", "reprompt"])
+    default_choice: str = "reprompt"
 
 
 class ConfirmationResponse(BaseModel):
@@ -298,7 +298,12 @@ class AgentConfig(BaseModel):
 
 
 class FileSnapshot(BaseModel):
-    """Snapshot of a single file at a point in time."""
+    """Snapshot of a single file at a point in time.
+
+    Includes file content (when small and text), size, content hash and
+    importantly the file's original mtime/atime so restores can round-trip
+    filesystem metadata.
+    """
     model_config = ConfigDict(
         validate_assignment=True,
         extra='forbid',
@@ -310,7 +315,11 @@ class FileSnapshot(BaseModel):
     size: int = Field(..., description="File size in bytes")
     content_hash: str = Field(..., description="SHA256 hash of file content")
     is_binary: bool = Field(False, description="Whether file is binary")
+    # Timestamp when the snapshot was created (for bookkeeping)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Original filesystem timestamps (may be None if not captured)
+    mtime: Optional[datetime] = Field(None, description="Original file modification time (UTC)")
+    atime: Optional[datetime] = Field(None, description="Original file access time (UTC)")
 
 
 class FileSystemHistory(BaseModel):
@@ -487,13 +496,24 @@ class FileSystemHistory(BaseModel):
                         is_binary = True
                         content_to_store = None
 
+                    # Get file timestamps and create snapshot (preserve mtime/atime)
+                    try:
+                        st = item.stat()
+                        mtime_dt = datetime.fromtimestamp(st.st_mtime, timezone.utc)
+                        atime_dt = datetime.fromtimestamp(st.st_atime, timezone.utc)
+                    except Exception:
+                        mtime_dt = None
+                        atime_dt = None
+
                     # Create snapshot
                     snapshot = FileSnapshot(
                         relative_path=relative_path,
                         content=content_to_store,
                         size=file_size,
                         content_hash=content_hash,
-                        is_binary=is_binary
+                        is_binary=is_binary,
+                        mtime=mtime_dt,
+                        atime=atime_dt
                     )
 
                     self.session_start_snapshot[relative_path] = snapshot
@@ -560,6 +580,15 @@ class FileSystemHistory(BaseModel):
                         # Use open() with newline='' to preserve exact line endings without translation
                         with open(full_path, 'w', encoding='utf-8', newline='') as f:
                             f.write(snapshot.content)
+
+                        # Restore original timestamps if available
+                        try:
+                            if snapshot.atime and snapshot.mtime:
+                                os.utime(full_path, (snapshot.atime.timestamp(), snapshot.mtime.timestamp()))
+                        except Exception as e:
+                            stats["errors"].append(f"{rel_path}: Failed to restore timestamps: {e}")
+                            logger.warning(f"Failed to restore timestamps for {rel_path}: {e}")
+
                         stats["restored"] += 1
                         stats["files_affected"] += 1
                         logger.info(f"Restored file to session-start state: {rel_path}")
@@ -594,6 +623,15 @@ class FileSystemHistory(BaseModel):
                         # Use open() with newline='' to preserve exact line endings without translation
                         with open(full_path, 'w', encoding='utf-8', newline='') as f:
                             f.write(snapshot.content)
+
+                        # Restore timestamps when possible
+                        try:
+                            if snapshot.atime and snapshot.mtime:
+                                os.utime(full_path, (snapshot.atime.timestamp(), snapshot.mtime.timestamp()))
+                        except Exception as e:
+                            stats["errors"].append(f"{rel_path}: Failed to restore timestamps: {e}")
+                            logger.warning(f"Failed to restore timestamps for restored deleted file {rel_path}: {e}")
+
                         stats["restored"] += 1
                         stats["files_affected"] += 1
                         logger.info(f"Restored deleted file: {rel_path}")

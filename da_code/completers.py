@@ -318,7 +318,7 @@ class NudgeCompleter(Completer):
                 if phrase.lower().startswith(phrase_text.lower()):
                     # Remove ! and partial text, add full phrase + comma
                     yield Completion(
-                        phrase + ", ",
+                        f"{phrase}? ",
                         start_position=-(len(phrase_text) + 1),  # Remove ! + typed text
                         display=phrase,
                         display_meta="💡",
@@ -347,7 +347,7 @@ class NudgeCompleter(Completer):
                     suffix = ""
                 else:
                     # File - add comma and space
-                    suffix = ", "
+                    suffix = "? "
 
                 yield Completion(
                     completed_path + suffix,

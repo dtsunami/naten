@@ -324,9 +324,8 @@ async def async_prompt_user_silent(choices: List[str], default: str = None, comm
     # Choice configuration with colors
     choice_config = {
         "yes": {"label": "✅ Yes", "desc": "Execute the command as shown", "color": "green"},
-        "no": {"label": "❌ No", "desc": "Cancel command execution", "color": "red"},
         "modify": {"label": "✏️  Modify", "desc": "Edit the command before execution", "color": "yellow"},
-        "explain": {"label": "❓ Explain", "desc": "Ask agent to explain the command", "color": "blue"}
+        "reprompt": {"label": "❓ Reprompt", "desc": "Send agent info to correct the command", "color": "blue"}
     }
 
     def display_static_confirmation():
@@ -716,10 +715,20 @@ def show_detailed_context_breakdown(agent, console):
             console.print()
             return
 
-        components = breakdown['components']
-        total_tokens = breakdown['total_tokens']
-        max_tokens = breakdown['max_tokens']
-        usage_pct = breakdown['usage_pct']
+        # If ContextManager was updated to return memories/history, support both shapes
+        if isinstance(breakdown, dict) and 'breakdown' in breakdown:
+            bd = breakdown['breakdown']
+            memories = breakdown.get('memories', [])
+            history = breakdown.get('history', [])
+        else:
+            bd = breakdown
+            memories = []
+            history = []
+
+        components = bd.get('components', [])
+        total_tokens = bd.get('total_tokens', 0)
+        max_tokens = bd.get('max_tokens', 128000)
+        usage_pct = bd.get('usage_pct', 0)
 
         # Create table
         table = Table(show_header=True, header_style="bold cyan", padding=(0, 1), expand=False)
@@ -772,6 +781,18 @@ def show_detailed_context_breakdown(agent, console):
 
         # Print footer with management tips
         console.print()
+        # Show small memory/chat summary if available
+        if memories:
+            console.print("[bold]📚 Recent Memories:[/bold]")
+            for m in memories[:3]:
+                console.print(f"  • {m.get('summary', '')[:120]}  [dim]{m.get('tokens',0)} tokens[/dim]")
+            console.print()
+        if history:
+            console.print("[bold]🕘 Recent Chat Excerpts:[/bold]")
+            for h in history[:5]:
+                console.print(f"  • {h.get('excerpt','')[:120]}  [dim]{h.get('tokens',0)} tokens[/dim]")
+            console.print()
+
         console.print("[bold]💡 Management Actions:[/bold]")
         console.print("[dim]The components above are sorted by token usage (Pareto principle).[/dim]")
         console.print()
@@ -1599,7 +1620,7 @@ async def show_combined_restore_menu(file_data: Dict[str, Tuple[List, bool]], co
 
 
 class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
-    """Modal confirmation dialog with Yes/Edit/Reprompt options."""
+    """Modal confirmation dialog with Yes/Modify/Reprompt options."""
 
     DEFAULT_CSS = """
     ConfirmationScreen {
@@ -1685,7 +1706,7 @@ class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
     def __init__(self, execution: CommandExecution):
         super().__init__()
         self.execution = execution
-        self.mode = None  # None, "edit", or "reprompt"
+        self.mode = None  # None, "modify", or "reprompt"
 
     def compose(self) -> ComposeResult:
         """Compose the confirmation dialog."""
@@ -1699,7 +1720,7 @@ class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
             # Main action buttons
             with Vertical(id="buttons"):
                 yield Button("✅ Yes - Confirm (1)", variant="success", id="yes", classes="yes")
-                yield Button("✏️  Edit - Modify Command (2)", variant="warning", id="edit", classes="edit")
+                yield Button("✏️ Modify - Modify Command (2)", variant="warning", id="modify", classes="modify")
                 yield Button("💬 Reprompt - Send Feedback (3)", variant="error", id="reprompt", classes="reprompt")
 
             # Input container (initially hidden)
@@ -1720,8 +1741,8 @@ class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
                 modified_command=None,
                 reprompt_message=None
             ))
-        elif button_id == "edit":
-            self._show_edit_input()
+        elif button_id == "modify":
+            self._show_modify_input()
         elif button_id == "reprompt":
             self._show_reprompt_input()
         elif button_id == "submit":
@@ -1729,9 +1750,9 @@ class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
         elif button_id == "back":
             self._hide_input()
 
-    def _show_edit_input(self):
-        """Show the edit command input field."""
-        self.mode = "edit"
+    def _show_modify_input(self):
+        """Show the mondify command input field."""
+        self.mode = "modify"
         # Hide main buttons
         self.query_one("#buttons").add_class("hidden")
         # Show input container
@@ -1771,9 +1792,9 @@ class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
         """Handle submit button based on current mode."""
         input_value = self.query_one("#command-input", Input).value
 
-        if self.mode == "edit":
+        if self.mode == "modify":
             self.dismiss(ConfirmationResponse(
-                choice=UserResponse.EDIT.value,
+                choice=UserResponse.MODIFY.value,
                 modified_command=input_value,
                 reprompt_message=None
             ))
@@ -1787,7 +1808,7 @@ class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
     def on_key(self, event: events.Key) -> None:
         """Handle keyboard shortcuts."""
         # If input is shown, Enter submits
-        if self.mode in ["edit", "reprompt"]:
+        if self.mode in ["modify", "reprompt"]:
             if event.key == "enter":
                 self._handle_submit()
                 event.prevent_default()
@@ -1803,7 +1824,8 @@ class ConfirmationScreen(ModalScreen[ConfirmationResponse]):
                     reprompt_message=None
                 ))
             elif event.key == "2":
-                self._show_edit_input()
+                # Open the modify input mode
+                self._show_modify_input()
             elif event.key == "3":
                 self._show_reprompt_input()
             elif event.key == "escape":

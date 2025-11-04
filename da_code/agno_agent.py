@@ -167,7 +167,8 @@ class AgnoAgent():
             base_llm,
             max_tokens=self.config.max_tokens or 128000,
             model_type='main',
-            stats_tracker=self.model_stats_tracker
+            stats_tracker=self.model_stats_tracker,
+            on_llm_call=self._on_llm_call
         )
         logging.info("✅ Main model wrapped with interceptor for context telemetry")
 
@@ -188,7 +189,8 @@ class AgnoAgent():
                 base_reasoning,
                 max_tokens=self.config.max_tokens or 128000,
                 model_type='reasoning',
-                stats_tracker=self.model_stats_tracker
+                stats_tracker=self.model_stats_tracker,
+                on_llm_call=self._on_llm_call
             )
             logging.info("✅ Reasoning model wrapped with interceptor for context telemetry")
 
@@ -281,9 +283,55 @@ Don't prompt the user before running tools, tools will ask user for confirmation
 """
 
 
+    def _on_llm_call(self, payload: dict):
+        """Callback invoked by ModelInterceptor when an LLM call completes.
+
+        This attempts to enqueue a {'type': 'llm_call', ...} payload onto the
+        current status_queue. The interceptor may call this synchronously from
+        non-async code, so this function is safe to call from any thread.
+        """
+        try:
+            if not isinstance(payload, dict):
+                return
+            q = getattr(self, '_last_status_queue', None)
+            if q is None:
+                # No active status queue to report to
+                return
+
+            try:
+                q.put_nowait(payload)
+                return
+            except Exception:
+                # Fall back to scheduling onto the event loop
+                try:
+                    loop = asyncio.get_event_loop()
+                    loop.call_soon_threadsafe(lambda: asyncio.create_task(q.put(payload)))
+                except Exception:
+                    logging.exception('Failed to enqueue llm_call payload onto status_queue')
+        except Exception:
+            logging.exception('Exception in _on_llm_call')
+
     async def arun(self, task: str, confirmation_handler: callable, status_queue: asyncio.Queue, output_queue: asyncio.Queue, user_id: str="user") -> str:
         """Execute a task with streaming events and persistent run until completion (handles multiple confirmations)."""
         logging.debug("Entering arun")
+        # Wire the interceptor to forward llm_call payloads into the status queue
+        try:
+            # store reference for callback
+            self._last_status_queue = status_queue
+            if hasattr(self, 'llm') and hasattr(self.llm, 'set_on_llm_call'):
+                try:
+                    self.llm.set_on_llm_call(self._on_llm_call)
+                    logging.debug('Wired llm interceptor callback for main model')
+                except Exception:
+                    logging.exception('Failed to set on_llm_call for main model')
+            if hasattr(self, 'reasoning') and self.reasoning and hasattr(self.reasoning, 'set_on_llm_call'):
+                try:
+                    self.reasoning.set_on_llm_call(self._on_llm_call)
+                    logging.debug('Wired llm interceptor callback for reasoning model')
+                except Exception:
+                    logging.exception('Failed to set on_llm_call for reasoning model')
+        except Exception:
+            logging.exception('Failed to wire model interceptor callbacks')
         self.confirmation_handler = confirmation_handler
         content_started = False
         self.active_run_id = None
@@ -291,6 +339,15 @@ Don't prompt the user before running tools, tools will ask user for confirmation
         async def process_stream(stream):
             nonlocal content_started
             async for run_event in stream:
+                # Allow ModelInterceptor to yield structured stream error events
+                if isinstance(run_event, dict) and run_event.get('type') == 'llm_stream_error':
+                    # Delegate to helper to enqueue a friendly message and cancel the run
+                    try:
+                        await self._handle_llm_stream_error(run_event, status_queue)
+                    except Exception:
+                        logger.exception('Error while handling llm_stream_error via helper')
+                    return ('cancelled', None)
+
                 if self.active_run_id is None and hasattr(run_event, 'run_id'):
                     self.active_run_id = run_event.run_id
 
@@ -359,10 +416,13 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                         )
                         confirmation_response = await self.confirmation_handler(execution)
 
+                        logger.warning(f"Confirmation response {confirmation_response}")
+
                         # Handle different confirmation responses
                         if confirmation_response.choice.lower() == "yes":
+                            logger.warning(f"Tool Confirmed")
                             tool.confirmed = True
-                        elif confirmation_response.choice.lower() == "edit":
+                        elif confirmation_response.choice.lower() == "modify":
                             # User edited the command - update tool args with modified command
                             if confirmation_response.modified_command:
                                 tool.tool_args["command"] = confirmation_response.modified_command
@@ -380,9 +440,50 @@ Don't prompt the user before running tools, tools will ask user for confirmation
                             tool.confirmed = False
                     # replace stream with continuation stream
                     return ('continue', run_event.tools)
+            
             return ('done', None)
 
         # main persistent loop
+        # Expose a small helper to handle streaming errors in a centralized way
+        async def _handle_llm_stream_error_local(err_event: dict, status_q: asyncio.Queue):
+            """Local helper to enqueue friendly CLI message and cancel active run."""
+            try:
+                msg = err_event.get('message', 'LLM stream error') if isinstance(err_event, dict) else str(err_event)
+                ex_type = err_event.get('exception_type', '') if isinstance(err_event, dict) else ''
+
+                friendly = {
+                    'type': 'llm_stream_error',
+                    'title': 'LLM streaming error',
+                    'message': "The LLM streaming connection failed and the run was cancelled. You can retry.",
+                    'detail': msg,
+                    'exception_type': ex_type,
+                }
+
+                try:
+                    # Try async put first
+                    await status_q.put(friendly)
+                except Exception:
+                    try:
+                        status_q.put_nowait(friendly)
+                    except Exception:
+                        logger.debug('Failed to enqueue friendly llm_stream_error status')
+
+                # Attempt to cancel via agent api
+                try:
+                    if getattr(self, 'active_run_id', None):
+                        try:
+                            self.agent.cancel_run(self.active_run_id)
+                        except Exception:
+                            logger.exception('Failed to cancel agent run via agent.cancel_run')
+                except Exception:
+                    logger.exception('Exception while attempting to cancel run in stream error handler')
+
+            except Exception:
+                logger.exception('Unexpected error in _handle_llm_stream_error_local')
+
+        # Attach the helper to self for use by nested loop handler
+        self._handle_llm_stream_error = _handle_llm_stream_error_local
+
         run_stream = self.agent.arun(task, stream=True, user_id=user_id)
         while True:
             result = await process_stream(run_stream)

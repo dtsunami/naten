@@ -21,6 +21,7 @@ import tiktoken
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -601,6 +602,156 @@ class ModelInterceptor:
         except Exception as e:
             logger.error(f"❌ Model interceptor error: {e}", exc_info=True)
 
+    def set_on_llm_call(self, callback: callable):
+        """Set a callback to be invoked after an LLM call completes.
+
+        The callback will be called with a single payload dict containing:
+            {
+                'type': 'llm_call',
+                'model_type': ...,
+                'input_tokens': int,
+                'output_tokens': int,
+                'total_tokens': int,
+                'breakdown': {...}
+            }
+        """
+        try:
+            self.on_llm_call = callback
+        except Exception:
+            logger.exception('Failed to set on_llm_call callback')
+
+    def _extract_text_from_result(self, result: Any) -> str:
+        """Try to robustly extract text content from various model result shapes."""
+        try:
+            if result is None:
+                return ''
+            # If it's a simple string
+            if isinstance(result, str):
+                return result
+            # If it's a dict-like
+            if isinstance(result, dict):
+                # Common places: 'content', 'text', 'message', 'choices'
+                if 'content' in result and isinstance(result['content'], str):
+                    return result['content']
+                if 'text' in result and isinstance(result['text'], str):
+                    return result['text']
+                if 'message' in result and isinstance(result['message'], str):
+                    return result['message']
+                # OpenAI-like choices
+                if 'choices' in result and isinstance(result['choices'], list):
+                    parts = []
+                    for c in result['choices']:
+                        if isinstance(c, dict):
+                            if 'text' in c and isinstance(c['text'], str):
+                                parts.append(c['text'])
+                            elif 'message' in c and isinstance(c['message'], dict):
+                                parts.append(c['message'].get('content',''))
+                    return '\n'.join(parts)
+                # Fallback: stringify
+                return str(result)
+            # If it's an object with common attributes
+            text = ''
+            for attr in ('content', 'text', 'message'):
+                if hasattr(result, attr):
+                    val = getattr(result, attr)
+                    if isinstance(val, str):
+                        return val
+                    if isinstance(val, dict) and 'content' in val:
+                        return val['content']
+            # If it has model_dump or to_dict
+            if hasattr(result, 'model_dump'):
+                d = result.model_dump()
+                return self._extract_text_from_result(d)
+            if hasattr(result, 'to_dict'):
+                d = result.to_dict()
+                return self._extract_text_from_result(d)
+            # Fallback to str()
+            return str(result)
+        except Exception:
+            logger.exception('Failed to extract text from model result')
+            try:
+                return str(result)
+            except Exception:
+                return ''
+
+    def _finalize_call(self, output_text: Any = None, output_tokens: Optional[int] = None):
+        """Finalize statistics and optionally emit a llm_call event via callback."""
+        try:
+            # Determine output_tokens if not provided
+            if output_tokens is None:
+                if output_text is None:
+                    output_tokens = 0
+                else:
+                    text = output_text if isinstance(output_text, str) else self._extract_text_from_result(output_text)
+                    output_tokens = len(self.encoding.encode(text)) if text else 0
+
+            # Update internal counters
+            self.stats['total_output_tokens'] += output_tokens
+
+            # Update tracker if available
+            if self.stats_tracker:
+                # Use last_breakdown from self.stats which was set in _log_messages
+                breakdown = self.stats.get('last_breakdown', {}) or {}
+                total_input = breakdown.get('total_tokens', 0)
+                try:
+                    self.stats_tracker.record_call(
+                        model_type=self.model_type,
+                        total_tokens=total_input,
+                        breakdown=breakdown,
+                        output_tokens=output_tokens
+                    )
+                except Exception:
+                    logger.exception('Failed to record call to model_stats_tracker')
+
+            # Emit callback to any registered listener
+            if getattr(self, 'on_llm_call', None):
+                try:
+                    breakdown = self.stats.get('last_breakdown', {}) or {}
+                    payload = {
+                        'type': 'llm_call',
+                        'model_type': self.model_type,
+                        'input_tokens': breakdown.get('total_tokens', 0),
+                        'output_tokens': output_tokens,
+                        'total_tokens': breakdown.get('total_tokens', 0) + output_tokens,
+                        'tokens': breakdown.get('total_tokens', 0) + output_tokens,
+                        'breakdown': breakdown,
+                    }
+                    # Emit debug trace to a JSONL file for offline inspection
+                    try:
+<<<<<<< HEAD
+                        debug_path = Path.cwd() / '.da/code_context_debug.json'
+=======
+                        debug_path = Path.cwd() / '.da_code_context_debug.jsonl'
+>>>>>>> a6e25eb90a8e4f8675b0e0857b63d845e3aaa123
+                        with open(debug_path, 'a', encoding='utf-8') as _df:
+                            _df.write(json.dumps({
+                                'ts': datetime.utcnow().isoformat() + 'Z',
+                                'model_type': payload.get('model_type'),
+                                'input_tokens': payload.get('input_tokens'),
+                                'output_tokens': payload.get('output_tokens'),
+                                'total_tokens': payload.get('total_tokens'),
+                                'breakdown': payload.get('breakdown')
+                            }, default=str) + '\n')
+                        logger.debug(f"🔍 ContextTelemetry: wrote llm_call payload to {str(debug_path)}")
+                    except Exception:
+                        logger.exception('Failed to write context telemetry debug file')
+
+                    try:
+                        # Prefer sync call if possible
+                        logger.debug(f"🔔 ContextTelemetry: invoking on_llm_call for model_type={self.model_type} tokens={payload.get('total_tokens')}")
+                        self.on_llm_call(payload)
+                    except Exception:
+                        # If sync invocation fails, try scheduling it
+                        try:
+                            asyncio.get_event_loop().call_soon_threadsafe(lambda: self.on_llm_call(payload))
+                        except Exception:
+                            logger.exception('Failed to invoke on_llm_call callback')
+                except Exception:
+                    logger.exception('Error while building/invoking on_llm_call payload')
+
+        except Exception:
+            logger.exception('Failed during _finalize_call')
+
     def response(self, messages: List[Any], **kwargs) -> Any:
         """Intercept synchronous response call with graceful rate-limit retries.
 
@@ -621,6 +772,16 @@ class ModelInterceptor:
                     logger.info(f"📤 Sending {len(messages)} messages to actual LLM model...")
                     result = self.model.response(messages, **kwargs)
                     logger.debug(f"✅ LLM call completed successfully\n")
+
+                    # Compute output tokens and finalize call
+                    out_text = None
+                    try:
+                        out_text = self._extract_text_from_result(result)
+                    except Exception:
+                        out_text = None
+                    out_tokens = len(self.encoding.encode(out_text)) if out_text else 0
+                    self._finalize_call(output_text=out_text, output_tokens=out_tokens)
+
                     return result
                 except Exception as e:
                     is_rate, retry_after = _is_rate_limit_error(e)
@@ -659,6 +820,16 @@ class ModelInterceptor:
                 logger.info(f"📤 Sending {len(messages)} messages to actual LLM model (async)...")
                 result = await self.model.aresponse(messages, **kwargs)
                 logger.debug(f"✅ Async LLM call completed successfully\n")
+
+                # Compute output tokens and finalize call
+                out_text = None
+                try:
+                    out_text = self._extract_text_from_result(result)
+                except Exception:
+                    out_text = None
+                out_tokens = len(self.encoding.encode(out_text)) if out_text else 0
+                self._finalize_call(output_text=out_text, output_tokens=out_tokens)
+
                 return result
             except Exception as e:
                 is_rate, retry_after = _is_rate_limit_error(e)
@@ -700,9 +871,31 @@ class ModelInterceptor:
                 # Call original model and stream results
                 logger.info(f"📤 Starting stream: {len(messages)} messages to LLM...")
 
-                # Stream chunks from the underlying model
+                # Stream chunks from the underlying model and collect text for final accounting
+                collected = []
                 async for chunk in self.model.aresponse_stream(messages, **kwargs):
+                    # Yield chunk immediately to caller
+                    try:
+                        # Attempt to extract delta/content for counting
+                        if isinstance(chunk, dict):
+                            maybe = chunk.get('content') or chunk.get('delta') or chunk.get('text')
+                            if maybe:
+                                collected.append(str(maybe))
+                        elif isinstance(chunk, str):
+                            collected.append(chunk)
+                    except Exception:
+                        pass
                     yield chunk
+
+                # After streaming completes, compute output tokens from collected text
+                try:
+                    full_text = ''.join(collected)
+                    out_tokens = len(self.encoding.encode(full_text)) if full_text else 0
+                except Exception:
+                    out_tokens = 0
+
+                # Finalize call with output token accounting
+                self._finalize_call(output_text=full_text, output_tokens=out_tokens)
 
                 logger.debug(f"✅ Streaming LLM call completed\n")
                 return
@@ -710,19 +903,29 @@ class ModelInterceptor:
             except Exception as e:
                 is_rate, retry_after = _is_rate_limit_error(e)
                 attempt += 1
-                if not is_rate or attempt > max_retries:
-                    logger.error(f"❌ Error in streaming interceptor (attempt {attempt}) - not retrying: {e}", exc_info=True)
-                    raise
+                # If it's a rate limit and we have retries left, backoff and retry
+                if is_rate and attempt <= max_retries:
+                    if retry_after:
+                        sleep_for = float(retry_after)
+                    else:
+                        sleep_for = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                    logger.warning(f"⚠️  Rate limit detected during stream. Retrying in {sleep_for:.2f}s (attempt {attempt}/{max_retries})")
+                    await asyncio.sleep(sleep_for)
+                    # retry the stream loop
+                    continue
 
-                # Compute sleep: prefer Retry-After if provided, else exponential backoff with jitter
-                if retry_after:
-                    sleep_for = float(retry_after)
-                else:
-                    sleep_for = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-
-                logger.warning(f"⚠️  Rate limit detected during stream. Retrying in {sleep_for:.2f}s (attempt {attempt}/{max_retries})")
-                await asyncio.sleep(sleep_for)
-                # retry the stream loop
+                # Non-retryable error or max retries exceeded: report error as a stream event and close the stream
+                try:
+                    logger.error(f"❌ Error in streaming interceptor (attempt {attempt}) - reporting stream error and closing stream: {e}", exc_info=True)
+                    # Yield a structured error event so callers can handle it instead of receiving an exception
+                    yield {
+                        'type': 'llm_stream_error',
+                        'message': str(e),
+                        'exception_type': e.__class__.__name__,
+                    }
+                except Exception:
+                    logger.error("❌ Failed while yielding llm_stream_error event", exc_info=True)
+                return
 
     @property
     def __class__(self):
@@ -788,7 +991,8 @@ def wrap_model_with_interceptor(
     model,
     max_tokens: int = 128000,
     model_type: str = 'main',
-    stats_tracker: Optional[ModelStatsTracker] = None
+    stats_tracker: Optional[ModelStatsTracker] = None,
+    on_llm_call: Optional[callable] = None
 ):
     """
     Wrap an Agno model with interceptor to log messages.
@@ -802,12 +1006,19 @@ def wrap_model_with_interceptor(
     Returns:
         Wrapped model that logs messages before each LLM call
     """
-    return ModelInterceptor(
+    mi = ModelInterceptor(
         model,
         max_tokens=max_tokens,
         model_type=model_type,
         stats_tracker=stats_tracker
     )
+    # Optionally wire an on_llm_call callback immediately to avoid race window
+    if on_llm_call:
+        try:
+            mi.set_on_llm_call(on_llm_call)
+        except Exception:
+            logger.exception('Failed to set on_llm_call during wrap')
+    return mi
 
 
 # ============================================================================
@@ -1127,14 +1338,159 @@ class ContextManager:
         stats = get_interceptor_stats(self.agent)
         breakdown = stats.last_breakdown if stats and stats.last_breakdown else None
 
-        # If no actual data, return empty
+        # If no actual data, try to fetch memories/history from agent.agent or fall back to estimates
         if not breakdown:
-            return {
-                'components': [],
-                'total_tokens': 0,
-                'max_tokens': max_tokens,
-                'usage_pct': 0
-            }
+            try:
+                components = []
+                # Attempt to use agent-provided helpers (agent.agent.get_user_memories / get_chat_history)
+                agent_obj = getattr(self.agent, 'agent', None)
+
+                memories_tokens = 0
+                history_tokens = 0
+                system_tokens = 0
+                tool_tokens = 0
+
+                # 1) System prompt tokens (estimate)
+                try:
+                    system_text = getattr(self.agent, 'system_message', '') or ''
+                    system_tokens = estimator.count_tokens(system_text) if system_text else 0
+                except Exception:
+                    system_tokens = 0
+
+                # 2) Try to get memories and history from the underlying agent API
+                try:
+                    if agent_obj is not None:
+                        # get_user_memories may return a list or dict-like structure
+                        if hasattr(agent_obj, 'get_user_memories'):
+                            try:
+                                mems = agent_obj.get_user_memories()
+                                logger.debug(f"ContextTelemetry: get_user_memories returned type={type(mems)}")
+                                if isinstance(mems, list):
+                                    memories_tokens = estimator.estimate_user_memory_tokens(len(mems))
+                                elif isinstance(mems, dict):
+                                    # try common shapes
+                                    lst = mems.get('memories') or mems.get('items') or []
+                                    logger.debug(f"ContextTelemetry: get_user_memories dict keys={list(mems.keys())}")
+                                    if isinstance(lst, list):
+                                        memories_tokens = estimator.estimate_user_memory_tokens(len(lst))
+                            except Exception:
+                                logger.exception('get_user_memories failed')
+                                logger.debug('get_user_memories failed', exc_info=True)
+
+                        # get_chat_history may return a list of turns
+                        if hasattr(agent_obj, 'get_chat_history'):
+                            try:
+                                hist = agent_obj.get_chat_history()
+                                logger.debug(f"ContextTelemetry: get_chat_history returned type={type(hist)}")
+                                if isinstance(hist, list):
+                                    # hist may be list of messages or runs; estimate by runs
+                                    history_tokens = estimator.estimate_chat_history_tokens(len(hist))
+                                elif isinstance(hist, dict):
+                                    runs = hist.get('runs') or hist.get('messages') or []
+                                    logger.debug(f"ContextTelemetry: get_chat_history dict keys={list(hist.keys())}")
+                                    if isinstance(runs, list):
+                                        history_tokens = estimator.estimate_chat_history_tokens(len(runs))
+                            except Exception:
+                                logger.exception('get_chat_history failed')
+
+                except Exception:
+                    logger.debug('Agent helpers not available or failed', exc_info=True)
+
+                # 3) Tool tokens estimate
+                try:
+                    tool_tokens = self.estimate_tool_tokens() if hasattr(self, 'estimate_tool_tokens') else estimator.estimate_tool_schema_tokens(0)
+                except Exception:
+                    tool_tokens = 0
+
+                # 4) Fallback to conservative estimates if nothing returned
+                if memories_tokens == 0:
+                    try:
+                        num_memories = getattr(self.agent, 'num_memories', 0) or 0
+                        memories_tokens = estimator.estimate_user_memory_tokens(num_memories)
+                    except Exception:
+                        memories_tokens = 0
+
+                if history_tokens == 0:
+                    try:
+                        num_history_runs = getattr(self.agent, 'num_history_runs', 5) or 5
+                        history_tokens = estimator.estimate_chat_history_tokens(num_history_runs)
+                    except Exception:
+                        history_tokens = 0
+
+                # Build components list with source markers
+                if system_tokens > 0:
+                    components.append({
+                        'id': 'system',
+                        'name': 'System Prompt',
+                        'tokens': system_tokens,
+                        'type': 'system',
+                        'description': 'System message (estimated)',
+                        'actions': ['view', 'edit'],
+                        'source': 'agent'
+                    })
+
+                if history_tokens > 0:
+                    components.append({
+                        'id': 'history',
+                        'name': 'Chat History',
+                        'tokens': history_tokens,
+                        'type': 'history',
+                        'description': f'Estimated chat history tokens',
+                        'actions': ['clear', 'reduce'],
+                        'source': 'agent'
+                    })
+
+                if memories_tokens > 0:
+                    components.append({
+                        'id': 'memories',
+                        'name': 'User Memories',
+                        'tokens': memories_tokens,
+                        'type': 'memories',
+                        'description': 'Estimated stored user memories',
+                        'actions': ['view', 'clear'],
+                        'source': 'agent'
+                    })
+
+                if tool_tokens > 0:
+                    components.append({
+                        'id': 'tools',
+                        'name': 'Tool Schemas',
+                        'tokens': tool_tokens,
+                        'type': 'tools',
+                        'description': 'Estimated tool schema tokens',
+                        'actions': ['view', 'disable'],
+                        'source': 'local_estimate'
+                    })
+
+                total_tokens = sum(c['tokens'] for c in components)
+                if total_tokens == 0:
+                    return {
+                        'components': [],
+                        'total_tokens': 0,
+                        'max_tokens': max_tokens,
+                        'usage_pct': 0
+                    }
+
+                for component in components:
+                    component['percentage'] = (component['tokens'] / total_tokens * 100) if total_tokens > 0 else 0
+
+                components.sort(key=lambda x: x['tokens'], reverse=True)
+
+                return {
+                    'components': components,
+                    'total_tokens': total_tokens,
+                    'max_tokens': max_tokens,
+                    'usage_pct': (total_tokens / max_tokens * 100) if max_tokens > 0 else 0
+                }
+
+            except Exception as e:
+                logger.debug('Failed to build estimated breakdown: %s', e, exc_info=True)
+                return {
+                    'components': [],
+                    'total_tokens': 0,
+                    'max_tokens': max_tokens,
+                    'usage_pct': 0
+                }
 
         # Use ACTUAL tokens from last call, not estimates
         # 1. System Prompt

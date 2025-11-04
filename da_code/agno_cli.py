@@ -312,6 +312,69 @@ async def async_main(session_id: str = None):
             textual_app_active['active'] = False  # Re-enable paste handlers
             textual_overlay_active[0] = False  # Re-enable escape/arrow keys
 
+        # Normalize/validate confirmation response to a ConfirmationResponse model so the agent
+        # can reliably inspect attributes. The Textual app may return different types (dict,
+        # pydantic model, or simple namespace) depending on how it was exited.
+        try:
+            if response is None:
+                logger.debug("Confirmation dialog returned None - coercing to REPROMPT")
+                response = ConfirmationResponse(
+                    choice=UserResponse.REPROMPT.value,
+                    modified_command=None,
+                    reprompt_message="User closed dialog without selecting"
+                )
+            elif isinstance(response, dict):
+                # Coerce from dict keys
+                choice = response.get('choice') or response.get('user_choice') or response.get('result')
+                modified = response.get('modified_command') or response.get('modified')
+                reprompt_msg = response.get('reprompt_message') or response.get('reprompt')
+                try:
+                    response = ConfirmationResponse(
+                        choice=str(choice) if choice is not None else UserResponse.REPROMPT.value,
+                        modified_command=modified,
+                        reprompt_message=reprompt_msg
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to coerce confirmation dict -> model: {e}; response={response}")
+                    response = ConfirmationResponse(
+                        choice=UserResponse.REPROMPT.value,
+                        modified_command=None,
+                        reprompt_message=str(response)
+                    )
+            elif not isinstance(response, ConfirmationResponse):
+                # Try to coerce from object with attributes or a pydantic model
+                try:
+                    if hasattr(response, 'dict'):
+                        d = response.dict()
+                        response = ConfirmationResponse(**d)
+                    else:
+                        response = ConfirmationResponse(
+                            choice=getattr(response, 'choice', UserResponse.REPROMPT.value),
+                            modified_command=getattr(response, 'modified_command', None),
+                            reprompt_message=getattr(response, 'reprompt_message', None)
+                        )
+                except Exception as e:
+                    logger.exception(f"Failed to normalize confirmation response: {e}")
+                    response = ConfirmationResponse(
+                        choice=UserResponse.REPROMPT.value,
+                        modified_command=None,
+                        reprompt_message=str(response)
+                    )
+        except Exception as e:
+            logger.exception(f"Unexpected error while normalizing confirmation response: {e}")
+            response = ConfirmationResponse(
+                choice=UserResponse.REPROMPT.value,
+                modified_command=None,
+                reprompt_message="Normalization error"
+            )
+
+        # Ensure reprompt responses include a message
+        try:
+            if isinstance(response, ConfirmationResponse) and response.choice.lower() == UserResponse.REPROMPT.value and not response.reprompt_message:
+                response.reprompt_message = "User rejected without providing a message"
+        except Exception:
+            pass
+
         # Resume status interface for continued execution, preserving metrics.
         # Use the boolean return value to decide whether we need to apply an
         # alternate path. Avoid calling start_execution() because that resets
@@ -519,14 +582,14 @@ async def async_main(session_id: str = None):
     # Create key bindings for shell mode toggle and completion
     bindings = KeyBindings()
 
-    # Use '#' (Shift+3) to toggle shell/agent mode and provide shell history navigation
+    # Use Ctrl+S to toggle shell/agent mode and provide shell history navigation
     shell_history_index = [None]  # Mutable index for navigating shell_command_history
 
     # Cancellation flag for agent interrupt
     cancel_agent = [False]  # Mutable flag for escape key interrupt
 
     # Track last # press for double-press detection
-    last_hash_press = [0.0]  # Mutable timestamp
+    last_keypress_ts = [0.0]  # Mutable timestamp
 
     # Track when Textual overlays are active to prevent key leakage
     textual_overlay_active = [False]  # Mutable flag
@@ -608,7 +671,7 @@ async def async_main(session_id: str = None):
             logger.error(f"handle_paste exception: {e}", exc_info=True)
             raise
 
-    @bindings.add('$')  # '$' (Shift+4) - moved from #
+    @bindings.add('c-s')  # Ctrl+S - Toggle shell mode
     def _(event):
         """Toggle shell mode with '$' key (Shift+4)."""
         shell_manager.toggle_shell_mode()
@@ -715,7 +778,7 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
-    @bindings.add('c-v', filter=Condition(lambda: not textual_app_active.get('active', False)))  # Ctrl+V
+    @bindings.add('c-v', filter=Condition(lambda: not textual_app_active.get('active', False)))  # Ctrl+V (paste)
     def _(event):
         """Handle Ctrl+V paste from clipboard (desktop terminals).
 
@@ -774,7 +837,7 @@ async def async_main(session_id: str = None):
             except Exception:
                 pass
 
-    @bindings.add('#')  # '#' (Shift+3) - Context window breakdown
+    @bindings.add('c-f')  # Ctrl+F - Context window breakdown (single press) or detailed toolkit breakdown (double press)
     def _(event):
         """Show clean progress bar breakdown of context window usage (single press) or detailed toolkit breakdown (double press)."""
         try:
@@ -782,16 +845,7 @@ async def async_main(session_id: str = None):
             from rich.panel import Panel
             from .context_telemetry import get_interceptor_stats, ContextManager, get_multi_model_stats
 
-            # Check for double-press (within 500ms)
-            now = time.time()
-            is_double_press = (now - last_hash_press[0]) < 0.5
-            last_hash_press[0] = now
 
-            if is_double_press:
-                # Show detailed full context breakdown with management actions
-                from .context_overlay_toolkit_detail import show_detailed_context_breakdown
-                show_detailed_context_breakdown(agent, console)
-                return
 
             # Get ACTUAL stats from model interceptor
             stats = get_interceptor_stats(agent)
@@ -906,7 +960,7 @@ async def async_main(session_id: str = None):
             except Exception as ce:
                 logger.debug(f"Cleanup after context manager failed: {ce}")
 
-    @bindings.add('~')  # '~' - Context management (delete/summarize)
+    @bindings.add('c-g')  # Ctrl+g - Context management (delete/summarize)
     def _(event):
         """Manage context components - delete or summarize to free tokens."""
         try:
@@ -1310,12 +1364,12 @@ async def async_main(session_id: str = None):
         except Exception as e:
             logger.error(f"perform_restore_direct failed: {e}", exc_info=True)
 
-    @bindings.add('%')  # Shift+5 - Restore file via Textual overlay
+    @bindings.add('c-r')  # Ctrl+R - Restore file via Textual overlay
     def _(event):
         """Show restore overlay and perform file restore."""
         try:
             import asyncio
-            from da_code.textual_restore import show_combined_restore_menu
+            from da_code.ux import show_combined_restore_menu
 
             async def _run_restore_with_cleanup():
                 try:
@@ -2427,10 +2481,10 @@ async def async_main(session_id: str = None):
                     console.print("  • [cyan]Space[/cyan] - Stop recording (or auto-stops on silence)")
                     console.print("\n[bold]Agent Mode - Left-hand Ergonomic Triggers:[/bold]")
                     console.print("  • [cyan]![/cyan] - AI nudge phrases: '!be<Tab>' → 'be careful and check your work' 💡")
-                    console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁")
-                    console.print("  • [cyan]#[/cyan] - Context window breakdown (Shift+3) - Shows actual LLM token usage 📊")
-                    console.print("  • [cyan]$[/cyan] - Toggle shell mode (Shift+4)")
-                    console.print("  • [cyan]~[/cyan] - Context manager - Delete or summarize components to free tokens 🗑️")
+                    console.print("  • [cyan]@[/cyan] - File paths: '@src/<Tab>' → navigate directories 📁 (select a file to insert '? ' at the end)")
+                    console.print("  • [cyan]Ctrl+F[/cyan] - Context window breakdown - Shows actual LLM token usage 📊")
+                    console.print("  • [cyan]Ctrl+S[/cyan] - Toggle shell mode (Ctrl+S)")
+                    console.print("  • [cyan]Ctrl+G[/cyan] - Context manager - Delete or summarize components to free tokens 🗑️")
                     console.print("\n[bold]Clipboard:[/bold]")
                     console.print("  • [cyan]Ctrl+V or terminal paste[/cyan] - Paste shows '[[paste#N: X lines]]' placeholder, actual content sent to agent")
                     console.print("\n[bold]Tip:[/bold] Use [cyan]glob[/cyan] and [cyan]grep[/cyan] to prepare context, then ask agent about results!")
